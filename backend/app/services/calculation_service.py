@@ -24,7 +24,7 @@ class CalculationService:
         role_breakdown = {}
         total_labor_hours = 0
         total_labor_cost = 0
-        
+
         for role in roles.values():
             role_hours = self._calculate_role_hours(role, modules, input_data)
             if role_hours > 0:
@@ -61,9 +61,15 @@ class CalculationService:
         # Apply business rules
         risk_reserve = total_labor_cost * self.rules.risk_reserve_percentage
         overhead_cost = total_labor_cost * (self.rules.overhead_multiplier - 1)
-        
+
+        # Additional cost components
+        odc_total = sum(float(item.get("price", 0)) for item in (input_data.odc_items or []))
+        fixed_price_total = sum(float(item.get("price", 0)) for item in (input_data.fixed_price_items or []))
+        hardware_subtotal = float(input_data.hardware_subtotal or 0)
+        warranty_cost = float(input_data.warranty_cost or 0)
+
         # Add prime contractor margin if applicable
-        subtotal = total_labor_cost + risk_reserve + overhead_cost
+        subtotal = total_labor_cost + risk_reserve + overhead_cost + odc_total + fixed_price_total + hardware_subtotal + warranty_cost
         if input_data.is_prime_contractor:
             margin = subtotal * self.rules.prime_contractor_margin
             total_cost = subtotal + margin
@@ -80,7 +86,15 @@ class CalculationService:
             total_cost=total_cost,
             breakdown_by_module=module_breakdown,
             breakdown_by_role=role_breakdown,
-            effective_hourly_rate=effective_hourly_rate
+            effective_hourly_rate=effective_hourly_rate,
+            additional_costs={
+                "odc_total": odc_total,
+                "fixed_price_total": fixed_price_total,
+                "hardware_subtotal": hardware_subtotal,
+                "warranty_cost": warranty_cost,
+                "sites": input_data.sites,
+                "overtime": input_data.overtime,
+            }
         )
     
     def _calculate_role_hours(self, role: Role, modules: List[Module], input_data: EstimationInput) -> float:
@@ -124,8 +138,11 @@ class CalculationService:
         # Apply clearance multiplier
         clearance_multiplier = role.clearance_multiplier.get(input_data.clearance_level, 1.0)
         
+        # Overtime premium (if applicable) as a rate multiplier
+        overtime_multiplier = 1.2 if input_data.overtime else 1.0
+
         # Calculate effective rate
-        effective_rate = base_rate * geo_multiplier * clearance_multiplier
+        effective_rate = base_rate * geo_multiplier * clearance_multiplier * overtime_multiplier
         
         return effective_rate
     
@@ -134,9 +151,12 @@ class CalculationService:
         base_multiplier = self.complexity_matrix.base_multiplier[input_data.complexity]
         env_multiplier = self.complexity_matrix.environment_factor.get(input_data.environment, 1.0)
         integration_multiplier = self.complexity_matrix.integration_complexity.get(input_data.integration_level, 1.0)
+        # Each additional site adds 15% to labor effort by default
+        sites = max(1, int(input_data.sites or 1))
+        sites_multiplier = 1.0 + 0.15 * (sites - 1)
         
         # Combined multiplier (multiplicative)
-        return base_multiplier * env_multiplier * integration_multiplier
+        return base_multiplier * env_multiplier * integration_multiplier * sites_multiplier
     
     def validate_estimate(self, input_data: EstimationInput) -> List[str]:
         """Validate estimation input and return any warnings/errors"""

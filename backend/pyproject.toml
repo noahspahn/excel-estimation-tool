@@ -23,6 +23,7 @@ dependencies = [
     "scipy>=1.11.4",
     "reportlab>=4.0.7",
     "python-dotenv>=1.0.0",
+    "openai>=1.40.0",
 ]
 
 [project.optional-dependencies]

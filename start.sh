@@ -45,8 +45,12 @@ fi
 
 echo "   📦 Installing/updating backend dependencies..."
 python -m pip install -q --upgrade pip 2>/dev/null || echo "   ⚠️  Pip upgrade skipped"
+# Core deps
 pip install -q fastapi uvicorn python-dotenv sqlalchemy pydantic
+# PDF/reporting (optional)
 pip install -q reportlab 2>/dev/null && echo "   ✅ ReportLab installed" || echo "   ⚠️  ReportLab not installed"
+# AI SDK for narrative generation
+pip install -q "openai>=1.0.0" 2>/dev/null && echo "   ✅ OpenAI SDK installed" || echo "   ⚠️  OpenAI SDK not installed"
 
 if [ -f "alembic.ini" ] && command -v alembic &> /dev/null; then
     echo "   Running database migrations..."

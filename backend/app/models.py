@@ -84,6 +84,26 @@ class EstimationInput:
     clearance_level: str = "secret"
     is_prime_contractor: bool = True
     custom_role_overrides: Dict[str, float] = field(default_factory=dict)
+    # Extended inputs inspired by legacy INPUT sheet
+    project_name: Optional[str] = None
+    government_poc: Optional[str] = None
+    account_manager: Optional[str] = None
+    service_delivery_mgr: Optional[str] = None
+    service_delivery_exec: Optional[str] = None
+    site_location: Optional[str] = None
+    email: Optional[str] = None
+    fy: Optional[str] = None
+    rap_number: Optional[str] = None
+    psi_code: Optional[str] = None
+    additional_comments: Optional[str] = None
+    sites: int = 1
+    overtime: bool = False
+    # Other costs and fixed-price items (simple shape: {description, price})
+    odc_items: List[Dict[str, Any]] = field(default_factory=list)
+    fixed_price_items: List[Dict[str, Any]] = field(default_factory=list)
+    hardware_subtotal: float = 0.0
+    warranty_months: int = 0
+    warranty_cost: float = 0.0
 
 @dataclass
 class EstimationResult:
@@ -95,3 +115,5 @@ class EstimationResult:
     breakdown_by_module: Dict[str, Any]
     breakdown_by_role: Dict[str, Any]
     effective_hourly_rate: float
+    # Additional cost components
+    additional_costs: Dict[str, Any] = field(default_factory=dict)

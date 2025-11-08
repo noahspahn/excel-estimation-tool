@@ -1,0 +1,84 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: App Runner service for the estimation backend using an ECR image.
+
+Parameters:
+  ServiceName:
+    Type: String
+    Default: estimation-backend
+  EcrImageUri:
+    Type: String
+    Description: Full ECR image URI incl. tag, e.g., 123.dkr.ecr.us-east-1.amazonaws.com/repo:tag
+  AllowedOrigins:
+    Type: String
+    Default: '*'
+  OpenAISecretArn:
+    Type: String
+    Default: ''
+    Description: Optional Secrets Manager ARN for OPENAI_API_KEY. Leave empty to skip.
+  Cpu:
+    Type: String
+    Default: '0.5 vCPU'
+  Memory:
+    Type: String
+    Default: '1 GB'
+
+Conditions:
+  HasOpenAISecret: !Not [!Equals [!Ref OpenAISecretArn, '']]
+
+Resources:
+  EcrAccessRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${ServiceName}-apprunner-ecr-access'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: build.apprunner.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: AppRunnerECRAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ecr:GetAuthorizationToken
+                  - ecr:BatchGetImage
+                  - ecr:GetDownloadUrlForLayer
+                  - ecr:DescribeImages
+                Resource: '*'
+
+  Service:
+    Type: AWS::AppRunner::Service
+    Properties:
+      ServiceName: !Ref ServiceName
+      SourceConfiguration:
+        ImageRepository:
+          ImageIdentifier: !Ref EcrImageUri
+          ImageRepositoryType: ECR
+          ImageConfiguration:
+            Port: '8000'
+            RuntimeEnvironmentVariables:
+              - Name: PYTHONUNBUFFERED
+                Value: '1'
+              - Name: ALLOWED_ORIGINS
+                Value: !Ref AllowedOrigins
+            RuntimeEnvironmentSecrets: !If
+              - HasOpenAISecret
+              - - Name: OPENAI_API_KEY
+                  Value: !Ref OpenAISecretArn
+              - !Ref AWS::NoValue
+        AuthenticationConfiguration:
+          AccessRoleArn: !GetAtt EcrAccessRole.Arn
+      InstanceConfiguration:
+        Cpu: !Ref Cpu
+        Memory: !Ref Memory
+
+Outputs:
+  ServiceArn:
+    Value: !Ref Service
+  ServiceUrl:
+    Value: !GetAtt Service.ServiceUrl
+
