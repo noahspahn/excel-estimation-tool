@@ -46,7 +46,7 @@ fi
 echo "   📦 Installing/updating backend dependencies..."
 python -m pip install -q --upgrade pip 2>/dev/null || echo "   ⚠️  Pip upgrade skipped"
 # Core deps
-pip install -q fastapi uvicorn python-dotenv sqlalchemy pydantic
+pip install -q fastapi uvicorn python-dotenv sqlalchemy pydantic psycopg2-binary python-multipart "python-jose[cryptography]"
 # PDF/reporting (optional)
 pip install -q reportlab 2>/dev/null && echo "   ✅ ReportLab installed" || echo "   ⚠️  ReportLab not installed"
 # AI SDK for narrative generation

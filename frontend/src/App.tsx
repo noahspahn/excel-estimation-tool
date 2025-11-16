@@ -1,6 +1,13 @@
-import React, { useState, useEffect } from 'react'
+import { useState, useEffect } from 'react'
 
-const API = (import.meta as any).env?.VITE_API_URL || 'http://localhost:8000'
+const rawApi = (import.meta as any).env?.VITE_API_URL || 'http://localhost:8000'
+const API = rawApi.replace(/\/+$/, '')
+
+const COGNITO_CLIENT_ID = (import.meta as any).env?.VITE_COGNITO_CLIENT_ID
+const COGNITO_REGION = (import.meta as any).env?.VITE_COGNITO_REGION
+const COGNITO_ENDPOINT = COGNITO_REGION
+  ? `https://cognito-idp.${COGNITO_REGION}.amazonaws.com/`
+  : null
 
 function App() {
   const [backendStatus, setBackendStatus] = useState('Checking...')
@@ -11,13 +18,35 @@ function App() {
   const [includeAI, setIncludeAI] = useState(false)
   const [tone, setTone] = useState('professional')
   const [loadingNarrative, setLoadingNarrative] = useState(false)
-  const [narrative, setNarrative] = useState<Record<string, string> | null>(null)
+  const [, setNarrative] = useState<Record<string, string> | null>(null)
 
   // Report preview state
   const [estimate, setEstimate] = useState<any | null>(null)
   const [previewLoading, setPreviewLoading] = useState(false)
   const [showPreview, setShowPreview] = useState(false)
   const [editableNarrative, setEditableNarrative] = useState<Record<string, string>>({})
+  const [readOnly, setReadOnly] = useState(false)
+  const [shareUrl, setShareUrl] = useState<string | null>(null)
+  const [sharePublicId, setSharePublicId] = useState<string | null>(null)
+  const [proposalId, setProposalId] = useState<string | null>(null)
+  const [prereqWarnings, setPrereqWarnings] = useState<string[]>([])
+  const [authEmail, setAuthEmail] = useState<string | null>(null)
+  const [authToken, setAuthToken] = useState<string | null>(null)
+  // const [authRequestToken, setAuthRequestToken] = useState<string | null>(null)
+  const [authChecked, setAuthChecked] = useState(false)
+  const [authMode, setAuthMode] = useState<'signin' | 'signup'>('signin')
+  const [loginEmail, setLoginEmail] = useState('')
+  const [loginPassword, setLoginPassword] = useState('')
+  const [loginError, setLoginError] = useState<string | null>(null)
+  const [loginBusy, setLoginBusy] = useState(false)
+  const [signupEmail, setSignupEmail] = useState('')
+  const [signupPassword, setSignupPassword] = useState('')
+  const [signupCode, setSignupCode] = useState('')
+  const [signupError, setSignupError] = useState<string | null>(null)
+  const [signupInfo, setSignupInfo] = useState<string | null>(null)
+  const [signupBusy, setSignupBusy] = useState(false)
+  const [awaitingVerification, setAwaitingVerification] = useState(false)
+  const isAuthenticated = !!authToken && !!authEmail
 
   // Extended input state (from Excel INPUT)
   const [projectName, setProjectName] = useState('')
@@ -51,16 +80,283 @@ function App() {
       .then(res => res.json())
       .then(data => setModules(data || []))
       .catch(err => console.error('Failed to fetch modules:', err))
+
+    // Load shared read-only proposal if ?share= param
+    const sp = new URLSearchParams(window.location.search)
+    const share = sp.get('share')
+    if (share) {
+      fetch(`${API}/api/v1/proposals/public/${share}`)
+        .then(res => {
+          if (!res.ok) throw new Error('Share link not found')
+          return res.json()
+        })
+        .then((data) => {
+          const payload = data?.payload || {}
+          const ei = payload.estimation_input || {}
+          setSelectedModules(ei.modules || [])
+          setComplexity(ei.complexity || 'M')
+          setProjectName(ei.project_name || '')
+          setGovernmentPOC(ei.government_poc || '')
+          setAccountManager(ei.account_manager || '')
+          setServiceDeliveryMgr(ei.service_delivery_mgr || '')
+          setServiceDeliveryExec(ei.service_delivery_exec || '')
+          setSiteLocation(ei.site_location || '')
+          setEmail(ei.email || '')
+          setFy(ei.fy || '')
+          setRapNumber(ei.rap_number || '')
+          setPsiCode(ei.psi_code || '')
+          setAdditionalComments(ei.additional_comments || '')
+          setSites(ei.sites || 1)
+          setOvertime(!!ei.overtime)
+          setOdcItems(ei.odc_items || [])
+          setFixedPriceItems(ei.fixed_price_items || [])
+          setHardwareSubtotal(ei.hardware_subtotal || 0)
+          setWarrantyMonths(ei.warranty_months || 0)
+          setWarrantyCost(ei.warranty_cost || 0)
+          setTone(payload.tone || 'professional')
+          const narr = payload.narrative_sections || {}
+          setNarrative(narr)
+          setEditableNarrative(narr)
+          setEstimate(payload.estimation_result || null)
+          setShowPreview(true)
+          setReadOnly(true)
+          setShareUrl(window.location.href)
+        })
+        .catch(err => {
+          console.error(err)
+          setReadOnly(false)
+        })
+    }
+  }, [])
+
+  useEffect(() => {
+    // Handle Cognito redirect with tokens in URL hash (#id_token=...)
+    const hash = window.location.hash.replace(/^#/, '')
+    if (hash) {
+      const params = new URLSearchParams(hash)
+      const idToken = params.get('id_token')
+      if (idToken) {
+        try {
+          const payloadRaw = idToken.split('.')[1] || ''
+          const padded = payloadRaw.replace(/-/g, '+').replace(/_/g, '/')
+          const jsonStr = atob(padded)
+          const payload = JSON.parse(jsonStr)
+          const email = typeof payload?.email === 'string' ? payload.email : null
+          localStorage.setItem('auth_token', idToken)
+          if (email) localStorage.setItem('auth_email', email)
+          setAuthToken(idToken)
+          setAuthEmail(email)
+        } catch (e) {
+          console.error('Failed to parse Cognito id_token', e)
+        }
+        // Clean hash from URL
+        window.history.replaceState(null, document.title, window.location.pathname + window.location.search)
+      }
+    }
+  }, [])
+
+  useEffect(() => {
+    const t = localStorage.getItem('auth_token')
+    const e = localStorage.getItem('auth_email')
+    if (t) setAuthToken(t)
+    if (e) setAuthEmail(e)
+    setAuthChecked(true)
   }, [])
 
   const toggleModule = (id: string) => {
+    if (readOnly) return
     setSelectedModules(prev => prev.includes(id) ? prev.filter(x => x !== id) : [...prev, id])
   }
+
+  const handleLogin = async () => {
+    setLoginError(null)
+    setSignupError(null)
+    setSignupInfo(null)
+    const email = loginEmail.trim()
+    if (!email || !loginPassword) {
+      setLoginError('Enter email and password')
+      return
+    }
+    if (!COGNITO_ENDPOINT || !COGNITO_CLIENT_ID) {
+      setLoginError('Auth not configured')
+      return
+    }
+    setLoginBusy(true)
+    try {
+      const res = await fetch(COGNITO_ENDPOINT, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/x-amz-json-1.1',
+          'X-Amz-Target': 'AWSCognitoIdentityProviderService.InitiateAuth',
+        },
+        body: JSON.stringify({
+          AuthFlow: 'USER_PASSWORD_AUTH',
+          ClientId: COGNITO_CLIENT_ID,
+          AuthParameters: {
+            USERNAME: email,
+            PASSWORD: loginPassword,
+          },
+        }),
+      })
+      const data: any = await res.json()
+      if (!res.ok) {
+        const msg = data?.message || data?.__type || 'Login failed'
+        setLoginError(msg)
+        return
+      }
+      const idToken: string | undefined = data?.AuthenticationResult?.IdToken
+      if (!idToken) {
+        setLoginError('No token returned')
+        return
+      }
+      try {
+        const payloadRaw = idToken.split('.')[1] || ''
+        const jsonStr = atob(payloadRaw.replace(/-/g, '+').replace(/_/g, '/'))
+        const payload = JSON.parse(jsonStr)
+        const emailClaim =
+          typeof payload?.email === 'string' ? payload.email : email
+        localStorage.setItem('auth_token', idToken)
+        if (emailClaim) localStorage.setItem('auth_email', emailClaim)
+        setAuthToken(idToken)
+        setAuthEmail(emailClaim)
+        setLoginPassword('')
+      } catch (e) {
+        console.error('Failed to parse Cognito id_token', e)
+        setLoginError('Login succeeded but token parsing failed')
+      }
+    } catch (err) {
+      console.error(err)
+      setLoginError('Network or server error')
+    } finally {
+      setLoginBusy(false)
+    }
+  }
+
+  const handleSignup = async () => {
+    setSignupError(null)
+    setSignupInfo(null)
+    const email = signupEmail.trim()
+    if (!email || !signupPassword) {
+      setSignupError('Enter email and password')
+      return
+    }
+    if (!email.includes('@')) {
+      setSignupError('Enter a valid email address')
+      return
+    }
+    if (!COGNITO_ENDPOINT || !COGNITO_CLIENT_ID) {
+      setSignupError('Auth not configured')
+      return
+    }
+    setSignupBusy(true)
+    try {
+      const res = await fetch(COGNITO_ENDPOINT, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/x-amz-json-1.1',
+          'X-Amz-Target': 'AWSCognitoIdentityProviderService.SignUp',
+        },
+        body: JSON.stringify({
+          ClientId: COGNITO_CLIENT_ID,
+          Username: email,
+          Password: signupPassword,
+          UserAttributes: [
+            { Name: 'email', Value: email },
+          ],
+        }),
+      })
+      const data: any = await res.json()
+      if (!res.ok) {
+        const msg = data?.message || data?.__type || 'Sign up failed'
+        setSignupError(msg)
+        return
+      }
+      setAwaitingVerification(true)
+      setSignupInfo('Check your email for a verification code, then enter it below.')
+    } catch (err) {
+      console.error(err)
+      setSignupError('Network or server error')
+    } finally {
+      setSignupBusy(false)
+    }
+  }
+
+  const handleConfirmSignup = async () => {
+    setSignupError(null)
+    if (!awaitingVerification) {
+      setSignupError('Request a verification code first')
+      return
+    }
+    const email = signupEmail.trim()
+    const code = signupCode.trim()
+    if (!email || !code) {
+      setSignupError('Enter email and verification code')
+      return
+    }
+    if (!COGNITO_ENDPOINT || !COGNITO_CLIENT_ID) {
+      setSignupError('Auth not configured')
+      return
+    }
+    setSignupBusy(true)
+    try {
+      const res = await fetch(COGNITO_ENDPOINT, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/x-amz-json-1.1',
+          'X-Amz-Target': 'AWSCognitoIdentityProviderService.ConfirmSignUp',
+        },
+        body: JSON.stringify({
+          ClientId: COGNITO_CLIENT_ID,
+          Username: email,
+          ConfirmationCode: code,
+        }),
+      })
+      const data: any = await res.json()
+      if (!res.ok) {
+        const msg = data?.message || data?.__type || 'Verification failed'
+        setSignupError(msg)
+        return
+      }
+      setSignupInfo('Account confirmed. You can now sign in.')
+      setSignupCode('')
+      setAwaitingVerification(false)
+      setAuthMode('signin')
+      setLoginEmail(email)
+      setLoginError(null)
+    } catch (err) {
+      console.error(err)
+      setSignupError('Network or server error')
+    } finally {
+      setSignupBusy(false)
+    }
+  }
+
+  // Recompute prerequisite warnings when selection or modules change
+  useEffect(() => {
+    const modMap: Record<string, any> = {}
+    modules.forEach(m => { modMap[m.id] = m })
+    const missing: string[] = []
+    selectedModules.forEach(mid => {
+      const m = modMap[mid]
+      if (m?.prerequisites?.length) {
+        m.prerequisites.forEach((p: string) => {
+          if (!selectedModules.includes(p)) {
+            const pName = modMap[p]?.name || p
+            missing.push(`${m.name} requires ${pName}`)
+          }
+        })
+      }
+    })
+    setPrereqWarnings(Array.from(new Set(missing)))
+  }, [selectedModules, modules])
 
   const downloadReport = async () => {
     if (selectedModules.length === 0) {
       alert('Please select at least one module.')
       return
+    }
+    if (prereqWarnings.length > 0) {
+      if (!confirm('Some prerequisites are missing. Continue anyway?')) return
     }
     setDownloading(true)
     try {
@@ -125,6 +421,10 @@ function App() {
       alert('Please select at least one module.')
       return
     }
+    if (prereqWarnings.length > 0) {
+      alert('Some prerequisites are missing. Please review module selection.')
+      return
+    }
     setLoadingNarrative(true)
     setNarrative(null)
     try {
@@ -161,6 +461,255 @@ function App() {
       alert(e?.message || 'Narrative generation failed (check OPENAI_API_KEY on backend).')
     } finally {
       setLoadingNarrative(false)
+    }
+  }
+
+  // Draft helpers
+  const buildDraft = () => ({
+    estimation_input: {
+      modules: selectedModules,
+      complexity,
+      environment: 'production',
+      integration_level: 'moderate_integration',
+      geography: 'dc_metro',
+      clearance_level: 'secret',
+      is_prime_contractor: true,
+      custom_role_overrides: {},
+      project_name: projectName,
+      government_poc: governmentPOC,
+      account_manager: accountManager,
+      service_delivery_mgr: serviceDeliveryMgr,
+      service_delivery_exec: serviceDeliveryExec,
+      site_location: siteLocation,
+      email,
+      fy,
+      rap_number: rapNumber,
+      psi_code: psiCode,
+      additional_comments: additionalComments,
+      sites,
+      overtime,
+      odc_items: odcItems,
+      fixed_price_items: fixedPriceItems,
+      hardware_subtotal: hardwareSubtotal,
+      warranty_months: warrantyMonths,
+      warranty_cost: warrantyCost,
+    },
+    narrative_sections: editableNarrative,
+    estimation_result: estimate,
+    tone,
+    ts: new Date().toISOString(),
+  })
+
+  const saveDraftLocal = () => {
+    const draft = buildDraft()
+    localStorage.setItem('estimation_draft', JSON.stringify(draft))
+    alert('Draft saved locally.')
+  }
+
+  const loadDraftLocal = () => {
+    const raw = localStorage.getItem('estimation_draft')
+    if (!raw) { alert('No local draft found'); return }
+    try {
+      const d = JSON.parse(raw)
+      const ei = d.estimation_input || {}
+      setSelectedModules(ei.modules || [])
+      setComplexity(ei.complexity || 'M')
+      setProjectName(ei.project_name || '')
+      setGovernmentPOC(ei.government_poc || '')
+      setAccountManager(ei.account_manager || '')
+      setServiceDeliveryMgr(ei.service_delivery_mgr || '')
+      setServiceDeliveryExec(ei.service_delivery_exec || '')
+      setSiteLocation(ei.site_location || '')
+      setEmail(ei.email || '')
+      setFy(ei.fy || '')
+      setRapNumber(ei.rap_number || '')
+      setPsiCode(ei.psi_code || '')
+      setAdditionalComments(ei.additional_comments || '')
+      setSites(ei.sites || 1)
+      setOvertime(!!ei.overtime)
+      setOdcItems(ei.odc_items || [])
+      setFixedPriceItems(ei.fixed_price_items || [])
+      setHardwareSubtotal(ei.hardware_subtotal || 0)
+      setWarrantyMonths(ei.warranty_months || 0)
+      setWarrantyCost(ei.warranty_cost || 0)
+      setTone(d.tone || 'professional')
+      const narr = d.narrative_sections || {}
+      setNarrative(narr)
+      setEditableNarrative(narr)
+      setEstimate(d.estimation_result || null)
+      setShowPreview(!!d.estimation_result)
+    } catch (e) {
+      alert('Failed to load draft')
+    }
+  }
+
+  const exportDraft = () => {
+    const draft = buildDraft()
+    const blob = new Blob([JSON.stringify(draft, null, 2)], { type: 'application/json' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    const ts = new Date().toISOString().replace(/[-:T]/g, '').slice(0, 15)
+    a.download = `estimation_draft_${ts}.json`
+    document.body.appendChild(a)
+    a.click()
+    a.remove()
+    URL.revokeObjectURL(url)
+  }
+
+  const importDraft = (file: File) => {
+    const reader = new FileReader()
+    reader.onload = () => {
+      try {
+        const d = JSON.parse(String(reader.result))
+        const ei = d.estimation_input || {}
+        setSelectedModules(ei.modules || [])
+        setComplexity(ei.complexity || 'M')
+        setProjectName(ei.project_name || '')
+        setGovernmentPOC(ei.government_poc || '')
+        setAccountManager(ei.account_manager || '')
+        setServiceDeliveryMgr(ei.service_delivery_mgr || '')
+        setServiceDeliveryExec(ei.service_delivery_exec || '')
+        setSiteLocation(ei.site_location || '')
+        setEmail(ei.email || '')
+        setFy(ei.fy || '')
+        setRapNumber(ei.rap_number || '')
+        setPsiCode(ei.psi_code || '')
+        setAdditionalComments(ei.additional_comments || '')
+        setSites(ei.sites || 1)
+        setOvertime(!!ei.overtime)
+        setOdcItems(ei.odc_items || [])
+        setFixedPriceItems(ei.fixed_price_items || [])
+        setHardwareSubtotal(ei.hardware_subtotal || 0)
+        setWarrantyMonths(ei.warranty_months || 0)
+        setWarrantyCost(ei.warranty_cost || 0)
+        setTone(d.tone || 'professional')
+        const narr = d.narrative_sections || {}
+        setNarrative(narr)
+        setEditableNarrative(narr)
+        setEstimate(d.estimation_result || null)
+        setShowPreview(!!d.estimation_result)
+      } catch (e) {
+        alert('Invalid draft file')
+      }
+    }
+    reader.readAsText(file)
+  }
+
+  const createShareLink = async () => {
+    if (selectedModules.length === 0) { alert('Please select at least one module.'); return }
+    if (prereqWarnings.length > 0) { alert('Some prerequisites are missing.'); return }
+    try {
+      // Ensure we have a current estimate to share
+      const estRes = await fetch(`${API}/api/v1/estimate`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(buildDraft().estimation_input)
+      })
+      if (!estRes.ok) throw new Error('Failed to calculate estimate')
+      const estData = await estRes.json()
+      const payload = buildDraft()
+      payload.estimation_result = estData?.estimation_result
+      if (!authToken || !authEmail) { alert('Please sign in to create a share link.'); return }
+      const res = await fetch(`${API}/api/v1/proposals`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${authToken}` },
+        body: JSON.stringify({ title: projectName || 'Proposal', payload })
+      })
+      if (!res.ok) throw new Error('Failed to save proposal')
+      const data = await res.json()
+      const pub = data.public_id
+      const url = `${window.location.origin}/preview/${encodeURIComponent(pub)}`
+      setShareUrl(url)
+      setSharePublicId(pub)
+      setProposalId(data.id)
+      setReadOnly(true)
+      alert('Share link created. You can copy it from the banner.')
+    } catch (e: any) {
+      alert(e?.message || 'Failed to create share link')
+    }
+  }
+
+  // Helpers
+  const countWords = (s: string) => (s || '').trim().split(/\s+/).filter(Boolean).length
+
+  const saveVersion = async () => {
+    if (!proposalId) { alert('Create a share link first to initialize the proposal.'); return }
+    try {
+      if (!authToken || !authEmail) { alert('Please sign in first.'); return }
+      const res = await fetch(`${API}/api/v1/proposals/${proposalId}/versions`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${authToken}` },
+        body: JSON.stringify({ title: projectName || undefined, payload: buildDraft() })
+      })
+      if (!res.ok) throw new Error('Failed to save version')
+      alert('Version saved.')
+    } catch (e: any) {
+      alert(e?.message || 'Failed to save version')
+    }
+  }
+
+  // Editor: versions list + restore
+  const [versions, setVersions] = useState<{ id: string; version: number; title?: string; created_at?: string }[]>([])
+  const [versionsLoaded, setVersionsLoaded] = useState(false)
+
+  const loadVersions = async () => {
+    if (!proposalId || !authToken) { setVersions([]); setVersionsLoaded(true); return }
+    try {
+      const res = await fetch(`${API}/api/v1/proposals/${proposalId}/versions`, { headers: { 'Authorization': `Bearer ${authToken}` } })
+      if (!res.ok) throw new Error('Failed to load versions')
+      const rows = await res.json()
+      setVersions(rows || [])
+      setVersionsLoaded(true)
+    } catch (e) {
+      setVersionsLoaded(true)
+    }
+  }
+
+  useEffect(() => {
+    if (proposalId && authToken) {
+      loadVersions()
+    }
+  }, [proposalId, authToken])
+
+  const applyPayloadToEditor = (payload: any) => {
+    const ei = payload?.estimation_input || {}
+    setSelectedModules(ei.modules || [])
+    setComplexity(ei.complexity || 'M')
+    setProjectName(ei.project_name || '')
+    setGovernmentPOC(ei.government_poc || '')
+    setAccountManager(ei.account_manager || '')
+    setServiceDeliveryMgr(ei.service_delivery_mgr || '')
+    setServiceDeliveryExec(ei.service_delivery_exec || '')
+    setSiteLocation(ei.site_location || '')
+    setEmail(ei.email || '')
+    setFy(ei.fy || '')
+    setRapNumber(ei.rap_number || '')
+    setPsiCode(ei.psi_code || '')
+    setAdditionalComments(ei.additional_comments || '')
+    setSites(ei.sites || 1)
+    setOvertime(!!ei.overtime)
+    setOdcItems(ei.odc_items || [])
+    setFixedPriceItems(ei.fixed_price_items || [])
+    setHardwareSubtotal(ei.hardware_subtotal || 0)
+    setWarrantyMonths(ei.warranty_months || 0)
+    setWarrantyCost(ei.warranty_cost || 0)
+    const narr = payload?.narrative_sections || {}
+    setNarrative(narr)
+    setEditableNarrative(narr)
+    setEstimate(payload?.estimation_result || null)
+    setShowPreview(!!payload?.estimation_result)
+  }
+
+  const restoreVersion = async (ver: number) => {
+    if (!proposalId || !authToken) { alert('Sign in and create a share link first.'); return }
+    try {
+      const res = await fetch(`${API}/api/v1/proposals/${proposalId}/versions/${ver}`, { headers: { 'Authorization': `Bearer ${authToken}` } })
+      if (!res.ok) throw new Error('Failed to load version')
+      const data = await res.json()
+      applyPayloadToEditor(data?.payload)
+      // Auto-create a new version on restore
+      await saveVersion()
+      alert(`Restored version v${ver} into editor and saved as a new version.`)
+    } catch (e: any) {
+      alert(e?.message || 'Failed to restore version')
     }
   }
 
@@ -299,10 +848,169 @@ function App() {
     setWarrantyCost(0)
   }
 
+  if (!authChecked) {
+    return (
+      <div style={{ padding: 20, fontFamily: 'Arial, sans-serif' }}>
+        <h1>Estimation Tool</h1>
+        <p>Checking authentication...</p>
+      </div>
+    )
+  }
+
+  if (!isAuthenticated) {
+    return (
+      <div style={{ padding: 20, fontFamily: 'Arial, sans-serif', minHeight: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+        <div style={{ maxWidth: 480, width: '100%', padding: 24, border: '1px solid #ddd', borderRadius: 8, boxShadow: '0 2px 6px rgba(0,0,0,0.04)' }}>
+          <h1>Estimation Tool</h1>
+          <p style={{ marginBottom: 16 }}>Sign in or sign up to access the estimation workspace.</p>
+          <div style={{ display: 'flex', gap: 8, marginBottom: 12 }}>
+            <button
+              onClick={() => {
+                setAuthMode('signin')
+                setLoginError(null)
+                setSignupError(null)
+                setSignupInfo(null)
+              }}
+              style={{
+                padding: '6px 12px',
+                fontWeight: authMode === 'signin' ? 600 : 400,
+                borderBottom: authMode === 'signin' ? '2px solid #1976d2' : '2px solid transparent',
+              }}
+            >
+              Sign in
+            </button>
+            <button
+              onClick={() => {
+                setAuthMode('signup')
+                setLoginError(null)
+                setSignupError(null)
+              }}
+              style={{
+                padding: '6px 12px',
+                fontWeight: authMode === 'signup' ? 600 : 400,
+                borderBottom: authMode === 'signup' ? '2px solid #1976d2' : '2px solid transparent',
+              }}
+            >
+              Sign up
+            </button>
+          </div>
+          {authMode === 'signin' ? (
+            <>
+              {loginError && (
+                <p style={{ color: 'crimson', marginBottom: 8 }}>{loginError}</p>
+              )}
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                <input
+                  type="email"
+                  placeholder="email@example.com"
+                  value={loginEmail}
+                  onChange={(e) => setLoginEmail(e.target.value)}
+                  style={{ padding: 8 }}
+                />
+                <input
+                  type="password"
+                  placeholder="Password"
+                  value={loginPassword}
+                  onChange={(e) => setLoginPassword(e.target.value)}
+                  style={{ padding: 8 }}
+                />
+                <button
+                  onClick={handleLogin}
+                  disabled={loginBusy}
+                  style={{ padding: '8px 16px' }}
+                >
+                  {loginBusy ? 'Signing in...' : 'Sign in'}
+                </button>
+              </div>
+            </>
+          ) : (
+            <>
+              {signupError && (
+                <p style={{ color: 'crimson', marginBottom: 8 }}>{signupError}</p>
+              )}
+              {signupInfo && (
+                <p style={{ color: '#1b5e20', marginBottom: 8 }}>{signupInfo}</p>
+              )}
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                <input
+                  type="email"
+                  placeholder="email@example.com"
+                  value={signupEmail}
+                  onChange={(e) => setSignupEmail(e.target.value)}
+                  style={{ padding: 8 }}
+                  disabled={awaitingVerification}
+                />
+                <input
+                  type="password"
+                  placeholder="Password"
+                  value={signupPassword}
+                  onChange={(e) => setSignupPassword(e.target.value)}
+                  style={{ padding: 8 }}
+                  disabled={awaitingVerification}
+                />
+                {!awaitingVerification && (
+                  <button
+                    onClick={handleSignup}
+                    disabled={signupBusy}
+                    style={{ padding: '8px 16px' }}
+                  >
+                    {signupBusy ? 'Signing up...' : 'Sign up'}
+                  </button>
+                )}
+                {awaitingVerification && (
+                  <>
+                    <input
+                      type="text"
+                      placeholder="Verification code"
+                      value={signupCode}
+                      onChange={(e) => setSignupCode(e.target.value)}
+                      style={{ padding: 8 }}
+                    />
+                    <button
+                      onClick={handleConfirmSignup}
+                      disabled={signupBusy}
+                      style={{ padding: '8px 16px' }}
+                    >
+                      {signupBusy ? 'Verifying...' : 'Confirm code'}
+                    </button>
+                  </>
+                )}
+              </div>
+            </>
+          )}
+        </div>
+      </div>
+    )
+  }
+
   return (
     <div style={{ padding: '20px', fontFamily: 'Arial, sans-serif' }}>
-      <h1>Estimation Tool</h1>
-      <p>Backend Status: <strong>{backendStatus}</strong></p>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 12 }}>
+        <div style={{ flex: 1 }}>
+          {readOnly && (
+            <div style={{ padding: 8, marginBottom: 12, border: '1px solid #ffcc80', background: '#fff8e1', borderRadius: 6 }}>
+              Read‑only shared preview. <a href={shareUrl || '#'} target="_blank" rel="noreferrer">Open share link</a>
+            </div>
+          )}
+          <h1>Estimation Tool</h1>
+          <p>Backend Status: <strong>{backendStatus}</strong></p>
+        </div>
+        <div style={{ minWidth: 320, padding: 8, border: '1px solid #eee', borderRadius: 8 }}>
+          <div>
+            <div style={{ marginBottom: 6 }}>Signed in as <strong>{authEmail}</strong></div>
+            <button
+              onClick={() => {
+                localStorage.removeItem('auth_token')
+                localStorage.removeItem('auth_email')
+                setAuthToken(null)
+                setAuthEmail(null)
+              }}
+            >
+              Sign out
+            </button>
+          </div>
+        </div>
+      </div>
       
       <h2>Available Modules</h2>
       {modules.length > 0 ? (
@@ -313,6 +1021,7 @@ function App() {
                 type="checkbox"
                 checked={selectedModules.includes(module.id)}
                 onChange={() => toggleModule(module.id)}
+                disabled={readOnly}
               />
               <span>
                 {module.name} ({module.focus_area}) - {Object.values(module.base_hours_by_role).map(Number).reduce((a, b) => a + b, 0)} base hours
@@ -323,11 +1032,19 @@ function App() {
       ) : (
         <p>Loading modules...</p>
       )}
+      {prereqWarnings.length > 0 && (
+        <div style={{ color: '#b26a00', marginTop: 8 }}>
+          <strong>Prerequisites missing:</strong>
+          <ul>
+            {prereqWarnings.map((w, i) => <li key={i}>{w}</li>)}
+          </ul>
+        </div>
+      )}
 
       <div style={{ marginTop: 16 }}>
         <label>
           Complexity:
-          <select value={complexity} onChange={(e) => setComplexity(e.target.value as any)} style={{ marginLeft: 8 }}>
+          <select value={complexity} onChange={(e) => setComplexity(e.target.value as any)} style={{ marginLeft: 8 }} disabled={readOnly}>
             <option value="S">Small (S)</option>
             <option value="M">Medium (M)</option>
             <option value="L">Large (L)</option>
@@ -339,49 +1056,49 @@ function App() {
       <h2 style={{ marginTop: 24 }}>Project Information</h2>
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, minmax(240px, 1fr))', gap: 8 }}>
         <label>Project Name
-          <input value={projectName} onChange={(e) => setProjectName(e.target.value)} style={{ width: '100%' }} />
+          <input value={projectName} onChange={(e) => setProjectName(e.target.value)} style={{ width: '100%' }} disabled={readOnly} />
         </label>
         <label>Fiscal Year (FY)
-          <input value={fy} onChange={(e) => setFy(e.target.value)} style={{ width: '100%' }} />
+          <input value={fy} onChange={(e) => setFy(e.target.value)} style={{ width: '100%' }} disabled={readOnly} />
         </label>
         <label>Government POC
-          <input value={governmentPOC} onChange={(e) => setGovernmentPOC(e.target.value)} style={{ width: '100%' }} />
+          <input value={governmentPOC} onChange={(e) => setGovernmentPOC(e.target.value)} style={{ width: '100%' }} disabled={readOnly} />
         </label>
         <label>Email
-          <input value={email} onChange={(e) => setEmail(e.target.value)} style={{ width: '100%' }} />
+          <input value={email} onChange={(e) => setEmail(e.target.value)} style={{ width: '100%' }} disabled={readOnly} />
         </label>
         <label>Account Manager
-          <input value={accountManager} onChange={(e) => setAccountManager(e.target.value)} style={{ width: '100%' }} />
+          <input value={accountManager} onChange={(e) => setAccountManager(e.target.value)} style={{ width: '100%' }} disabled={readOnly} />
         </label>
         <label>Service Delivery Mgr
-          <input value={serviceDeliveryMgr} onChange={(e) => setServiceDeliveryMgr(e.target.value)} style={{ width: '100%' }} />
+          <input value={serviceDeliveryMgr} onChange={(e) => setServiceDeliveryMgr(e.target.value)} style={{ width: '100%' }} disabled={readOnly} />
         </label>
         <label>Service Delivery Exec
-          <input value={serviceDeliveryExec} onChange={(e) => setServiceDeliveryExec(e.target.value)} style={{ width: '100%' }} />
+          <input value={serviceDeliveryExec} onChange={(e) => setServiceDeliveryExec(e.target.value)} style={{ width: '100%' }} disabled={readOnly} />
         </label>
         <label>Site Location
-          <input value={siteLocation} onChange={(e) => setSiteLocation(e.target.value)} style={{ width: '100%' }} />
+          <input value={siteLocation} onChange={(e) => setSiteLocation(e.target.value)} style={{ width: '100%' }} disabled={readOnly} />
         </label>
         <label>RAP #
-          <input value={rapNumber} onChange={(e) => setRapNumber(e.target.value)} style={{ width: '100%' }} />
+          <input value={rapNumber} onChange={(e) => setRapNumber(e.target.value)} style={{ width: '100%' }} disabled={readOnly} />
         </label>
         <label>PSI Code
-          <input value={psiCode} onChange={(e) => setPsiCode(e.target.value)} style={{ width: '100%' }} />
+          <input value={psiCode} onChange={(e) => setPsiCode(e.target.value)} style={{ width: '100%' }} disabled={readOnly} />
         </label>
       </div>
       <div style={{ marginTop: 8 }}>
         <label>Additional Comments
-          <textarea value={additionalComments} onChange={(e) => setAdditionalComments(e.target.value)} rows={2} style={{ width: '100%' }} />
+          <textarea value={additionalComments} onChange={(e) => setAdditionalComments(e.target.value)} rows={2} style={{ width: '100%' }} disabled={readOnly} />
         </label>
       </div>
 
       <h2 style={{ marginTop: 24 }}>Scope Options</h2>
       <div style={{ display: 'flex', gap: 16, alignItems: 'center', flexWrap: 'wrap' }}>
         <label>Number of Sites
-          <input type="number" min={1} value={sites} onChange={(e) => setSites(Math.max(1, parseInt(e.target.value || '1')))} style={{ width: 100, marginLeft: 8 }} />
+          <input type="number" min={1} value={sites} onChange={(e) => setSites(Math.max(1, parseInt(e.target.value || '1')))} style={{ width: 100, marginLeft: 8 }} disabled={readOnly} />
         </label>
         <label>
-          <input type="checkbox" checked={overtime} onChange={(e) => setOvertime(e.target.checked)} style={{ marginRight: 8 }} />
+          <input type="checkbox" checked={overtime} onChange={(e) => setOvertime(e.target.checked)} style={{ marginRight: 8 }} disabled={readOnly} />
           Overtime Required
         </label>
       </div>
@@ -389,14 +1106,14 @@ function App() {
       <h2 style={{ marginTop: 24 }}>Other Costs</h2>
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, minmax(240px, 1fr))', gap: 8 }}>
         <label>Hardware Subtotal ($)
-          <input type="number" min={0} value={hardwareSubtotal} onChange={(e) => setHardwareSubtotal(Number(e.target.value || 0))} style={{ width: '100%' }} />
+          <input type="number" min={0} value={hardwareSubtotal} onChange={(e) => setHardwareSubtotal(Number(e.target.value || 0))} style={{ width: '100%' }} disabled={readOnly} />
         </label>
         <div />
         <label>Warranty Months
-          <input type="number" min={0} value={warrantyMonths} onChange={(e) => setWarrantyMonths(Number(e.target.value || 0))} style={{ width: '100%' }} />
+          <input type="number" min={0} value={warrantyMonths} onChange={(e) => setWarrantyMonths(Number(e.target.value || 0))} style={{ width: '100%' }} disabled={readOnly} />
         </label>
         <label>Warranty Cost ($)
-          <input type="number" min={0} value={warrantyCost} onChange={(e) => setWarrantyCost(Number(e.target.value || 0))} style={{ width: '100%' }} />
+          <input type="number" min={0} value={warrantyCost} onChange={(e) => setWarrantyCost(Number(e.target.value || 0))} style={{ width: '100%' }} disabled={readOnly} />
         </label>
       </div>
 
@@ -404,24 +1121,24 @@ function App() {
         <h3>Other Direct Costs</h3>
         {odcItems.map((item, idx) => (
           <div key={idx} style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 6 }}>
-            <input placeholder="Description" value={item.description} onChange={(e) => setOdcItems(prev => prev.map((x, i) => i===idx ? { ...x, description: e.target.value } : x))} style={{ flex: 1 }} />
-            <input placeholder="Price" type="number" min={0} value={item.price} onChange={(e) => setOdcItems(prev => prev.map((x, i) => i===idx ? { ...x, price: Number(e.target.value || 0) } : x))} style={{ width: 140 }} />
-            <button onClick={() => setOdcItems(prev => prev.filter((_, i) => i!==idx))}>Remove</button>
+            <input placeholder="Description" value={item.description} onChange={(e) => setOdcItems(prev => prev.map((x, i) => i===idx ? { ...x, description: e.target.value } : x))} style={{ flex: 1 }} disabled={readOnly} />
+            <input placeholder="Price" type="number" min={0} value={item.price} onChange={(e) => setOdcItems(prev => prev.map((x, i) => i===idx ? { ...x, price: Number(e.target.value || 0) } : x))} style={{ width: 140 }} disabled={readOnly} />
+            {!readOnly && <button onClick={() => setOdcItems(prev => prev.filter((_, i) => i!==idx))}>Remove</button>}
           </div>
         ))}
-        <button onClick={() => setOdcItems(prev => [...prev, { description: '', price: 0 }])}>Add ODC Item</button>
+        {!readOnly && <button onClick={() => setOdcItems(prev => [...prev, { description: '', price: 0 }])}>Add ODC Item</button>}
       </div>
 
       <div style={{ marginTop: 12 }}>
         <h3>Fixed-Price Items</h3>
         {fixedPriceItems.map((item, idx) => (
           <div key={idx} style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 6 }}>
-            <input placeholder="Description" value={item.description} onChange={(e) => setFixedPriceItems(prev => prev.map((x, i) => i===idx ? { ...x, description: e.target.value } : x))} style={{ flex: 1 }} />
-            <input placeholder="Price" type="number" min={0} value={item.price} onChange={(e) => setFixedPriceItems(prev => prev.map((x, i) => i===idx ? { ...x, price: Number(e.target.value || 0) } : x))} style={{ width: 140 }} />
-            <button onClick={() => setFixedPriceItems(prev => prev.filter((_, i) => i!==idx))}>Remove</button>
+            <input placeholder="Description" value={item.description} onChange={(e) => setFixedPriceItems(prev => prev.map((x, i) => i===idx ? { ...x, description: e.target.value } : x))} style={{ flex: 1 }} disabled={readOnly} />
+            <input placeholder="Price" type="number" min={0} value={item.price} onChange={(e) => setFixedPriceItems(prev => prev.map((x, i) => i===idx ? { ...x, price: Number(e.target.value || 0) } : x))} style={{ width: 140 }} disabled={readOnly} />
+            {!readOnly && <button onClick={() => setFixedPriceItems(prev => prev.filter((_, i) => i!==idx))}>Remove</button>}
           </div>
         ))}
-        <button onClick={() => setFixedPriceItems(prev => [...prev, { description: '', price: 0 }])}>Add Fixed-Price Item</button>
+        {!readOnly && <button onClick={() => setFixedPriceItems(prev => [...prev, { description: '', price: 0 }])}>Add Fixed-Price Item</button>}
       </div>
 
       <h2>Quick Test Calculation</h2>
@@ -433,7 +1150,7 @@ function App() {
         })
         .then(res => res.json())
         .then(data => alert(`Estimated cost: $${data.total_cost}`))
-        .catch(err => alert('Calculation failed'))
+        .catch(() => alert('Calculation failed'))
       }}>
         Test Calculation (100 hours, Medium complexity)
       </button>
@@ -453,24 +1170,46 @@ function App() {
           </select>
         </label>
       </div>
-      <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-        <button onClick={previewReport} disabled={previewLoading}>
+      <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+        <button onClick={previewReport} disabled={previewLoading || readOnly}>
           {previewLoading ? 'Building Preview...' : 'Preview Report'}
         </button>
         <button onClick={downloadReport} disabled={downloading}>
           {downloading ? 'Generating...' : 'Download PDF Report'}
         </button>
-        <button onClick={clearAll}>
+        {!readOnly && <button onClick={clearAll}>
           Clear Inputs
-        </button>
+        </button>}
+        {!readOnly && <button onClick={saveDraftLocal}>Save Draft</button>}
+        {!readOnly && <button onClick={loadDraftLocal}>Load Draft</button>}
+        {!readOnly && <button onClick={exportDraft}>Export JSON</button>}
+        {!readOnly && (
+          <label style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+            <input type="file" accept="application/json" onChange={(e) => { const f = e.target.files?.[0]; if (f) importDraft(f); e.currentTarget.value = '' }} />
+            Import JSON
+          </label>
+        )}
+        {!readOnly && <button onClick={createShareLink}>Create Share Link</button>}
+        {!readOnly && <button onClick={saveVersion} disabled={!proposalId}>Save Version</button>}
+        {readOnly && sharePublicId && (
+          <a href={`/preview/${sharePublicId}`} style={{ alignSelf: 'center' }}>Open Preview Page</a>
+        )}
+        {readOnly && shareUrl && (
+          <button onClick={() => { navigator.clipboard.writeText(shareUrl) }}>Copy Share Link</button>
+        )}
+        {!readOnly && sharePublicId && (
+          <span style={{ marginLeft: 8, fontSize: 12, color: '#555' }}>
+            Preview: <a href={`/preview/${sharePublicId}`} target="_blank" rel="noreferrer">/preview/{sharePublicId}</a>
+          </span>
+        )}
       </div>
 
       <h2 style={{ marginTop: 24 }}>Narrative</h2>
       <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 8 }}>
-        <button onClick={previewNarrative} disabled={loadingNarrative}>
+        <button onClick={previewNarrative} disabled={loadingNarrative || readOnly}>
           {loadingNarrative ? 'Generating...' : 'Generate Narrative'}
         </button>
-        <button onClick={() => setEditableNarrative({})}>Clear Narrative</button>
+        {!readOnly && <button onClick={() => setEditableNarrative({})}>Clear Narrative</button>}
       </div>
       {showPreview && estimate && (
         <div style={{ marginTop: 12, padding: 12, border: '1px solid #ddd', borderRadius: 6 }}>
@@ -573,11 +1312,48 @@ function App() {
                   onChange={(e) => setEditableNarrative(prev => ({ ...prev, [k]: e.target.value }))}
                   rows={4}
                   style={{ width: '100%', padding: 8, fontFamily: 'inherit' }}
+                  disabled={readOnly}
                   placeholder={`Write ${k.replace('_',' ')}...`}
                 />
+                <div style={{ fontSize: 12, color: '#666', textAlign: 'right' }}>{countWords(editableNarrative?.[k] || '')} words</div>
               </div>
             ))}
           </div>
+          {proposalId && authToken && (
+            <div style={{ marginTop: 24 }}>
+              <h4>Versions</h4>
+              <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 8 }}>
+                <button onClick={loadVersions}>Refresh</button>
+                <span style={{ fontSize: 12, color: '#666' }}>{versions.length} version(s)</span>
+              </div>
+              {versions.length === 0 ? (
+                <div style={{ fontSize: 12, color: '#777' }}>{versionsLoaded ? 'No versions yet.' : 'Loading...'}</div>
+              ) : (
+                <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+                  <thead>
+                    <tr>
+                      <th style={{ textAlign: 'left', borderBottom: '1px solid #ccc', padding: 6 }}>Version</th>
+                      <th style={{ textAlign: 'left', borderBottom: '1px solid #ccc', padding: 6 }}>Title</th>
+                      <th style={{ textAlign: 'left', borderBottom: '1px solid #ccc', padding: 6 }}>Created</th>
+                      <th style={{ textAlign: 'left', borderBottom: '1px solid #ccc', padding: 6 }}>Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {versions.map(v => (
+                      <tr key={v.id}>
+                        <td style={{ padding: 6 }}>v{v.version}</td>
+                        <td style={{ padding: 6 }}>{v.title || '-'}</td>
+                        <td style={{ padding: 6 }}>{v.created_at || '-'}</td>
+                        <td style={{ padding: 6 }}>
+                          <button onClick={() => restoreVersion(v.version)}>Restore</button>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              )}
+            </div>
+          )}
         </div>
       )}
     </div>

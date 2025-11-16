@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Depends, Header
 from fastapi.responses import StreamingResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -6,8 +6,14 @@ from typing import List, Dict, Optional, Any
 from dataclasses import asdict
 import uvicorn
 import os
+import json
+import time
+import urllib.request
 from pathlib import Path
 from dotenv import load_dotenv, find_dotenv
+from jose import jwt, JWTError, jwk
+from jose.utils import base64url_decode
+from datetime import datetime, timedelta, timezone
 
 # Load environment variables from a local .env if present
 # 1) Try auto-discovery up the directory tree
@@ -25,6 +31,8 @@ if _backend_env.exists():
 from .services.calculation_service import CalculationService
 from .services.data_service import DataService
 from .models import ComplexityLevel, EstimationInput
+from .db import engine, get_session
+from .db_models import Base, Proposal, ProposalVersion
 
 app = FastAPI(title="Estimation Tool API", version="2.0.0")
 
@@ -45,6 +53,13 @@ app.add_middleware(
 calculation_service = CalculationService()
 data_service = DataService()
 # Note: ExportService (and ReportLab) are imported lazily in the report endpoint
+
+# Ensure DB tables exist (lightweight, safe on startup)
+try:
+    Base.metadata.create_all(bind=engine)
+except Exception:
+    # DB optional for stateless runs; endpoints using DB will error if unavailable
+    pass
 
 @app.get("/")
 def read_root():
@@ -389,6 +404,352 @@ def generate_report(req: ReportRequest, include_ai: bool = False, tone: str = "p
             "Content-Disposition": f"attachment; filename=\"{filename}\""
         },
     )
+
+# -----------------------------
+# -----------------------------
+# Proposal persistence endpoints
+# -----------------------------
+
+def get_current_user(authorization: str | None = Header(default=None)) -> str:
+    if not authorization or not authorization.lower().startswith("bearer "):
+        raise HTTPException(status_code=401, detail="Missing or invalid Authorization header")
+    token = authorization.split(" ", 1)[1].strip()
+    return _verify_cognito_token(token)
+
+
+class ProposalCreate(BaseModel):
+    title: Optional[str] = None
+    payload: Dict[str, Any]
+
+
+class ProposalResponse(BaseModel):
+    id: str
+    public_id: str
+    title: Optional[str] = None
+    created_at: Optional[str] = None
+
+
+@app.post("/api/v1/proposals", response_model=ProposalResponse)
+def create_proposal(req: ProposalCreate, current_user: str = Depends(get_current_user)):
+    with get_session() as session:
+        proposal = Proposal(title=req.title, payload=req.payload, owner_email=current_user)
+        session.add(proposal)
+        session.flush()
+        # Create first version (v1)
+        v = ProposalVersion(
+            proposal_id=proposal.id,
+            version=1,
+            title=proposal.title,
+            payload=req.payload,
+        )
+        session.add(v)
+        return ProposalResponse(
+            id=proposal.id,
+            public_id=proposal.public_id,
+            title=proposal.title,
+            created_at=str(proposal.created_at) if proposal.created_at else None,
+        )
+
+
+@app.get("/api/v1/proposals/public/{public_id}")
+def get_public_proposal(public_id: str):
+    with get_session() as session:
+        obj = session.query(Proposal).filter(Proposal.public_id == public_id).one_or_none()
+        if not obj:
+            raise HTTPException(status_code=404, detail="Not found")
+        return {
+            "id": obj.id,
+            "public_id": obj.public_id,
+            "title": obj.title,
+            "payload": obj.payload,
+            "created_at": str(obj.created_at) if obj.created_at else None,
+        }
+
+
+class VersionCreate(BaseModel):
+    title: Optional[str] = None
+    payload: Dict[str, Any]
+
+
+@app.post("/api/v1/proposals/{proposal_id}/versions")
+def create_version(proposal_id: str, body: VersionCreate, current_user: str = Depends(get_current_user)):
+    with get_session() as session:
+        prop = (
+            session.query(Proposal)
+            .filter(Proposal.id == proposal_id, Proposal.owner_email == current_user)
+            .one_or_none()
+        )
+        if not prop:
+            raise HTTPException(status_code=404, detail="Proposal not found")
+        # next version number
+        last = (
+            session.query(ProposalVersion)
+            .filter(ProposalVersion.proposal_id == proposal_id)
+            .order_by(ProposalVersion.version.desc())
+            .first()
+        )
+        next_ver = 1 + (last.version if last else 0)
+        ver = ProposalVersion(
+            proposal_id=proposal_id,
+            version=next_ver,
+            title=body.title or prop.title,
+            payload=body.payload,
+        )
+        prop.payload = body.payload
+        session.add(ver)
+        session.flush()
+        return {"proposal_id": proposal_id, "version": next_ver, "id": ver.id}
+
+
+@app.get("/api/v1/proposals/{proposal_id}/versions")
+def list_versions(proposal_id: str, current_user: str = Depends(get_current_user)):
+    with get_session() as session:
+        rows = (
+            session.query(ProposalVersion)
+            .join(Proposal, Proposal.id == ProposalVersion.proposal_id)
+            .filter(ProposalVersion.proposal_id == proposal_id, Proposal.owner_email == current_user)
+            .order_by(ProposalVersion.version.asc())
+            .all()
+        )
+        return [
+            {
+                "id": r.id,
+                "version": r.version,
+                "title": r.title,
+                "created_at": str(r.created_at) if r.created_at else None,
+            }
+            for r in rows
+        ]
+
+
+@app.get("/api/v1/proposals/{proposal_id}/versions/{version}")
+def get_version(proposal_id: str, version: int, current_user: str = Depends(get_current_user)):
+    with get_session() as session:
+        ver = (
+            session.query(ProposalVersion)
+            .join(Proposal, Proposal.id == ProposalVersion.proposal_id)
+            .filter(
+                ProposalVersion.proposal_id == proposal_id,
+                ProposalVersion.version == version,
+                Proposal.owner_email == current_user,
+            )
+            .one_or_none()
+        )
+        if not ver:
+            raise HTTPException(status_code=404, detail="Version not found")
+        return {
+            "id": ver.id,
+            "version": ver.version,
+            "title": ver.title,
+            "payload": ver.payload,
+            "created_at": str(ver.created_at) if ver.created_at else None,
+        }
+
+
+def _json_diff(a: Any, b: Any, path: str = "") -> List[Dict[str, Any]]:
+    """Produce a simple JSON diff list with entries: {path, left, right, change}.
+    change is one of 'added', 'removed', 'changed'."""
+    diffs: List[Dict[str, Any]] = []
+    if isinstance(a, dict) and isinstance(b, dict):
+        keys = set(a.keys()) | set(b.keys())
+        for k in sorted(keys):
+            p = f"{path}.{k}" if path else str(k)
+            if k not in a:
+                diffs.append({"path": p, "left": None, "right": b[k], "change": "added"})
+            elif k not in b:
+                diffs.append({"path": p, "left": a[k], "right": None, "change": "removed"})
+            else:
+                diffs.extend(_json_diff(a[k], b[k], p))
+    elif isinstance(a, list) and isinstance(b, list):
+        # Compare by length and primitive element differences best-effort
+        if a == b:
+            return diffs
+        diffs.append({"path": path, "left": a, "right": b, "change": "changed"})
+    else:
+        if a != b:
+            diffs.append({"path": path, "left": a, "right": b, "change": "changed"})
+    return diffs
+
+
+@app.get("/api/v1/proposals/{proposal_id}/diff")
+def diff_versions(proposal_id: str, from_version: int, to_version: int, current_user: str = Depends(get_current_user)):
+    with get_session() as session:
+        v1 = (
+            session.query(ProposalVersion)
+            .join(Proposal, Proposal.id == ProposalVersion.proposal_id)
+            .filter(
+                ProposalVersion.proposal_id == proposal_id,
+                ProposalVersion.version == from_version,
+                Proposal.owner_email == current_user,
+            )
+            .one_or_none()
+        )
+        v2 = (
+            session.query(ProposalVersion)
+            .join(Proposal, Proposal.id == ProposalVersion.proposal_id)
+            .filter(
+                ProposalVersion.proposal_id == proposal_id,
+                ProposalVersion.version == to_version,
+                Proposal.owner_email == current_user,
+            )
+            .one_or_none()
+        )
+        if not v1 or not v2:
+            raise HTTPException(status_code=404, detail="One or both versions not found")
+        diffs = _json_diff(v1.payload, v2.payload)
+        return {"from": from_version, "to": to_version, "diffs": diffs}
+
+
+# -----------------------------
+# Simple auth (email magic link) + Cognito integration
+# -----------------------------
+
+JWT_SECRET = os.getenv("SECRET_KEY", "dev-secret-key-change-me")
+JWT_ALG = "HS256"
+AUTH_ALLOWED = os.getenv("ALLOWED_AUTH_DOMAINS", "*")
+
+# Optional Cognito config (preferred in production)
+COGNITO_REGION = os.getenv("COGNITO_REGION")
+COGNITO_USER_POOL_ID = os.getenv("COGNITO_USER_POOL_ID")
+COGNITO_CLIENT_ID = os.getenv("COGNITO_CLIENT_ID")
+
+if COGNITO_REGION and COGNITO_USER_POOL_ID:
+    COGNITO_ISS = f"https://cognito-idp.{COGNITO_REGION}.amazonaws.com/{COGNITO_USER_POOL_ID}"
+    COGNITO_JWKS_URL = f"{COGNITO_ISS}/.well-known/jwks.json"
+else:
+    COGNITO_ISS = None
+    COGNITO_JWKS_URL = None
+
+_JWKS_CACHE: Dict[str, Any] = {}
+
+
+def _get_cognito_jwks() -> List[Dict[str, Any]]:
+    if not COGNITO_JWKS_URL:
+        raise RuntimeError("Cognito not configured")
+    now = time.time()
+    cached = _JWKS_CACHE.get("data")
+    if cached is not None and now - _JWKS_CACHE.get("ts", 0) < 3600:
+        return cached  # type: ignore[return-value]
+    with urllib.request.urlopen(COGNITO_JWKS_URL) as resp:
+        data = json.load(resp)
+    keys = data.get("keys", [])
+    _JWKS_CACHE["data"] = keys
+    _JWKS_CACHE["ts"] = now
+    return keys
+
+
+def _allowed_email(email: str) -> bool:
+    if AUTH_ALLOWED.strip() == "*":
+        return True
+    domains = [d.strip().lower() for d in AUTH_ALLOWED.split(",") if d.strip()]
+    try:
+        domain = email.split("@", 1)[1].lower()
+        return domain in domains
+    except Exception:
+        return False
+
+
+def _issue_token(email: str, ttl_minutes: int, purpose: str) -> str:
+    """Local HS256 token issuer (dev fallback)."""
+    now = datetime.now(timezone.utc)
+    payload = {
+        "sub": email,
+        "iat": int(now.timestamp()),
+        "exp": int((now + timedelta(minutes=ttl_minutes)).timestamp()),
+        "purpose": purpose,
+    }
+    return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALG)
+
+
+def _verify_token(token: str, purpose: str) -> str:
+    """Local HS256 token verifier (dev fallback)."""
+    try:
+        data = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALG])
+        if data.get("purpose") != purpose:
+            raise JWTError("Invalid purpose")
+        return str(data.get("sub"))
+    except JWTError as e:
+        raise HTTPException(status_code=400, detail=f"Invalid token: {e}")
+
+
+def _verify_cognito_token(raw: str) -> str:
+    """Verify a Cognito JWT and return the email claim.
+
+    If Cognito is not configured, fall back to local dev tokens.
+    """
+    if not (COGNITO_REGION and COGNITO_USER_POOL_ID and COGNITO_CLIENT_ID and COGNITO_ISS):
+        # Dev / local mode: use legacy HS256 access tokens
+        return _verify_token(raw, purpose="access")
+
+    try:
+        headers = jwt.get_unverified_header(raw)
+    except JWTError:
+        raise HTTPException(status_code=401, detail="Invalid token header")
+
+    kid = headers.get("kid")
+    if not kid:
+        raise HTTPException(status_code=401, detail="Invalid token kid")
+
+    keys = _get_cognito_jwks()
+    key = next((k for k in keys if k.get("kid") == kid), None)
+    if not key:
+        raise HTTPException(status_code=401, detail="Unknown token key")
+
+    public_key = jwk.construct(key, algorithm="RS256")
+    try:
+        message, encoded_sig = raw.rsplit(".", 1)
+    except ValueError:
+        raise HTTPException(status_code=401, detail="Invalid token format")
+
+    decoded_sig = base64url_decode(encoded_sig.encode("utf-8"))
+    if not public_key.verify(message.encode("utf-8"), decoded_sig):
+        raise HTTPException(status_code=401, detail="Invalid token signature")
+
+    claims = jwt.get_unverified_claims(raw)
+    if claims.get("iss") != COGNITO_ISS:
+        raise HTTPException(status_code=401, detail="Invalid token issuer")
+
+    aud = claims.get("aud") or claims.get("client_id")
+    if aud != COGNITO_CLIENT_ID:
+        raise HTTPException(status_code=401, detail="Invalid token audience")
+
+    if claims.get("exp", 0) < time.time():
+        raise HTTPException(status_code=401, detail="Token expired")
+
+    email = claims.get("email")
+    if not email:
+        raise HTTPException(status_code=401, detail="Token missing email claim")
+    return str(email)
+
+
+class AuthRequest(BaseModel):
+    email: str
+
+
+@app.post("/api/v1/auth/request_link")
+def auth_request_link(req: AuthRequest):
+    """Legacy dev-only magic link issuer (unused with Cognito)."""
+    email = (req.email or "").strip()
+    if not email or "@" not in email:
+        raise HTTPException(status_code=400, detail="Invalid email")
+    if not _allowed_email(email):
+        raise HTTPException(status_code=403, detail="Email domain not allowed")
+    token = _issue_token(email, ttl_minutes=15, purpose="magic")
+    url = f"/auth?token={token}"
+    return {"token": token, "magic_url": url, "expires_in": 900}
+
+
+class TokenExchange(BaseModel):
+    token: str
+
+
+@app.post("/api/v1/auth/exchange")
+def auth_exchange(body: TokenExchange):
+    """Legacy dev-only token exchange (unused with Cognito)."""
+    email = _verify_token(body.token, purpose="magic")
+    access = _issue_token(email, ttl_minutes=60 * 24 * 7, purpose="access")
+    return {"access_token": access, "token_type": "bearer", "email": email}
+
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8000)
