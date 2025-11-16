@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react'
+import './App.css'
 
 const rawApi = (import.meta as any).env?.VITE_API_URL || 'http://localhost:8000'
 const API = rawApi.replace(/\/+$/, '')
@@ -8,6 +9,11 @@ const COGNITO_REGION = (import.meta as any).env?.VITE_COGNITO_REGION
 const COGNITO_ENDPOINT = COGNITO_REGION
   ? `https://cognito-idp.${COGNITO_REGION}.amazonaws.com/`
   : null
+
+const IS_LOCALHOST =
+  typeof window !== 'undefined' &&
+  (window.location.hostname === 'localhost' ||
+    window.location.hostname === '127.0.0.1')
 
 function App() {
   const [backendStatus, setBackendStatus] = useState('Checking...')
@@ -848,23 +854,24 @@ function App() {
     setWarrantyCost(0)
   }
 
-  if (!authChecked) {
+  if (!authChecked && !IS_LOCALHOST) {
     return (
-      <div style={{ padding: 20, fontFamily: 'Arial, sans-serif' }}>
+      <div className="app app-shell">
         <h1>Estimation Tool</h1>
         <p>Checking authentication...</p>
       </div>
     )
   }
 
-  if (!isAuthenticated) {
+  if (!isAuthenticated && !IS_LOCALHOST) {
     return (
-      <div style={{ padding: 20, fontFamily: 'Arial, sans-serif', minHeight: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+      <div className="app auth-screen">
         <div style={{ maxWidth: 480, width: '100%', padding: 24, border: '1px solid #ddd', borderRadius: 8, boxShadow: '0 2px 6px rgba(0,0,0,0.04)' }}>
           <h1>Estimation Tool</h1>
           <p style={{ marginBottom: 16 }}>Sign in or sign up to access the estimation workspace.</p>
           <div style={{ display: 'flex', gap: 8, marginBottom: 12 }}>
             <button
+              className="btn"
               onClick={() => {
                 setAuthMode('signin')
                 setLoginError(null)
@@ -880,6 +887,7 @@ function App() {
               Sign in
             </button>
             <button
+              className="btn"
               onClick={() => {
                 setAuthMode('signup')
                 setLoginError(null)
@@ -915,6 +923,7 @@ function App() {
                   style={{ padding: 8 }}
                 />
                 <button
+                  className="btn btn-primary"
                   onClick={handleLogin}
                   disabled={loginBusy}
                   style={{ padding: '8px 16px' }}
@@ -950,6 +959,7 @@ function App() {
                 />
                 {!awaitingVerification && (
                   <button
+                    className="btn btn-primary"
                     onClick={handleSignup}
                     disabled={signupBusy}
                     style={{ padding: '8px 16px' }}
@@ -967,6 +977,7 @@ function App() {
                       style={{ padding: 8 }}
                     />
                     <button
+                      className="btn btn-primary"
                       onClick={handleConfirmSignup}
                       disabled={signupBusy}
                       style={{ padding: '8px 16px' }}
@@ -984,7 +995,7 @@ function App() {
   }
 
   return (
-    <div style={{ padding: '20px', fontFamily: 'Arial, sans-serif' }}>
+    <div className="app app-shell">
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 12 }}>
         <div style={{ flex: 1 }}>
           {readOnly && (
@@ -993,12 +1004,16 @@ function App() {
             </div>
           )}
           <h1>Estimation Tool</h1>
-          <p>Backend Status: <strong>{backendStatus}</strong></p>
+          <p>
+            Backend Status:{' '}
+            <strong>{backendStatus}</strong>
+          </p>
         </div>
         <div style={{ minWidth: 320, padding: 8, border: '1px solid #eee', borderRadius: 8 }}>
           <div>
             <div style={{ marginBottom: 6 }}>Signed in as <strong>{authEmail}</strong></div>
             <button
+              className="btn"
               onClick={() => {
                 localStorage.removeItem('auth_token')
                 localStorage.removeItem('auth_email')
@@ -1012,49 +1027,62 @@ function App() {
         </div>
       </div>
       
-      <h2>Available Modules</h2>
-      {modules.length > 0 ? (
-        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '8px' }}>
-          {modules.map((module: any) => (
-            <label key={module.id} style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-              <input
-                type="checkbox"
-                checked={selectedModules.includes(module.id)}
-                onChange={() => toggleModule(module.id)}
-                disabled={readOnly}
-              />
-              <span>
-                {module.name} ({module.focus_area}) - {Object.values(module.base_hours_by_role).map(Number).reduce((a, b) => a + b, 0)} base hours
-              </span>
-            </label>
-          ))}
-        </div>
-      ) : (
-        <p>Loading modules...</p>
-      )}
-      {prereqWarnings.length > 0 && (
-        <div style={{ color: '#b26a00', marginTop: 8 }}>
-          <strong>Prerequisites missing:</strong>
-          <ul>
-            {prereqWarnings.map((w, i) => <li key={i}>{w}</li>)}
-          </ul>
-        </div>
-      )}
+      <section className="form-section">
+        <h2>Available Modules</h2>
+        {modules.length > 0 ? (
+          <div className="modules-grid">
+            {modules.map((module: any) => (
+              <label key={module.id} className="module-checkbox">
+                <input
+                  type="checkbox"
+                  checked={selectedModules.includes(module.id)}
+                  onChange={() => toggleModule(module.id)}
+                  disabled={readOnly}
+                />
+                <span className="module-name">
+                  {module.name} ({module.focus_area}) -{' '}
+                  {Object.values(module.base_hours_by_role).map(Number).reduce((a, b) => a + b, 0)} base hours
+                </span>
+              </label>
+            ))}
+          </div>
+        ) : (
+          <p>Loading modules...</p>
+        )}
+        {prereqWarnings.length > 0 && (
+          <div style={{ color: '#b26a00', marginTop: 8 }}>
+            <strong>Prerequisites missing:</strong>
+            <ul>
+              {prereqWarnings.map((w, i) => (
+                <li key={i}>{w}</li>
+              ))}
+            </ul>
+          </div>
+        )}
+      </section>
 
-      <div style={{ marginTop: 16 }}>
-        <label>
-          Complexity:
-          <select value={complexity} onChange={(e) => setComplexity(e.target.value as any)} style={{ marginLeft: 8 }} disabled={readOnly}>
-            <option value="S">Small (S)</option>
-            <option value="M">Medium (M)</option>
-            <option value="L">Large (L)</option>
-            <option value="XL">Extra Large (XL)</option>
-          </select>
-        </label>
-      </div>
+      <section className="form-section">
+        <h2>Scope Options</h2>
+        <div style={{ marginTop: 16 }}>
+          <label>
+            Complexity:
+            <select
+              value={complexity}
+              onChange={(e) => setComplexity(e.target.value as any)}
+              style={{ marginLeft: 8 }}
+              disabled={readOnly}
+            >
+              <option value="S">Small (S)</option>
+              <option value="M">Medium (M)</option>
+              <option value="L">Large (L)</option>
+              <option value="XL">Extra Large (XL)</option>
+            </select>
+          </label>
+        </div>
+      </section>
 
       <h2 style={{ marginTop: 24 }}>Project Information</h2>
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, minmax(240px, 1fr))', gap: 8 }}>
+      <div className="form-grid">
         <label>Project Name
           <input value={projectName} onChange={(e) => setProjectName(e.target.value)} style={{ width: '100%' }} disabled={readOnly} />
         </label>
@@ -1093,7 +1121,7 @@ function App() {
       </div>
 
       <h2 style={{ marginTop: 24 }}>Scope Options</h2>
-      <div style={{ display: 'flex', gap: 16, alignItems: 'center', flexWrap: 'wrap' }}>
+      <div className="form-grid">
         <label>Number of Sites
           <input type="number" min={1} value={sites} onChange={(e) => setSites(Math.max(1, parseInt(e.target.value || '1')))} style={{ width: 100, marginLeft: 8 }} disabled={readOnly} />
         </label>
@@ -1104,7 +1132,7 @@ function App() {
       </div>
 
       <h2 style={{ marginTop: 24 }}>Other Costs</h2>
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, minmax(240px, 1fr))', gap: 8 }}>
+      <div className="form-grid">
         <label>Hardware Subtotal ($)
           <input type="number" min={0} value={hardwareSubtotal} onChange={(e) => setHardwareSubtotal(Number(e.target.value || 0))} style={{ width: '100%' }} disabled={readOnly} />
         </label>
@@ -1123,10 +1151,24 @@ function App() {
           <div key={idx} style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 6 }}>
             <input placeholder="Description" value={item.description} onChange={(e) => setOdcItems(prev => prev.map((x, i) => i===idx ? { ...x, description: e.target.value } : x))} style={{ flex: 1 }} disabled={readOnly} />
             <input placeholder="Price" type="number" min={0} value={item.price} onChange={(e) => setOdcItems(prev => prev.map((x, i) => i===idx ? { ...x, price: Number(e.target.value || 0) } : x))} style={{ width: 140 }} disabled={readOnly} />
-            {!readOnly && <button onClick={() => setOdcItems(prev => prev.filter((_, i) => i!==idx))}>Remove</button>}
+            {!readOnly && (
+              <button
+                className="btn"
+                onClick={() => setOdcItems(prev => prev.filter((_, i) => i!==idx))}
+              >
+                Remove
+              </button>
+            )}
           </div>
         ))}
-        {!readOnly && <button onClick={() => setOdcItems(prev => [...prev, { description: '', price: 0 }])}>Add ODC Item</button>}
+        {!readOnly && (
+          <button
+            className="btn"
+            onClick={() => setOdcItems(prev => [...prev, { description: '', price: 0 }])}
+          >
+            Add ODC Item
+          </button>
+        )}
       </div>
 
       <div style={{ marginTop: 12 }}>
@@ -1135,14 +1177,30 @@ function App() {
           <div key={idx} style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 6 }}>
             <input placeholder="Description" value={item.description} onChange={(e) => setFixedPriceItems(prev => prev.map((x, i) => i===idx ? { ...x, description: e.target.value } : x))} style={{ flex: 1 }} disabled={readOnly} />
             <input placeholder="Price" type="number" min={0} value={item.price} onChange={(e) => setFixedPriceItems(prev => prev.map((x, i) => i===idx ? { ...x, price: Number(e.target.value || 0) } : x))} style={{ width: 140 }} disabled={readOnly} />
-            {!readOnly && <button onClick={() => setFixedPriceItems(prev => prev.filter((_, i) => i!==idx))}>Remove</button>}
+            {!readOnly && (
+              <button
+                className="btn"
+                onClick={() => setFixedPriceItems(prev => prev.filter((_, i) => i!==idx))}
+              >
+                Remove
+              </button>
+            )}
           </div>
         ))}
-        {!readOnly && <button onClick={() => setFixedPriceItems(prev => [...prev, { description: '', price: 0 }])}>Add Fixed-Price Item</button>}
+        {!readOnly && (
+          <button
+            className="btn"
+            onClick={() => setFixedPriceItems(prev => [...prev, { description: '', price: 0 }])}
+          >
+            Add Fixed-Price Item
+          </button>
+        )}
       </div>
 
       <h2>Quick Test Calculation</h2>
-      <button onClick={() => {
+      <button
+        className="btn btn-primary"
+        onClick={() => {
         fetch(`${API}/api/v1/calculate`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -1171,31 +1229,55 @@ function App() {
         </label>
       </div>
       <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
-        <button onClick={previewReport} disabled={previewLoading || readOnly}>
+        <button className="btn btn-primary" onClick={previewReport} disabled={previewLoading || readOnly}>
           {previewLoading ? 'Building Preview...' : 'Preview Report'}
         </button>
-        <button onClick={downloadReport} disabled={downloading}>
+        <button className="btn btn-primary" onClick={downloadReport} disabled={downloading}>
           {downloading ? 'Generating...' : 'Download PDF Report'}
         </button>
-        {!readOnly && <button onClick={clearAll}>
-          Clear Inputs
-        </button>}
-        {!readOnly && <button onClick={saveDraftLocal}>Save Draft</button>}
-        {!readOnly && <button onClick={loadDraftLocal}>Load Draft</button>}
-        {!readOnly && <button onClick={exportDraft}>Export JSON</button>}
+        {!readOnly && (
+          <button className="btn" onClick={clearAll}>
+            Clear Inputs
+          </button>
+        )}
+        {!readOnly && (
+          <button className="btn" onClick={saveDraftLocal}>
+            Save Draft
+          </button>
+        )}
+        {!readOnly && (
+          <button className="btn" onClick={loadDraftLocal}>
+            Load Draft
+          </button>
+        )}
+        {!readOnly && (
+          <button className="btn" onClick={exportDraft}>
+            Export JSON
+          </button>
+        )}
         {!readOnly && (
           <label style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
             <input type="file" accept="application/json" onChange={(e) => { const f = e.target.files?.[0]; if (f) importDraft(f); e.currentTarget.value = '' }} />
             Import JSON
           </label>
         )}
-        {!readOnly && <button onClick={createShareLink}>Create Share Link</button>}
-        {!readOnly && <button onClick={saveVersion} disabled={!proposalId}>Save Version</button>}
+        {!readOnly && (
+          <button className="btn" onClick={createShareLink}>
+            Create Share Link
+          </button>
+        )}
+        {!readOnly && (
+          <button className="btn" onClick={saveVersion} disabled={!proposalId}>
+            Save Version
+          </button>
+        )}
         {readOnly && sharePublicId && (
           <a href={`/preview/${sharePublicId}`} style={{ alignSelf: 'center' }}>Open Preview Page</a>
         )}
         {readOnly && shareUrl && (
-          <button onClick={() => { navigator.clipboard.writeText(shareUrl) }}>Copy Share Link</button>
+          <button className="btn" onClick={() => { navigator.clipboard.writeText(shareUrl) }}>
+            Copy Share Link
+          </button>
         )}
         {!readOnly && sharePublicId && (
           <span style={{ marginLeft: 8, fontSize: 12, color: '#555' }}>
@@ -1206,10 +1288,18 @@ function App() {
 
       <h2 style={{ marginTop: 24 }}>Narrative</h2>
       <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 8 }}>
-        <button onClick={previewNarrative} disabled={loadingNarrative || readOnly}>
+        <button
+          className="btn btn-primary"
+          onClick={previewNarrative}
+          disabled={loadingNarrative || readOnly}
+        >
           {loadingNarrative ? 'Generating...' : 'Generate Narrative'}
         </button>
-        {!readOnly && <button onClick={() => setEditableNarrative({})}>Clear Narrative</button>}
+        {!readOnly && (
+          <button className="btn" onClick={() => setEditableNarrative({})}>
+            Clear Narrative
+          </button>
+        )}
       </div>
       {showPreview && estimate && (
         <div style={{ marginTop: 12, padding: 12, border: '1px solid #ddd', borderRadius: 6 }}>
@@ -1323,7 +1413,7 @@ function App() {
             <div style={{ marginTop: 24 }}>
               <h4>Versions</h4>
               <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 8 }}>
-                <button onClick={loadVersions}>Refresh</button>
+                <button className="btn" onClick={loadVersions}>Refresh</button>
                 <span style={{ fontSize: 12, color: '#666' }}>{versions.length} version(s)</span>
               </div>
               {versions.length === 0 ? (
@@ -1345,7 +1435,7 @@ function App() {
                         <td style={{ padding: 6 }}>{v.title || '-'}</td>
                         <td style={{ padding: 6 }}>{v.created_at || '-'}</td>
                         <td style={{ padding: 6 }}>
-                          <button onClick={() => restoreVersion(v.version)}>Restore</button>
+                          <button className="btn" onClick={() => restoreVersion(v.version)}>Restore</button>
                         </td>
                       </tr>
                     ))}

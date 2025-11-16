@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { useParams, Link } from 'react-router-dom'
+import './App.css'
 
 const API = (import.meta as any).env?.VITE_API_URL || 'http://localhost:8000'
 
@@ -57,16 +58,16 @@ export default function Preview() {
     setDiffs(data?.diffs || [])
   }
 
-  if (loading) return <div style={{ padding: 20 }}>Loading...</div>
-  if (error) return <div style={{ padding: 20, color: 'crimson' }}>{error}</div>
-  if (!payload) return <div style={{ padding: 20 }}>No data</div>
+  if (loading) return <div className="app preview-status">Loading...</div>
+  if (error) return <div className="app preview-status preview-error">{error}</div>
+  if (!payload) return <div className="app preview-status">No data</div>
 
   const est = payload.estimation_result || {}
   const narr = payload.narrative_sections || {}
   const ei = payload.estimation_input || {}
 
   return (
-    <div style={{ padding: 20, fontFamily: 'Arial, sans-serif' }}>
+    <div className="app preview-page">
       <div style={{ marginBottom: 12 }}>
         <Link to="/">← Back to Editor</Link>
       </div>
@@ -164,7 +165,7 @@ export default function Preview() {
                     {versions.map(v => <option key={v.id} value={v.version}>{v.version} {v.title ? `- ${v.title}` : ''}</option>)}
                   </select>
                 </label>
-                <button onClick={runDiff}>Compare</button>
+                <button className="btn" onClick={runDiff}>Compare</button>
               </div>
 
               {diffs && (
