@@ -30,6 +30,7 @@ if _backend_env.exists():
 # Import our services
 from .services.calculation_service import CalculationService
 from .services.data_service import DataService
+from .services.web_scraper_service import WebScraperService, ScrapeRequest
 from .models import ComplexityLevel, EstimationInput
 from .db import engine, get_session
 from .db_models import Base, Proposal, ProposalVersion
@@ -52,6 +53,7 @@ app.add_middleware(
 # Initialize services
 calculation_service = CalculationService()
 data_service = DataService()
+web_scraper_service = WebScraperService()
 # Note: ExportService (and ReportLab) are imported lazily in the report endpoint
 
 # Ensure DB tables exist (lightweight, safe on startup)
@@ -168,6 +170,30 @@ class NarrativeRequest(EstimationRequest):
 class ReportRequest(EstimationRequest):
     """Report request body, allowing optional custom narrative sections."""
     narrative_sections: Optional[Dict[str, str]] = None
+
+
+class ScrapeUrlRequest(BaseModel):
+    """Request body for a simple URL scrape preview."""
+
+    url: str
+    max_bytes: int = 200_000
+    max_chars: int = 4_000
+    timeout: float = 10.0
+
+
+class ScrapeUrlResponse(BaseModel):
+    """Lightweight view of scraped content for UI preview and later analysis."""
+
+    url: str
+    final_url: Optional[str] = None
+    success: bool
+    status_code: Optional[int] = None
+    content_type: Optional[str] = None
+    encoding: Optional[str] = None
+    text_excerpt: str
+    fetched_at: datetime
+    truncated: bool = False
+    error: Optional[str] = None
 
 
 @app.post("/api/v1/estimate")
@@ -415,6 +441,36 @@ def get_current_user(authorization: str | None = Header(default=None)) -> str:
         raise HTTPException(status_code=401, detail="Missing or invalid Authorization header")
     token = authorization.split(" ", 1)[1].strip()
     return _verify_cognito_token(token)
+
+
+@app.post("/api/v1/scrape/url", response_model=ScrapeUrlResponse)
+def scrape_url(req: ScrapeUrlRequest, current_user: str = Depends(get_current_user)):
+    """
+    Scrape a single URL and return a cleaned text excerpt.
+
+    This is a foundation endpoint intended for exploration and for
+    feeding future contract-analysis/report-generation workflows.
+    """
+    job = ScrapeRequest(
+        url=req.url,
+        max_bytes=req.max_bytes,
+        max_chars=req.max_chars,
+        timeout=req.timeout,
+    )
+    result = web_scraper_service.scrape(job)
+
+    return ScrapeUrlResponse(
+        url=result.url,
+        final_url=result.final_url,
+        success=result.success,
+        status_code=result.status_code,
+        content_type=result.content_type,
+        encoding=result.encoding,
+        text_excerpt=result.text_excerpt,
+        fetched_at=result.fetched_at,
+        truncated=result.truncated,
+        error=result.error,
+    )
 
 
 class ProposalCreate(BaseModel):

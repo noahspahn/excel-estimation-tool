@@ -54,6 +54,22 @@ function App() {
   const [awaitingVerification, setAwaitingVerification] = useState(false)
   const isAuthenticated = !!authToken && !!authEmail
 
+  // Simple scraping test state
+  const [scrapeUrl, setScrapeUrl] = useState('')
+  const [scrapeLoading, setScrapeLoading] = useState(false)
+  const [scrapeError, setScrapeError] = useState<string | null>(null)
+  const [scrapeResult, setScrapeResult] = useState<{
+    url: string
+    final_url?: string | null
+    success: boolean
+    status_code?: number | null
+    content_type?: string | null
+    encoding?: string | null
+    text_excerpt: string
+    truncated?: boolean
+    error?: string | null
+  } | null>(null)
+
   // Extended input state (from Excel INPUT)
   const [projectName, setProjectName] = useState('')
   const [governmentPOC, setGovernmentPOC] = useState('')
@@ -284,6 +300,52 @@ function App() {
       setSignupError('Network or server error')
     } finally {
       setSignupBusy(false)
+    }
+  }
+
+  const runScrapeTest = async () => {
+    setScrapeError(null)
+    setScrapeResult(null)
+    const url = scrapeUrl.trim()
+    if (!url) {
+      setScrapeError('Enter a URL to scrape')
+      return
+    }
+    if (!authToken && !IS_LOCALHOST) {
+      setScrapeError('Sign in to run scraping tests')
+      return
+    }
+    setScrapeLoading(true)
+    try {
+      const res = await fetch(`${API}/api/v1/scrape/url`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(authToken ? { Authorization: `Bearer ${authToken}` } : {}),
+        },
+        body: JSON.stringify({
+          url,
+          max_bytes: 200000,
+          max_chars: 2000,
+          timeout: 10.0,
+        }),
+      })
+      if (!res.ok) {
+        if (res.status === 401) {
+          setScrapeError('Unauthorized. Please sign in again.')
+        } else {
+          const text = await res.text()
+          setScrapeError(`Scrape failed (${res.status}): ${text || 'Unknown error'}`)
+        }
+        return
+      }
+      const data = await res.json()
+      setScrapeResult(data)
+    } catch (e) {
+      console.error('Scrape error', e)
+      setScrapeError('Network or server error while scraping')
+    } finally {
+      setScrapeLoading(false)
     }
   }
 
@@ -1212,6 +1274,64 @@ function App() {
       }}>
         Test Calculation (100 hours, Medium complexity)
       </button>
+
+      <h2 style={{ marginTop: 24 }}>Contract URL Scraper (beta)</h2>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 8, maxWidth: 680 }}>
+        <div style={{ display: 'flex', gap: 8 }}>
+          <input
+            type="text"
+            placeholder="https://example.gov/contracts/solicitation-1234"
+            value={scrapeUrl}
+            onChange={(e) => setScrapeUrl(e.target.value)}
+            style={{ flex: 1 }}
+          />
+          <button
+            className="btn btn-primary"
+            onClick={runScrapeTest}
+            disabled={scrapeLoading}
+          >
+            {scrapeLoading ? 'Scraping...' : 'Scrape URL'}
+          </button>
+        </div>
+        {!isAuthenticated && !IS_LOCALHOST && (
+          <div style={{ fontSize: 12, color: '#b26a00' }}>
+            Sign in to run authenticated scraping calls.
+          </div>
+        )}
+        {scrapeError && (
+          <div style={{ fontSize: 12, color: 'crimson' }}>
+            {scrapeError}
+          </div>
+        )}
+        {scrapeResult && (
+          <div style={{ border: '1px solid #ddd', borderRadius: 6, padding: 8, background: '#fafafa' }}>
+            <div style={{ fontSize: 12, marginBottom: 4 }}>
+              <div><strong>URL:</strong> {scrapeResult.url}</div>
+              {scrapeResult.final_url && scrapeResult.final_url !== scrapeResult.url && (
+                <div><strong>Final URL:</strong> {scrapeResult.final_url}</div>
+              )}
+              <div>
+                <strong>Status:</strong>{' '}
+                {scrapeResult.success ? `OK (${scrapeResult.status_code ?? 'n/a'})` : 'Failed'}
+                {scrapeResult.truncated && ' · truncated'}
+              </div>
+              {scrapeResult.content_type && (
+                <div><strong>Content-Type:</strong> {scrapeResult.content_type}</div>
+              )}
+            </div>
+            {scrapeResult.error && (
+              <div style={{ fontSize: 12, color: '#b26a00', marginBottom: 4 }}>
+                {scrapeResult.error}
+              </div>
+            )}
+            <div style={{ maxHeight: 200, overflow: 'auto', padding: 6, background: '#fff', borderRadius: 4, border: '1px solid #eee' }}>
+              <pre style={{ margin: 0, fontSize: 12, whiteSpace: 'pre-wrap' }}>
+                {scrapeResult.text_excerpt || '(no text extracted)'}
+              </pre>
+            </div>
+          </div>
+        )}
+      </div>
 
       <h2 style={{ marginTop: 24 }}>Report</h2>
       <div style={{ marginBottom: 8 }}>

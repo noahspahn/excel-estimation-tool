@@ -1,55 +1,146 @@
-AWS deployment (static frontend + container backend)
+# AWS deployment (static frontend + container backend)
 
-Overview
+## Overview
 
-- Frontend: Static React site served from S3 behind CloudFront.
-- Backend: FastAPI container on AWS App Runner pulling from ECR.
-- Goals: Simple, low‑ops, cost‑aware. App Runner is easy to manage; for very low traffic, consider the Lambda alternative below.
+- **Backend**: FastAPI app (`backend/app/main.py`) deployed as a Docker container on **AWS App Runner**, pulling from ECR.
+- **Frontend**: Vite/React app (`frontend/`) built to static assets and served from an **S3 static website endpoint**.
+- **Auth**: **Amazon Cognito User Pool** for email/password users. The frontend talks directly to Cognito’s `InitiateAuth`, `SignUp`, and `ConfirmSignUp` APIs. The backend verifies Cognito JWTs via JWKS.
+- Goal: simple, low-ops deployment you can drive from your dev machine with minimal manual AWS configuration.
 
-Prerequisites
+## Prerequisites
 
-- AWS CLI v2 configured (`aws configure`), with permissions for CloudFormation, CloudFront, S3, ECR, IAM, App Runner, and Secrets Manager (optional).
-- Docker installed and logged in locally.
+- AWS CLI v2 configured (`aws configure`) with access to:
+  - ECR, App Runner, S3, Cognito, IAM.
+- Docker installed and logged in locally (for building/pushing backend images).
 - Node 18+ for building the frontend.
+- A Cognito User Pool with:
+  - An App Client (`VITE_COGNITO_CLIENT_ID` / `COGNITO_CLIENT_ID`).
+  - Email as sign-in alias.
+  - Auth flows enabled: `ALLOW_USER_PASSWORD_AUTH`, `ALLOW_REFRESH_TOKEN_AUTH`.
 
-Quick start
+## Current implementation
 
-1) Build and deploy backend + frontend
+The “live” setup looks like this:
 
-  ./deploy/aws/deploy-apprunner.sh \
-    --region us-east-1 \
-    --app-name estimation \
-    --s3-bucket estimation-frontend-$(date +%s) \
-    [--openai-secret-arn arn:aws:secretsmanager:...:secret:OPENAI_API_KEY-xxxxx]
+- **Backend API**
 
-What the script does
+  - Built from `backend/Dockerfile`.
+  - Pushed to an ECR repo (e.g. `estimation-backend`).
+  - Exposed via **App Runner** at a URL like `https://cqdcypvz3e.us-east-1.awsapprunner.com`.
+  - Env vars set in the App Runner service:
+    - `DATABASE_URL` (or SQLite default).
+    - `SECRET_KEY`, `ALGORITHM`, `ACCESS_TOKEN_EXPIRE_MINUTES`.
+    - `OPENAI_API_KEY` (optional).
+    - `ALLOWED_ORIGINS` for CORS (`http://localhost:3000,http://localhost:3001` etc).
+    - `COGNITO_REGION`, `COGNITO_USER_POOL_ID`, `COGNITO_CLIENT_ID`.
+  - `get_current_user()` in `backend/app/main.py` verifies Cognito JWTs by fetching the pool’s JWKS and checking `iss`, `aud/client_id`, `exp`, and the `email` claim.
 
-- Builds backend Docker image and pushes it to a private ECR repo.
-- Creates/updates an App Runner service that pulls the image from ECR.
-- Reads the service URL and builds the frontend with `VITE_API_URL` pointing at it.
-- Provisions an S3 bucket + CloudFront distribution (via CloudFormation) and uploads the frontend build.
-- Invalidates CloudFront so new assets are served immediately.
+- **Frontend app**
 
-Outputs
+  - Built with Vite from `frontend/` into `frontend/dist`.
+  - Synced to an S3 bucket (e.g. `meshai-estimation-frontend-1`) using `aws s3 sync` and served via the S3 website endpoint:  
+    `http://meshai-estimation-frontend-1.s3-website-us-east-1.amazonaws.com/`.
+  - At build time, the frontend reads these Vite env vars:
+    - `VITE_API_URL` → points at the App Runner backend (e.g. `https://cqdcypvz3e.us-east-1.awsapprunner.com/`).
+    - `VITE_EXCEL_API_ENABLED` → enables Excel-related UI.
+    - `VITE_COGNITO_REGION` / `VITE_COGNITO_CLIENT_ID` → used to call Cognito’s JSON APIs.
+  - On load, the app shows a **sign-in / sign-up gate**. Until a user is authenticated, nothing else is rendered.
 
-- Backend URL (App Runner): https://xxxxxxxx.us-east-1.awsapprunner.com
-- Frontend URL (CloudFront): https://xxxxxxxx.cloudfront.net
+- **Cognito auth (frontend behavior)**
+  - Sign-in:
+    - User enters email + password on the login screen.
+    - Frontend POSTs to `https://cognito-idp.<region>.amazonaws.com/` with:
+      - `X-Amz-Target: AWSCognitoIdentityProviderService.InitiateAuth`.
+      - `AuthFlow: USER_PASSWORD_AUTH`, `ClientId`, `USERNAME`, `PASSWORD`.
+    - On success, frontend stores the returned `IdToken` in `localStorage` as `auth_token` and the email as `auth_email`.
+    - All backend calls that require auth send `Authorization: Bearer <IdToken>`.
+  - Sign-up:
+    - User switches to the “Sign up” tab, enters email + password.
+    - Frontend calls `SignUp` and then `ConfirmSignUp` with the verification code emailed by Cognito.
+    - Once confirmed, the user can sign in with the same credentials.
 
-Common options
+## Simple deploy script for Windows
 
-- You can pass `--allowed-origins` to restrict CORS on the backend. Default is `*`.
-- For predictable S3 naming, pass a globally unique `--s3-bucket BUCKET_NAME`.
+The file `deploy/aws/deploy-simple.ps1` automates common backend + frontend deployment steps from a Windows PowerShell session.
 
-Clean up
+What it does (when run from repo root):
 
-  ./deploy/aws/destroy.sh --region us-east-1 --app-name estimation --s3-bucket <bucket>
+1. **Backend**
 
-This deletes the CloudFormation stacks, empties the S3 bucket, and removes the ECR repository.
+   - Ensures an ECR repo exists (default: `estimation-backend`).
+   - Logs into ECR with `aws ecr get-login-password`.
+   - Builds the backend Docker image from `backend/` and tags it as `<repo>:latest`.
+   - Pushes the image to `<ACCOUNT_ID>.dkr.ecr.<region>.amazonaws.com/<repo>:latest`.
+   - Looks up the existing App Runner service by name (default: `estimation-backend-AR`) and prints its Service URL (it does **not** create or modify the App Runner service; that is assumed already configured).
 
-Notes on cost
+2. **Frontend**
+   - Builds the React app from `frontend/` with `VITE_API_URL` set to the App Runner URL and `VITE_EXCEL_API_ENABLED=true`.
+   - Uses `npm ci` if `package-lock.json` is present, otherwise `npm install`.
+   - Runs `npm run build` to produce `frontend/dist`.
+   - Syncs `frontend/dist` to the S3 bucket you specify (default: `meshai-estimation-frontend-1`) via `aws s3 sync ... --delete`.
 
-- App Runner: simplest container hosting with autoscaling. It does not scale to zero; it’s best for steady or moderate usage.
-- ECS Fargate: more knobs; similar base costs for 1 task behind an ALB.
-- Lightsail Containers: cheapest fixed monthly for a small container, fewer enterprise features.
-- Lambda (serverless) alternative: For spiky/low traffic, converting the backend to Lambda (API Gateway + Lambda) is the most cost‑effective. This repo can support that with a small shim (Mangum). Ask if you want that path and we’ll wire it up.
+Usage example:
 
+```powershell
+Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
+.\deploy\aws\deploy-simple.ps1 `
+  -Region "us-east-1" `
+  -EcrRepo "estimation-backend" `
+  -Bucket "meshai-estimation-frontend-1" `
+  -ServiceName "estimation-backend-AR"
+```
+
+## Manual deploy overview
+
+If you prefer to run the steps yourself:
+
+1. **Backend image → ECR**
+
+   - Build: `docker build -t estimation-backend:latest backend`
+   - Tag: `docker tag estimation-backend:latest <ACCOUNT_ID>.dkr.ecr.us-east-1.amazonaws.com/estimation-backend:latest`
+   - Push: `docker push <ACCOUNT_ID>.dkr.ecr.us-east-1.amazonaws.com/estimation-backend:latest`
+
+2. **App Runner service**
+
+   - In console, create a service (`estimation-backend-AR`) pointing at the ECR image.
+   - Port: `8000`.
+   - Environment variables: as described in “Current implementation” above.
+
+3. **Frontend build → S3 website**
+
+   - From `frontend/`:
+
+     ```powershell
+     $env:VITE_API_URL = "https://<your-apprunner-url>/"
+     $env:VITE_EXCEL_API_ENABLED = "true"
+     $env:VITE_COGNITO_REGION = "us-east-1"
+     $env:VITE_COGNITO_CLIENT_ID = "<your-app-client-id>"
+     npm install
+     npm run build
+     ```
+
+   - Sync build artifacts to S3:
+
+     ```powershell
+     aws s3 sync .\dist "s3://meshai-estimation-frontend-1/" --delete --region us-east-1
+     ```
+
+   - Enable static website hosting / set index document (`index.html`) on the S3 bucket if not already configured.
+
+## Auth and security notes
+
+- The frontend never sees AWS credentials; it only calls Cognito’s public endpoints and your App Runner API.
+- The backend never stores passwords; it only trusts Cognito JWTs (and enforces `iss`, `aud/client_id`, and token expiry).
+- You can restrict which emails are allowed in your User Pool (via Cognito policies) rather than in the app.
+- For production:
+  - Consider putting CloudFront in front of the S3 website for HTTPS and better performance.
+
+## CloudFormation-based path (optional)
+
+This folder also contains templates for a more automated, CloudFormation-driven setup (including CloudFront). The original workflow was:
+
+- `deploy/aws/apprunner-backend.yaml` – defines the App Runner service and its IAM role.
+- `deploy/aws/cf-s3-static-site.yaml` – defines an S3 bucket + CloudFront distribution for the frontend.
+- `deploy/aws/deploy-apprunner.sh` – a Bash script that builds and pushes the backend image, deploys the App Runner stack, builds the frontend, deploys the S3+CloudFront stack, and invalidates CloudFront.
+
+In environments where you _can_ manage CloudFront, that remains the most production-friendly option. In this project’s current setup, the simpler App Runner + S3 website + Cognito direct-auth path described above is what’s actually in use.
