@@ -15,6 +15,8 @@ const IS_LOCALHOST =
   (window.location.hostname === 'localhost' ||
     window.location.hostname === '127.0.0.1')
 
+const DEV_STUB_EMAIL = (import.meta as any).env?.VITE_DEV_STUB_EMAIL || 'noahspahn@gmail.com'
+
 function App() {
   const [backendStatus, setBackendStatus] = useState('Checking...')
   const [modules, setModules] = useState<any[]>([])
@@ -52,6 +54,7 @@ function App() {
   const [signupInfo, setSignupInfo] = useState<string | null>(null)
   const [signupBusy, setSignupBusy] = useState(false)
   const [awaitingVerification, setAwaitingVerification] = useState(false)
+  const [devLoginBusy, setDevLoginBusy] = useState(false)
   const isAuthenticated = !!authToken && !!authEmail
 
   // Simple scraping test state
@@ -303,6 +306,72 @@ function App() {
     }
   }
 
+  const handleDevStubLogin = async () => {
+    setLoginError(null)
+    setSignupError(null)
+    setSignupInfo(null)
+
+    if (!IS_LOCALHOST) {
+      setLoginError('Dev stub login is only available on localhost.')
+      return
+    }
+    if (!DEV_STUB_EMAIL) {
+      setLoginError('Set VITE_DEV_STUB_EMAIL in your frontend .env to use dev stub login.')
+      return
+    }
+
+    setDevLoginBusy(true)
+    try {
+      const reqRes = await fetch(`${API}/api/v1/auth/request_link`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email: DEV_STUB_EMAIL }),
+      })
+      const reqData: any = await reqRes.json().catch(() => ({}))
+      if (!reqRes.ok) {
+        const msg = reqData?.detail || reqData?.error || 'Dev auth request failed'
+        setLoginError(msg)
+        return
+      }
+      const magicToken: string | undefined = reqData?.token
+      if (!magicToken) {
+        setLoginError('Dev auth did not return a magic token')
+        return
+      }
+
+      const exRes = await fetch(`${API}/api/v1/auth/exchange`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ token: magicToken }),
+      })
+      const exData: any = await exRes.json().catch(() => ({}))
+      if (!exRes.ok) {
+        const msg = exData?.detail || exData?.error || 'Dev token exchange failed'
+        setLoginError(msg)
+        return
+      }
+
+      const accessToken: string | undefined = exData?.access_token
+      const email: string | null =
+        typeof exData?.email === 'string' ? exData.email : DEV_STUB_EMAIL
+
+      if (!accessToken) {
+        setLoginError('Dev exchange did not return an access token')
+        return
+      }
+
+      localStorage.setItem('auth_token', accessToken)
+      if (email) localStorage.setItem('auth_email', email)
+      setAuthToken(accessToken)
+      setAuthEmail(email)
+    } catch (err) {
+      console.error('Dev stub login error', err)
+      setLoginError('Dev stub login failed (network or server error)')
+    } finally {
+      setDevLoginBusy(false)
+    }
+  }
+
   const runScrapeTest = async () => {
     setScrapeError(null)
     setScrapeResult(null)
@@ -431,6 +500,8 @@ function App() {
       // If the user has edited narrative, pass it through and skip server-side AI
       const hasCustomNarrative = Object.keys(editableNarrative || {}).length > 0
       const qs = `?include_ai=${includeAI && !hasCustomNarrative}&tone=${encodeURIComponent(tone)}`
+      const contractUrl = scrapeResult?.success ? (scrapeResult.final_url || scrapeResult.url) : undefined
+      const contractExcerpt = scrapeResult?.success ? (scrapeResult.text_excerpt || '') : undefined
       const res = await fetch(`${API}/api/v1/report${qs}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -462,7 +533,9 @@ function App() {
           hardware_subtotal: hardwareSubtotal,
           warranty_months: warrantyMonths,
           warranty_cost: warrantyCost,
-          narrative_sections: hasCustomNarrative ? editableNarrative : undefined
+          narrative_sections: hasCustomNarrative ? editableNarrative : undefined,
+          contract_url: contractUrl,
+          contract_excerpt: contractExcerpt,
         })
       })
       if (!res.ok) throw new Error('Failed to generate report')
@@ -1073,18 +1146,42 @@ function App() {
         </div>
         <div style={{ minWidth: 320, padding: 8, border: '1px solid #eee', borderRadius: 8 }}>
           <div>
-            <div style={{ marginBottom: 6 }}>Signed in as <strong>{authEmail}</strong></div>
-            <button
-              className="btn"
-              onClick={() => {
-                localStorage.removeItem('auth_token')
-                localStorage.removeItem('auth_email')
-                setAuthToken(null)
-                setAuthEmail(null)
-              }}
-            >
-              Sign out
-            </button>
+            <div style={{ marginBottom: 6 }}>
+              {authEmail ? (
+                <>Signed in as <strong>{authEmail}</strong></>
+              ) : (
+                <span>Not signed in</span>
+              )}
+            </div>
+            <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+              {authEmail && (
+                <button
+                  className="btn"
+                  onClick={() => {
+                    localStorage.removeItem('auth_token')
+                    localStorage.removeItem('auth_email')
+                    setAuthToken(null)
+                    setAuthEmail(null)
+                  }}
+                >
+                  Sign out
+                </button>
+              )}
+              {IS_LOCALHOST && DEV_STUB_EMAIL && !authEmail && (
+                <button
+                  className="btn"
+                  onClick={handleDevStubLogin}
+                  disabled={devLoginBusy}
+                >
+                  {devLoginBusy ? 'Signing in stub...' : 'Dev: sign in stub user'}
+                </button>
+              )}
+            </div>
+            {IS_LOCALHOST && DEV_STUB_EMAIL && !authEmail && (
+              <div style={{ marginTop: 4, fontSize: 11, color: '#666' }}>
+                Uses backend dev auth endpoints with {DEV_STUB_EMAIL}.
+              </div>
+            )}
           </div>
         </div>
       </div>

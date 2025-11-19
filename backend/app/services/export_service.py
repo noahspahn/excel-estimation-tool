@@ -130,6 +130,20 @@ class ExportService:
                 story.append(pi_table)
                 story.append(Spacer(1, 16))
 
+        # Optional scraped contract context (if provided)
+        contract_src = estimation_data.get('contract_source') or {}
+        if contract_src.get('url') or contract_src.get('excerpt'):
+            story.append(Spacer(1, 12))
+            story.append(Paragraph("Contract Source (Scraped)", self.styles['SectionHeader']))
+            url = contract_src.get('url')
+            if url:
+                story.append(Paragraph(f"URL: {url}", self.styles['Normal']))
+                story.append(Spacer(1, 6))
+            excerpt = contract_src.get('excerpt')
+            if excerpt:
+                story.append(Paragraph(str(excerpt), self.styles['Normal']))
+                story.append(Spacer(1, 16))
+
         # Optional AI-generated narrative blocks
         if narrative_sections:
             if narrative_sections.get('executive_summary'):
