@@ -6,6 +6,7 @@ from html.parser import HTMLParser
 from typing import Optional
 from urllib.parse import urlparse
 from urllib.request import Request, urlopen
+import os
 import ssl
 
 
@@ -96,7 +97,20 @@ class WebScraperService:
 
     def __init__(self, default_user_agent: Optional[str] = None) -> None:
         self._default_user_agent = default_user_agent or "EstimationToolScraper/0.1"
-        self._ssl_context = ssl.create_default_context()
+
+        # Allow optional TLS verification disablement for environments where
+        # the system trust store is incomplete (e.g., certain App Runner configs).
+        # This should only be used for development / troubleshooting.
+        disable_tls_verify = os.getenv("SCRAPER_DISABLE_TLS_VERIFY", "").lower() in (
+            "1",
+            "true",
+            "yes",
+        )
+        ctx = ssl.create_default_context()
+        if disable_tls_verify:
+            ctx.check_hostname = False
+            ctx.verify_mode = ssl.CERT_NONE
+        self._ssl_context = ctx
 
     def _normalize_url(self, url: str) -> str:
         url = (url or "").strip()

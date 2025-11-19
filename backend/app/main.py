@@ -452,16 +452,20 @@ def get_current_user(authorization: str | None = Header(default=None)) -> str:
     token is supplied, fall back to a default dev user identity so
     that endpoints can still operate without authentication.
     """
+    default_user = os.getenv("DEV_DEFAULT_USER_EMAIL", "anonymous@example.com")
+
+    # No auth required for now: if there is no bearer token, just return the
+    # default dev user identity.
     if not authorization or not authorization.lower().startswith("bearer "):
-        return os.getenv("DEV_DEFAULT_USER_EMAIL", "anonymous@example.com")
+        return default_user
 
     token = authorization.split(" ", 1)[1].strip()
     try:
         return _verify_cognito_token(token)
-    except HTTPException:
-        # On invalid tokens, also fall back to a default user rather than
-        # blocking access entirely.
-        return os.getenv("DEV_DEFAULT_USER_EMAIL", "anonymous@example.com")
+    except Exception:
+        # For any verification error (network, config, invalid token, etc.),
+        # fall back to the default user instead of failing the request.
+        return default_user
 
 
 @app.post("/api/v1/scrape/url", response_model=ScrapeUrlResponse)

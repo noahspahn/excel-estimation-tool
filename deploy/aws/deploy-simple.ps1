@@ -52,7 +52,7 @@ if (-not $SkipBackend) {
   docker push $remoteTag
 }
 
-# Determine backend URL from App Runner
+# Determine backend URL from App Runner and (optionally) trigger a deployment
 $backendUrl = $null
 try {
   $serviceArn = aws apprunner list-services --region $Region `
@@ -61,6 +61,11 @@ try {
 
   if (-not $serviceArn -or $serviceArn -eq "None") {
     throw "App Runner service '$ServiceName' not found in region $Region."
+  }
+
+  if (-not $SkipBackend) {
+    Write-Host "`n[Backend] Triggering App Runner deployment for service '$ServiceName'..."
+    aws apprunner start-deployment --service-arn $serviceArn --region $Region | Out-Null
   }
 
   $backendUrl = aws apprunner describe-service --service-arn $serviceArn --region $Region `
@@ -72,6 +77,12 @@ try {
 if (-not $backendUrl) {
   throw "Backend URL could not be determined from App Runner."
 }
+
+# Ensure backendUrl is a fully-qualified URL (add https:// if missing)
+if ($backendUrl -notmatch '^\w+://') {
+  $backendUrl = "https://$backendUrl"
+}
+$backendUrl = $backendUrl.TrimEnd('/')
 
 Write-Host "`n[Backend] App Runner URL: $backendUrl"
 
