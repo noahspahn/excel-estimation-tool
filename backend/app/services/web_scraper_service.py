@@ -8,6 +8,7 @@ from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 import os
 import ssl
+import json
 
 
 @dataclass
@@ -86,6 +87,88 @@ def _extract_visible_text(html: str, max_chars: int) -> str:
     return text
 
 
+def _scrape_sam_opportunity(opp_id: str, timeout: float, ssl_context: ssl.SSLContext) -> Optional[str]:
+    """
+    Best-effort scrape for SAM.gov opportunity pages without JS rendering.
+
+    Uses the public JSON API to pull the full description instead of the
+    skeleton HTML that omits content.
+    """
+    api_url = f"https://sam.gov/api/prod/opps/v2/opportunities/{opp_id}"
+    headers = {
+        "Accept": "*/*",
+        "User-Agent": "EstimationToolScraper/0.1",
+        "Referer": "https://sam.gov/",
+    }
+
+    # Try modern sam.gov API first; fall back to legacy if needed.
+    for candidate in [
+        api_url,
+        f"https://sam.gov/api/prod/sgs/v1/opportunities/{opp_id}",
+    ]:
+        req = Request(candidate, headers=headers)
+        try:
+            with urlopen(req, context=ssl_context, timeout=timeout) as resp:
+                raw = resp.read()
+            data = json.loads(raw.decode("utf-8", errors="ignore"))
+            break
+        except Exception:
+            data = None
+    if not data:
+        return None
+    try:
+        with urlopen(req, context=ssl_context, timeout=timeout) as resp:
+            raw = resp.read()
+    except Exception:
+        return None
+
+    try:
+        data = json.loads(raw.decode("utf-8", errors="ignore"))
+    except Exception:
+        return None
+
+    desc_parts: list[str] = []
+    def add(val):
+        v = (val or "").strip()
+        if v:
+            desc_parts.append(v)
+
+    opp = data.get("opportunity") or data.get("data") or data
+    meta = opp.get("data2") or opp.get("data") or {}
+
+    add(meta.get("title"))
+    add(meta.get("solicitationNumber") or meta.get("solicitation", {}).get("solicitationNumber"))
+
+    deadlines = meta.get("solicitation", {}).get("deadlines", {})
+    if deadlines.get("response"):
+        add(f"Response due: {deadlines.get('response')}")
+        if deadlines.get("responseTz"):
+            add(f"Time zone: {deadlines.get('responseTz')}")
+
+    location = meta.get("placeOfPerformance") or {}
+    loc_parts = [
+        location.get("streetAddress"),
+        location.get("city", {}).get("name"),
+        location.get("state", {}).get("name"),
+        location.get("zip"),
+    ]
+    loc = ", ".join([p for p in loc_parts if p])
+    if loc:
+        add(f"Place of performance: {loc}")
+
+    # SAM places the main description in an array under "description"
+    desc_list = opp.get("description") or meta.get("description") or []
+    if isinstance(desc_list, list):
+        for d in desc_list:
+            add(d.get("body") if isinstance(d, dict) else str(d))
+    else:
+        add(str(desc_list))
+
+    if not desc_parts:
+        return None
+    return "\n\n".join(desc_parts)
+
+
 class WebScraperService:
     """
     Simple HTTP/HTML scraper focused on producing clean text.
@@ -143,8 +226,40 @@ class WebScraperService:
             "User-Agent": request.user_agent or self._default_user_agent,
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
         }
-        req = Request(target_url, headers=headers)
         fetched_at = datetime.now(timezone.utc)
+
+        # Special-case SAM.gov pages to use their JSON API so we get real content.
+        parsed = urlparse(target_url)
+        sam_text: Optional[str] = None
+        if parsed.netloc.endswith("sam.gov") and "/opp/" in parsed.path:
+            try:
+                # Extract opportunity ID from path segments
+                parts = [p for p in parsed.path.split("/") if p]
+                if "opp" in parts:
+                    idx = parts.index("opp")
+                    if idx + 1 < len(parts):
+                        opp_id = parts[idx + 1]
+                        sam_text = _scrape_sam_opportunity(opp_id, request.timeout, self._ssl_context)
+            except Exception:
+                sam_text = None
+
+        # If we successfully pulled meaningful SAM text, return now.
+        if sam_text:
+            text_excerpt = sam_text[: request.max_chars] if request.max_chars > 0 else sam_text
+            return ScrapeResult(
+                url=target_url,
+                final_url=target_url,
+                success=True,
+                status_code=200,
+                content_type="application/json",
+                encoding="utf-8",
+                text_excerpt=text_excerpt,
+                fetched_at=fetched_at,
+                truncated=len(sam_text) > request.max_chars,
+                error=None,
+            )
+
+        req = Request(target_url, headers=headers)
 
         try:
             with urlopen(req, context=self._ssl_context, timeout=request.timeout) as resp:

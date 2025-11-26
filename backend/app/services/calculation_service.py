@@ -1,5 +1,5 @@
 # backend/app/services/calculation_service.py
-from typing import Dict, List
+from typing import Any, Dict, List, Optional
 import math
 from ..models import (
     EstimationInput, EstimationResult, Module, Role, 
@@ -96,6 +96,111 @@ class CalculationService:
                 "overtime": input_data.overtime,
             }
         )
+    
+    def build_module_subtasks(
+        self,
+        input_data: EstimationInput,
+        contract_excerpt: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        """
+        Build a structured list of module-aligned subtasks for reporting.
+
+        The subtasks mirror an SOP-style breakdown and reuse the same module
+        catalog and multiplier logic that drives cost calculations.
+        """
+        scope_templates: Dict[str, str] = {
+            "DT": "Discovery, mapping, and transformation planning activities that align stakeholders and document current/future state.",
+            "ITM": "Modernization execution covering infrastructure refresh, migrations, validation, and operational cutovers.",
+            "SA": "Security and compliance support including assessments, control validation, and audit readiness coordination (e.g., DFARS/RMF).",
+            "CM": "Cloud adoption tasks spanning readiness, landing zone alignment, migration planning, and cutover assistance.",
+            "DA": "Data enablement tasks such as ingestion, pipeline buildout, quality checks, and analytics readiness.",
+        }
+
+        modules = [self.data_service.get_module(mid) for mid in input_data.modules]
+        modules = [m for m in modules if m]
+        roles = self.data_service.get_all_roles()
+        multiplier = self._get_complexity_multiplier(input_data)
+        multiplier_note = (
+            f"complexity={input_data.complexity.value}, "
+            f"environment={input_data.environment}, "
+            f"integration={input_data.integration_level}, "
+            f"sites={max(1, int(input_data.sites or 1))}"
+        )
+
+        subtasks: List[Dict[str, Any]] = []
+
+        for idx, module in enumerate(modules, start=1):
+            tasks = []
+            for role_id, base_hours in module.base_hours_by_role.items():
+                role = roles.get(role_id)
+                override = input_data.custom_role_overrides.get(role_id, 1.0)
+                role_hours = base_hours * multiplier * override
+                calc_parts = [
+                    f"{base_hours:.1f}h base",
+                    f"x {multiplier:.2f} (complexity/env/integration/sites)",
+                ]
+                if override != 1.0:
+                    calc_parts.append(f"x override {override:.2f}")
+                tasks.append(
+                    {
+                        "title": f"{role.name if role else role_id} delivery",
+                        "calculation": " ".join(calc_parts),
+                        "hours": round(role_hours, 1),
+                    }
+                )
+
+            total_hours = round(sum(t["hours"] for t in tasks), 1)
+            focus_label = module.focus_area.name.replace("_", " ").title()
+
+            subtask = {
+                "sequence": idx,
+                "module_id": module.id,
+                "module_name": module.name,
+                "focus_area": module.focus_area.value,
+                "focus_label": focus_label,
+                "work_scope": scope_templates.get(
+                    module.focus_area.value,
+                    f"Delivery tasks for the {module.name} module.",
+                ),
+                "estimating_method": "Engineering Discrete",
+                "estimate_basis": (
+                    "Discrete engineering estimate using cataloged role hours; no isolated historicals. "
+                    "SME judgment applied for similar classified programs where direct actuals are unavailable."
+                ),
+                "period_of_performance": (
+                    "Proposed Period of Performance: adjust to the customer schedule; "
+                    f"default assumes a 12-month window across {max(1, int(input_data.sites or 1))} site(s)."
+                ),
+                "tasks": tasks,
+                "total_hours": total_hours,
+                "reasonableness": (
+                    "Uses the same module catalog and multiplier logic as the cost "
+                    "estimate to keep assumptions traceable and auditable."
+                ),
+            }
+
+            if contract_excerpt:
+                subtask["customer_context"] = contract_excerpt.strip()[:1200]
+
+            subtasks.append(subtask)
+
+        # Light-weight tailoring: extract requirement hints from contract excerpt
+        if contract_excerpt:
+            lowered = contract_excerpt.lower()
+            keywords = []
+            for k in ["rmf", "dfars", "migration", "cloud", "server", "network", "audit", "compliance", "vmware", "aws", "azure", "tight timeline", "documentation"]:
+                if k in lowered:
+                    keywords.append(k)
+            if keywords:
+                for st in subtasks:
+                    ctx = st.get("customer_context", "")
+                    st["customer_context"] = (ctx + "\n\nDetected requirements: " + ", ".join(sorted(set(keywords)))).strip()
+
+        # Ensure subtasks are ordered and numbered
+        for i, st in enumerate(subtasks, start=1):
+            st["sequence"] = i
+
+        return subtasks
     
     def _calculate_role_hours(self, role: Role, modules: List[Module], input_data: EstimationInput) -> float:
         """Calculate total hours for a specific role across all modules"""

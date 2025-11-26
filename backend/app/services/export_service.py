@@ -1,5 +1,5 @@
 # backend/app/services/export_service.py
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List
 from datetime import datetime
 import io
 from reportlab.lib.pagesizes import letter, A4
@@ -46,11 +46,35 @@ class ExportService:
             fontName='Helvetica-Bold'
         ))
 
+        self.styles.add(ParagraphStyle(
+            name='SubtaskHeader',
+            parent=self.styles['Heading3'],
+            fontSize=12,
+            spaceAfter=6,
+            textColor=colors.darkblue,
+        ))
+        self.styles.add(ParagraphStyle(
+            name='SubtaskLabel',
+            parent=self.styles['Normal'],
+            fontSize=8,
+            textColor=colors.black,
+            fontName='Helvetica-Bold',
+        ))
+        self.styles.add(ParagraphStyle(
+            name='SubtaskBody',
+            parent=self.styles['Normal'],
+            fontSize=8,
+            textColor=colors.black,
+            wordWrap='CJK',  # wrap long continuous strings
+            leading=10,
+        ))
+
     def generate_estimation_pdf(
         self,
         estimation_data: Dict[str, Any],
         input_summary: Dict[str, Any],
         narrative_sections: Optional[Dict[str, str]] = None,
+        module_subtasks: Optional[List[Dict[str, Any]]] = None,
     ) -> bytes:
         """Generate a professional PDF estimation report"""
         
@@ -242,6 +266,97 @@ class ExportService:
             
             story.append(module_table)
             story.append(Spacer(1, 20))
+
+        # SOP-style Subtasks for each module
+        subtask_blocks = module_subtasks if module_subtasks is not None else estimation_data.get('module_subtasks')
+        if subtask_blocks:
+            story.append(Paragraph("Module Subtasks", self.styles['SectionHeader']))
+            status = estimation_data.get("subtask_generation_status")
+            error_msg = estimation_data.get("subtask_generation_error")
+            if status and status != "ai_generated":
+                msg = "AI subtasks not used; showing deterministic subtasks."
+                if status == "ai_failed":
+                    msg = f"AI subtasks failed; showing deterministic subtasks. Error: {error_msg or 'unknown'}"
+                elif status == "ai_disabled":
+                    msg = "AI subtasks disabled; showing deterministic subtasks."
+                story.append(Paragraph(msg, self.styles['Normal']))
+                story.append(Spacer(1, 6))
+            for subtask in subtask_blocks:
+                seq = subtask.get("sequence")
+                heading = f"{seq}. {subtask.get('module_name')}" if seq else str(subtask.get("module_name") or "Subtask")
+                focus = subtask.get("focus_label") or subtask.get("focus_area") or ""
+                story.append(Paragraph(f"{heading} ({focus})", self.styles['SubtaskHeader']))
+
+                def p(txt: str, style_name: str = 'SubtaskBody'):
+                    return Paragraph(str(txt or ''), self.styles[style_name])
+
+                detail_rows = [
+                    [p('What is the work scope for this subtask?', 'SubtaskLabel'), p(subtask.get('work_scope', ''))],
+                    [p('Estimating Method', 'SubtaskLabel'), p(subtask.get('estimating_method', 'Engineering Discrete'))],
+                    [p('What is the estimate of this subtask based on?', 'SubtaskLabel'), p(subtask.get('estimate_basis', ''))],
+                    [p('How is the estimate of this subtask derived?', 'SubtaskLabel'), p(subtask.get('period_of_performance', ''))],
+                ]
+                if subtask.get('reasonableness'):
+                    detail_rows.append([p('What makes the estimate reasonable?', 'SubtaskLabel'), p(subtask.get('reasonableness', ''))])
+                if subtask.get('customer_context'):
+                    detail_rows.append([p('Customer Context', 'SubtaskLabel'), p(subtask.get('customer_context', ''))])
+
+                # Keep within the ~6.5in content width (letter page with 1in margins)
+                details_table = Table(detail_rows, colWidths=[1.9*inch, 4.1*inch])
+                details_table.setStyle(TableStyle([
+                    ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
+                    ('FONTNAME', (0, 0), (-1, -1), 'Helvetica'),
+                    ('FONTNAME', (0, 0), (0, -1), 'Helvetica-Bold'),
+                    ('FONTSIZE', (0, 0), (-1, -1), 8),
+                    ('BOTTOMPADDING', (0, 0), (-1, -1), 3),
+                    ('TOPPADDING', (0, 0), (-1, -1), 3),
+                    ('GRID', (0, 0), (-1, -1), 0.25, colors.lightgrey),
+                    ('WORDWRAP', (0, 0), (-1, -1), 'CJK'),
+                    ('VALIGN', (0, 0), (-1, -1), 'TOP'),
+                ]))
+                story.append(details_table)
+                story.append(Spacer(1, 8))
+
+                tasks = subtask.get('tasks') or []
+                if tasks:
+                    task_rows = [['Subtask Description', 'Calculation', 'Hours']]
+                    # Header row with module name and total
+                    task_rows.append([
+                        p(f"{subtask.get('module_name', 'Subtask')} ({subtask.get('focus_area', '')})", 'SubtaskLabel'),
+                        '',
+                        f"{float(subtask.get('total_hours', 0)):.1f}"
+                    ])
+                    for task in tasks:
+                        task_rows.append([
+                            p(task.get('title', ''), 'SubtaskBody'),
+                            p(task.get('calculation', ''), 'SubtaskBody'),
+                            f"{float(task.get('hours', 0)):.1f}"
+                        ])
+                    task_rows.append(['Subtask Total', '', f"{float(subtask.get('total_hours', 0)):.1f}"])
+
+                    task_table = Table(task_rows, colWidths=[2.3*inch, 2.9*inch, 1.0*inch])
+                    task_table.setStyle(TableStyle([
+                        ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
+                        ('ALIGN', (2, 1), (-1, -1), 'RIGHT'),
+                        ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+                        ('FONTNAME', (0, 1), (-1, 1), 'Helvetica-Bold'),
+                        ('FONTNAME', (0, -1), (-1, -1), 'Helvetica-Bold'),
+                        ('FONTSIZE', (0, 0), (-1, -1), 8),
+                        ('BOTTOMPADDING', (0, 0), (-1, -1), 4),
+                        ('TOPPADDING', (0, 0), (-1, -1), 3),
+                        ('GRID', (0, 0), (-1, -1), 0.4, colors.grey),
+                        ('WORDWRAP', (0, 0), (-1, -1), 'CJK'),
+                        ('VALIGN', (0, 0), (-1, -1), 'TOP'),
+                        ('BACKGROUND', (0, 0), (-1, 0), colors.darkblue),
+                        ('TEXTCOLOR', (0, 0), (-1, 0), colors.white),
+                        ('BACKGROUND', (0, -1), (-1, -1), colors.lightgrey),
+                    ]))
+                    story.append(task_table)
+                story.append(Spacer(1, 18))
+        elif subtask_blocks is not None:
+            story.append(Paragraph("Module Subtasks", self.styles['SectionHeader']))
+            story.append(Paragraph("No module subtasks were generated for the selected modules.", self.styles['Normal']))
+            story.append(Spacer(1, 12))
         
         # Role Breakdown
         if result.get('breakdown_by_role'):

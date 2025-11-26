@@ -58,7 +58,7 @@ function App() {
   const isAuthenticated = !!authToken && !!authEmail
 
   // Simple scraping test state
-  const [scrapeUrl, setScrapeUrl] = useState('')
+  const [scrapeUrl, setScrapeUrl] = useState('https://sam.gov/workspace/contract/opp/4cac3a6c4d3f4cb89fde31910c8fe414/view')
   const [scrapeLoading, setScrapeLoading] = useState(false)
   const [scrapeError, setScrapeError] = useState<string | null>(null)
   const [scrapeResult, setScrapeResult] = useState<{
@@ -92,6 +92,11 @@ function App() {
   const [hardwareSubtotal, setHardwareSubtotal] = useState<number>(0)
   const [warrantyMonths, setWarrantyMonths] = useState<number>(0)
   const [warrantyCost, setWarrantyCost] = useState<number>(0)
+  const [subtaskPreview, setSubtaskPreview] = useState<any[] | null>(null)
+  const [subtaskStatus, setSubtaskStatus] = useState<string | null>(null)
+  const [subtaskError, setSubtaskError] = useState<string | null>(null)
+  const [subtaskLoading, setSubtaskLoading] = useState(false)
+  const [subtaskRaw, setSubtaskRaw] = useState<string | null>(null)
 
   useEffect(() => {
     // Test backend connection
@@ -533,6 +538,9 @@ function App() {
           hardware_subtotal: hardwareSubtotal,
           warranty_months: warrantyMonths,
           warranty_cost: warrantyCost,
+          proposal_id: proposalId || undefined,
+          proposal_version: versions?.length ? versions[versions.length - 1]?.version : undefined,
+          use_ai_subtasks: includeAI,
           narrative_sections: hasCustomNarrative ? editableNarrative : undefined,
           contract_url: contractUrl,
           contract_excerpt: contractExcerpt,
@@ -602,6 +610,71 @@ function App() {
       alert(e?.message || 'Narrative generation failed (check OPENAI_API_KEY on backend).')
     } finally {
       setLoadingNarrative(false)
+    }
+  }
+
+  const previewSubtasks = async () => {
+    if (selectedModules.length === 0) {
+      alert('Please select at least one module.')
+      return
+    }
+    setSubtaskLoading(true)
+    setSubtaskError(null)
+    setSubtaskPreview(null)
+    try {
+      const contractUrl = scrapeResult?.success ? (scrapeResult.final_url || scrapeResult.url) : undefined
+      const contractExcerpt = scrapeResult?.success ? (scrapeResult.text_excerpt || '') : undefined
+      const res = await fetch(`${API}/api/v1/subtasks/preview`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          modules: selectedModules,
+          complexity,
+          environment: 'production',
+          integration_level: 'moderate_integration',
+          geography: 'dc_metro',
+          clearance_level: 'secret',
+          is_prime_contractor: true,
+          custom_role_overrides: {},
+          project_name: projectName || undefined,
+          government_poc: governmentPOC || undefined,
+          account_manager: accountManager || undefined,
+          service_delivery_mgr: serviceDeliveryMgr || undefined,
+          service_delivery_exec: serviceDeliveryExec || undefined,
+          site_location: siteLocation || undefined,
+          email: email || undefined,
+          fy: fy || undefined,
+          rap_number: rapNumber || undefined,
+          psi_code: psiCode || undefined,
+          additional_comments: additionalComments || undefined,
+          sites,
+          overtime,
+          odc_items: odcItems,
+          fixed_price_items: fixedPriceItems,
+          hardware_subtotal: hardwareSubtotal,
+          warranty_months: warrantyMonths,
+          warranty_cost: warrantyCost,
+          contract_url: contractUrl,
+          contract_excerpt: contractExcerpt,
+          use_ai_subtasks: includeAI,
+        }),
+      })
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}))
+        const detail = err?.detail || 'Failed to generate subtasks'
+        throw new Error(detail)
+      }
+      const data = await res.json()
+      console.debug('Subtask preview response', data)
+      setSubtaskPreview(data?.module_subtasks || [])
+      setSubtaskStatus(data?.status || null)
+      setSubtaskRaw(data?.raw_ai_response || null)
+      if (data?.error) setSubtaskError(data.error)
+    } catch (e: any) {
+      console.error('Subtask preview failed', e)
+      setSubtaskError(e?.message || 'Failed to generate subtasks')
+    } finally {
+      setSubtaskLoading(false)
     }
   }
 
@@ -1445,12 +1518,54 @@ function App() {
           </select>
         </label>
       </div>
+      <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center', marginBottom: 8 }}>
+        <label>
+          Proposal ID (optional, saves PDF to proposal):
+          <input
+            type="text"
+            value={proposalId || ''}
+            onChange={(e) => setProposalId(e.target.value || null)}
+            placeholder="prop_abc123"
+            style={{ marginLeft: 6, padding: '4px 6px', minWidth: 200 }}
+          />
+        </label>
+        <div style={{ fontSize: 12, color: '#555' }}>
+          Selected modules + scraped excerpt will drive the subtask section in the PDF.
+        </div>
+      </div>
+
+      <div style={{ border: '1px dashed #ccc', borderRadius: 6, padding: 10, marginBottom: 12, background: '#fafafa' }}>
+        <div style={{ fontWeight: 600, marginBottom: 4 }}>Subtask context preview</div>
+        <div style={{ fontSize: 13, marginBottom: 4 }}>
+          <strong>Modules:</strong>{' '}
+          {selectedModules.length > 0
+            ? modules
+                .filter((m) => selectedModules.includes(m.id))
+                .map((m) => m.name)
+                .join(', ')
+            : 'Choose modules above to seed subtasks.'}
+        </div>
+        <div style={{ fontSize: 13 }}>
+          <strong>Contract excerpt:</strong>{' '}
+          {scrapeResult?.success
+            ? (scrapeResult.text_excerpt || '(no text extracted)').slice(0, 400) +
+              ((scrapeResult.text_excerpt || '').length > 400 ? '...' : '')
+            : 'Scrape the contract URL to embed customer context into the subtask descriptions.'}
+        </div>
+      </div>
+
       <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
         <button className="btn btn-primary" onClick={previewReport} disabled={previewLoading || readOnly}>
           {previewLoading ? 'Building Preview...' : 'Preview Report'}
         </button>
         <button className="btn btn-primary" onClick={downloadReport} disabled={downloading}>
           {downloading ? 'Generating...' : 'Download PDF Report'}
+        </button>
+        <button className="btn" onClick={previewNarrative} disabled={loadingNarrative}>
+          {loadingNarrative ? 'Regenerating Narrative...' : 'Regenerate Narrative'}
+        </button>
+        <button className="btn" onClick={previewSubtasks} disabled={subtaskLoading}>
+          {subtaskLoading ? 'Building Subtasks...' : 'Preview Subtasks'}
         </button>
         {!readOnly && (
           <button className="btn" onClick={clearAll}>
@@ -1606,6 +1721,59 @@ function App() {
                   ))}
                 </ul>
               </div>
+            )}
+          </div>
+
+          <div style={{ marginTop: 16 }}>
+            <h4>Subtask Preview</h4>
+            {subtaskLoading && <div style={{ fontSize: 12 }}>Building subtasks...</div>}
+            {subtaskError && <div style={{ fontSize: 12, color: 'crimson' }}>{subtaskError}</div>}
+            {subtaskStatus && <div style={{ fontSize: 12, color: '#555' }}>Status: {subtaskStatus}</div>}
+            {subtaskPreview && subtaskPreview.length > 0 ? (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 12, marginTop: 8 }}>
+                {subtaskPreview.map((st: any, idx: number) => (
+                  <div key={idx} style={{ border: '1px solid #ddd', borderRadius: 6, padding: 10, background: '#fafafa' }}>
+                    <div style={{ fontWeight: 600 }}>{st.sequence || idx + 1}. {st.module_name} ({st.focus_area})</div>
+                    <div style={{ fontSize: 12, marginTop: 4 }}><strong>Work Scope:</strong> {st.work_scope}</div>
+                    <div style={{ fontSize: 12, marginTop: 2 }}><strong>Estimate Basis:</strong> {st.estimate_basis}</div>
+                    <div style={{ fontSize: 12, marginTop: 2 }}><strong>Period of Performance:</strong> {st.period_of_performance}</div>
+                    {st.customer_context && <div style={{ fontSize: 12, marginTop: 2 }}><strong>Context:</strong> {st.customer_context}</div>}
+                    <div style={{ marginTop: 6 }}>
+                      <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+                        <thead>
+                          <tr>
+                            <th style={{ textAlign: 'left', borderBottom: '1px solid #ccc', padding: 4 }}>Task</th>
+                            <th style={{ textAlign: 'left', borderBottom: '1px solid #ccc', padding: 4 }}>Calc</th>
+                            <th style={{ textAlign: 'right', borderBottom: '1px solid #ccc', padding: 4 }}>Hours</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {(st.tasks || []).map((t: any, ix: number) => (
+                            <tr key={ix}>
+                              <td style={{ padding: 4 }}>{t.title}</td>
+                              <td style={{ padding: 4 }}>{t.calculation}</td>
+                              <td style={{ padding: 4, textAlign: 'right' }}>{Number(t.hours || 0).toFixed(1)}</td>
+                            </tr>
+                          ))}
+                          <tr>
+                            <td style={{ padding: 4, fontWeight: 600 }}>Subtask Total</td>
+                            <td />
+                            <td style={{ padding: 4, textAlign: 'right', fontWeight: 600 }}>{Number(st.total_hours || 0).toFixed(1)}</td>
+                          </tr>
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            ) : !subtaskLoading && <div style={{ fontSize: 12, color: '#666' }}>No subtasks previewed yet.</div>}
+            {subtaskRaw && (
+              <details style={{ marginTop: 8 }}>
+                <summary style={{ cursor: 'pointer', fontSize: 12 }}>Raw AI response</summary>
+                <pre style={{ whiteSpace: 'pre-wrap', fontSize: 11, background: '#f5f5f5', padding: 8, borderRadius: 4 }}>
+                  {subtaskRaw}
+                </pre>
+              </details>
             )}
           </div>
 

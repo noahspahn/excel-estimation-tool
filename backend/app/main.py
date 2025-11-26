@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException, Depends, Header
+from fastapi import FastAPI, HTTPException, Depends, Header, UploadFile, File
 from fastapi.responses import StreamingResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -31,9 +31,10 @@ if _backend_env.exists():
 from .services.calculation_service import CalculationService
 from .services.data_service import DataService
 from .services.web_scraper_service import WebScraperService, ScrapeRequest
+from .services.storage_service import StorageService
 from .models import ComplexityLevel, EstimationInput
 from .db import engine, get_session
-from .db_models import Base, Proposal, ProposalVersion
+from .db_models import Base, Proposal, ProposalVersion, ProposalDocument
 
 app = FastAPI(title="Estimation Tool API", version="2.0.0")
 
@@ -54,7 +55,42 @@ app.add_middleware(
 calculation_service = CalculationService()
 data_service = DataService()
 web_scraper_service = WebScraperService()
+storage_service = StorageService()
 # Note: ExportService (and ReportLab) are imported lazily in the report endpoint
+
+# -----------------------------
+# Simple auth / identity helper (must be defined before endpoints use it)
+# -----------------------------
+def get_current_user(authorization: str | None = Header(default=None)) -> str:
+    """
+    Resolve the current user from an Authorization header if present.
+
+    For now, API access does not require a token. If no valid bearer
+    token is supplied, fall back to a default dev user identity so
+    that endpoints can still operate without authentication.
+    """
+    default_user = os.getenv("DEV_DEFAULT_USER_EMAIL", "anonymous@example.com")
+
+    # No auth required for now: if there is no bearer token, just return the
+    # default dev user identity.
+    if not authorization or not authorization.lower().startswith("bearer "):
+        return default_user
+
+    token = authorization.split(" ", 1)[1].strip()
+    try:
+        return _verify_cognito_token(token)
+    except Exception:
+        # For any verification error (network, config, invalid token, etc.),
+        # fall back to the default user instead of failing the request.
+        return default_user
+
+
+def _get_owned_proposal(session, proposal_id: str, owner_email: str) -> Optional[Proposal]:
+    return (
+        session.query(Proposal)
+        .filter(Proposal.id == proposal_id, Proposal.owner_email == owner_email)
+        .one_or_none()
+    )
 
 # Ensure DB tables exist (lightweight, safe on startup)
 try:
@@ -173,6 +209,11 @@ class ReportRequest(EstimationRequest):
     # Optional scraped contract context to embed in the report
     contract_url: Optional[str] = None
     contract_excerpt: Optional[str] = None
+    # Optional persistence hooks
+    proposal_id: Optional[str] = None
+    proposal_version: Optional[int] = None
+    # AI subtasks toggle
+    use_ai_subtasks: bool = True
 
 
 class ScrapeUrlRequest(BaseModel):
@@ -328,7 +369,7 @@ def generate_narrative(req: NarrativeRequest):
 
 
 @app.post("/api/v1/report")
-def generate_report(req: ReportRequest, include_ai: bool = False, tone: str = "professional"):
+def generate_report(req: ReportRequest, include_ai: bool = False, tone: str = "professional", current_user: str = Depends(get_current_user)):
     """Generate and return a PDF estimation report as a download"""
     # Lazy import so the API can run without reportlab installed
     try:
@@ -401,6 +442,37 @@ def generate_report(req: ReportRequest, include_ai: bool = False, tone: str = "p
         "complexity": req.complexity,
         "module_count": len(req.modules),
     }
+    module_subtasks = calculation_service.build_module_subtasks(
+        est_input,
+        contract_excerpt=req.contract_excerpt,
+    )
+    subtask_status = "deterministic"
+    subtask_error: Optional[str] = None
+    subtask_ai_raw: Optional[str] = None
+    if req.use_ai_subtasks:
+        try:
+            from .services.ai_service import AIService  # type: ignore
+
+            ai = AIService()
+            if ai.is_configured():
+                module_subtasks, subtask_ai_raw = ai.generate_subtasks(
+                    module_subtasks,
+                    contract_excerpt=req.contract_excerpt,
+                    tone=tone,
+                )
+                subtask_status = "ai_generated"
+            else:
+                subtask_status = "ai_disabled"
+        except Exception as e:
+            # Keep deterministic subtasks but record failure
+            subtask_status = "ai_failed"
+            subtask_error = str(e)
+    estimation_data["module_subtasks"] = module_subtasks
+    estimation_data["subtask_generation_status"] = subtask_status
+    if subtask_ai_raw:
+        estimation_data["subtask_ai_raw"] = subtask_ai_raw
+    if subtask_error:
+        estimation_data["subtask_generation_error"] = subtask_error
 
     export_service = ExportService()
 
@@ -425,48 +497,67 @@ def generate_report(req: ReportRequest, include_ai: bool = False, tone: str = "p
         estimation_data,
         input_summary,
         narrative_sections=narrative_sections,
+        module_subtasks=module_subtasks,
     )
 
     from datetime import datetime
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     filename = f"estimation_report_{ts}.pdf"
 
+    storage_record: Optional[Dict[str, Any]] = None
+    if storage_service.is_configured() and req.proposal_id:
+        # Validate proposal ownership before persisting the report
+        with get_session() as session:
+            prop = (
+                session.query(Proposal)
+                .filter(Proposal.id == req.proposal_id, Proposal.owner_email == current_user)
+                .one_or_none()
+            )
+            if not prop:
+                raise HTTPException(status_code=404, detail="Proposal not found for current user")
+            upload = storage_service.upload_bytes(
+                pdf_bytes,
+                key_prefix=f"proposals/{req.proposal_id}/reports",
+                filename=filename,
+                content_type="application/pdf",
+            )
+            doc = ProposalDocument(
+                proposal_id=req.proposal_id,
+                version=req.proposal_version,
+                kind="report",
+                filename=upload["filename"],
+                content_type="application/pdf",
+                bucket=upload["bucket"],
+                key=upload["key"],
+                size_bytes=len(pdf_bytes),
+                meta={"tone": tone, "include_ai": include_ai},
+            )
+            session.add(doc)
+            # Commit happens via context manager in get_session
+            storage_record = {
+                "id": doc.id,
+                "bucket": upload["bucket"],
+                "key": upload["key"],
+                "presigned_url": storage_service.presign_get(upload["key"]),
+            }
+
+    headers = {
+        "Content-Disposition": f"attachment; filename=\"{filename}\""
+    }
+    if storage_record and storage_record.get("presigned_url"):
+        headers["X-Report-Location"] = storage_record["presigned_url"]
+        headers["X-Report-Document-Id"] = storage_record["id"]
+
     return StreamingResponse(
         iter([pdf_bytes]),
         media_type="application/pdf",
-        headers={
-            "Content-Disposition": f"attachment; filename=\"{filename}\""
-        },
+        headers=headers,
     )
 
 # -----------------------------
 # -----------------------------
 # Proposal persistence endpoints
 # -----------------------------
-
-def get_current_user(authorization: str | None = Header(default=None)) -> str:
-    """
-    Resolve the current user from an Authorization header if present.
-
-    For now, API access does not require a token. If no valid bearer
-    token is supplied, fall back to a default dev user identity so
-    that endpoints can still operate without authentication.
-    """
-    default_user = os.getenv("DEV_DEFAULT_USER_EMAIL", "anonymous@example.com")
-
-    # No auth required for now: if there is no bearer token, just return the
-    # default dev user identity.
-    if not authorization or not authorization.lower().startswith("bearer "):
-        return default_user
-
-    token = authorization.split(" ", 1)[1].strip()
-    try:
-        return _verify_cognito_token(token)
-    except Exception:
-        # For any verification error (network, config, invalid token, etc.),
-        # fall back to the default user instead of failing the request.
-        return default_user
-
 
 @app.post("/api/v1/scrape/url", response_model=ScrapeUrlResponse)
 def scrape_url(req: ScrapeUrlRequest, current_user: str = Depends(get_current_user)):
@@ -496,6 +587,77 @@ def scrape_url(req: ScrapeUrlRequest, current_user: str = Depends(get_current_us
         truncated=result.truncated,
         error=result.error,
     )
+
+
+@app.post("/api/v1/subtasks/preview")
+def preview_subtasks(req: ReportRequest, tone: str = "professional", current_user: str = Depends(get_current_user)):
+    """
+    Build module subtasks with optional AI enrichment for preview in the UI.
+    """
+    try:
+        complexity_level = ComplexityLevel(req.complexity)
+    except ValueError:
+        complexity_level = ComplexityLevel.MEDIUM
+
+    est_input = EstimationInput(
+        modules=req.modules,
+        complexity=complexity_level,
+        environment=req.environment,
+        integration_level=req.integration_level,
+        geography=req.geography,
+        clearance_level=req.clearance_level,
+        is_prime_contractor=req.is_prime_contractor,
+        custom_role_overrides=req.custom_role_overrides or {},
+        project_name=req.project_name,
+        government_poc=req.government_poc,
+        account_manager=req.account_manager,
+        service_delivery_mgr=req.service_delivery_mgr,
+        service_delivery_exec=req.service_delivery_exec,
+        site_location=req.site_location,
+        email=req.email,
+        fy=req.fy,
+        rap_number=req.rap_number,
+        psi_code=req.psi_code,
+        additional_comments=req.additional_comments,
+        sites=req.sites,
+        overtime=req.overtime,
+        odc_items=req.odc_items or [],
+        fixed_price_items=req.fixed_price_items or [],
+        hardware_subtotal=req.hardware_subtotal or 0.0,
+        warranty_months=req.warranty_months or 0,
+        warranty_cost=req.warranty_cost or 0.0,
+    )
+
+    module_subtasks = calculation_service.build_module_subtasks(
+        est_input, contract_excerpt=req.contract_excerpt
+    )
+    status = "deterministic"
+    error: Optional[str] = None
+    ai_raw: Optional[str] = None
+    if req.use_ai_subtasks:
+        try:
+            from .services.ai_service import AIService  # type: ignore
+
+            ai = AIService()
+            if ai.is_configured():
+                module_subtasks, ai_raw = ai.generate_subtasks(
+                    module_subtasks,
+                    contract_excerpt=req.contract_excerpt,
+                    tone=tone,
+                )
+                status = "ai_generated"
+            else:
+                status = "ai_disabled"
+        except Exception as e:
+            status = "ai_failed"
+            error = str(e)
+
+    return {
+        "module_subtasks": module_subtasks,
+        "status": status,
+        "error": error,
+        "raw_ai_response": ai_raw,
+    }
 
 
 class ProposalCreate(BaseModel):
@@ -679,6 +841,95 @@ def diff_versions(proposal_id: str, from_version: int, to_version: int, current_
             raise HTTPException(status_code=404, detail="One or both versions not found")
         diffs = _json_diff(v1.payload, v2.payload)
         return {"from": from_version, "to": to_version, "diffs": diffs}
+
+
+@app.get("/api/v1/proposals/{proposal_id}/documents")
+def list_documents(
+    proposal_id: str,
+    version: Optional[int] = None,
+    presign: bool = True,
+    current_user: str = Depends(get_current_user),
+):
+    with get_session() as session:
+        prop = _get_owned_proposal(session, proposal_id, current_user)
+        if not prop:
+            raise HTTPException(status_code=404, detail="Proposal not found")
+        query = session.query(ProposalDocument).filter(ProposalDocument.proposal_id == proposal_id)
+        if version is not None:
+            query = query.filter(ProposalDocument.version == version)
+        rows = query.order_by(ProposalDocument.created_at.asc()).all()
+
+    docs = []
+    for r in rows:
+        doc = {
+            "id": r.id,
+            "kind": r.kind,
+            "filename": r.filename,
+            "content_type": r.content_type,
+            "bucket": r.bucket,
+            "key": r.key,
+            "size_bytes": r.size_bytes,
+            "version": r.version,
+            "created_at": str(r.created_at) if r.created_at else None,
+            "meta": r.meta or {},
+        }
+        if presign and storage_service.is_configured():
+            doc["url"] = storage_service.presign_get(r.key)
+        docs.append(doc)
+    return docs
+
+
+@app.post("/api/v1/proposals/{proposal_id}/documents")
+async def upload_document(
+    proposal_id: str,
+    kind: str = "attachment",
+    version: Optional[int] = None,
+    source_url: Optional[str] = None,
+    file: UploadFile = File(...),
+    current_user: str = Depends(get_current_user),
+):
+    if not storage_service.is_configured():
+        raise HTTPException(status_code=400, detail="Storage not configured. Set S3_BUCKET/S3_REPORT_BUCKET.")
+
+    content = await file.read()
+    content_type = file.content_type or "application/octet-stream"
+    key_prefix = f"proposals/{proposal_id}/{kind}s"
+
+    with get_session() as session:
+        prop = _get_owned_proposal(session, proposal_id, current_user)
+        if not prop:
+            raise HTTPException(status_code=404, detail="Proposal not found")
+        upload = storage_service.upload_bytes(
+            content,
+            key_prefix=key_prefix,
+            filename=file.filename or "attachment",
+            content_type=content_type,
+        )
+        doc = ProposalDocument(
+            proposal_id=proposal_id,
+            version=version,
+            kind=kind,
+            filename=upload["filename"],
+            content_type=content_type,
+            bucket=upload["bucket"],
+            key=upload["key"],
+            size_bytes=len(content),
+            meta={"source_url": source_url} if source_url else None,
+        )
+        session.add(doc)
+        # commit via context manager
+        doc_id = doc.id
+
+    return {
+        "id": doc_id,
+        "kind": kind,
+        "filename": upload["filename"],
+        "bucket": upload["bucket"],
+        "key": upload["key"],
+        "size_bytes": len(content),
+        "content_type": content_type,
+        "url": storage_service.presign_get(upload["key"]),
+    }
 
 
 # -----------------------------

@@ -1,5 +1,12 @@
 import os
+import json
 from typing import Dict, Any, List, Optional
+
+
+class SubtaskAIError(RuntimeError):
+    def __init__(self, message: str, raw_content: Optional[str] = None):
+        super().__init__(message)
+        self.raw_content = raw_content
 
 
 class AIService:
@@ -148,6 +155,171 @@ class AIService:
 
         # Fallback: single blob under 'executive_summary' if JSON parse fails
         return {sections[0] if sections else "executive_summary": content}
+
+    def generate_subtasks(
+        self,
+        deterministic_subtasks: List[Dict[str, Any]],
+        contract_excerpt: Optional[str],
+        tone: str = "professional",
+        model: str = "gpt-4o-mini",
+    ) -> (List[Dict[str, Any]], Optional[str]):
+        """
+        Use GPT to polish/enrich module subtasks while keeping hours/calculations intact.
+        """
+        if not self.is_configured():
+            raise RuntimeError("OPENAI_API_KEY not configured")
+
+        client, client_mode = self._get_client()
+
+        sys_prompt = (
+            "You are a proposal writer. Rewrite the provided module subtasks into a concise, SOP-style "
+            "format. Incorporate customer context when provided. DO NOT change hours, calculations, or "
+            "the number of subtasks/tasks. Keep titles clear and outcomes-focused. "
+            "Return ONLY a JSON array; no code fences or extra text. Use double quotes in JSON."
+        )
+
+        user_prompt = json.dumps({
+            "tone": tone,
+            "contract_excerpt": (contract_excerpt or "")[:2000],
+            "instructions": [
+                "Keep the same subtasks and tasks count.",
+                "Preserve hours and calculations exactly.",
+                "Include work_scope, estimate_basis, period_of_performance, reasonableness.",
+                "If customer context is provided, weave it into work_scope and customer_context.",
+                "Return JSON array of subtasks with keys: sequence, module_name, focus_area, work_scope, estimate_basis, period_of_performance, reasonableness, customer_context (optional), tasks (array of {title, calculation, hours, description optional}), total_hours.",
+            ],
+            "subtasks": deterministic_subtasks,
+        })
+
+        messages = [
+            {"role": "system", "content": sys_prompt},
+            {"role": "user", "content": user_prompt},
+        ]
+
+        content = None
+        try:
+            if client_mode == "v1":
+                completion = client.chat.completions.create(
+                    model=model,
+                    messages=messages,
+                    temperature=0.4,
+                )
+                content = completion.choices[0].message.content or "[]"
+            else:
+                completion = client.ChatCompletion.create(
+                    model=model,
+                    messages=messages,
+                    temperature=0.4,
+                )
+                content = completion["choices"][0]["message"]["content"] or "[]"
+        except Exception:
+            raise
+        data = self._parse_jsonish_list(content)
+        if data is not None:
+            return data, content
+
+        # Fallback: raise with raw content for diagnostics
+        raise SubtaskAIError("AI subtask generation returned unparseable response", raw_content=content)
+
+    def _get_client(self):
+        client = None
+        client_mode = None  # "v1" or "v0"
+        v1_import_error = None
+        try:
+            from openai import OpenAI  # type: ignore
+
+            client = OpenAI(api_key=self.api_key)
+            client_mode = "v1"
+        except Exception as e:
+            v1_import_error = e
+            try:
+                import openai  # type: ignore
+
+                openai.api_key = self.api_key
+                client = openai
+                client_mode = "v0"
+            except Exception as legacy_e:
+                installed_version = None
+                try:
+                    import openai as maybe_openai  # type: ignore
+
+                    installed_version = getattr(maybe_openai, "__version__", None)
+                except Exception:
+                    pass
+
+                details = [
+                    "OpenAI SDK not available.",
+                    "Install or upgrade with: pip install -U openai",
+                ]
+                if installed_version:
+                    details.append(f"Detected openai version: {installed_version}")
+                details.append(f"v1 import error: {v1_import_error}")
+                details.append(f"v0 import error: {legacy_e}")
+                raise RuntimeError("; ".join(details))
+        return client, client_mode
+
+    def _parse_jsonish_list(self, content: str) -> Optional[List[Dict[str, Any]]]:
+        """
+        Attempt to parse model output into a list of subtasks even if wrapped
+        in markdown code fences or non-strict JSON.
+        """
+        text = content.strip()
+        # Strip code fences if present
+        if text.startswith("```"):
+            parts = text.split("```")
+            if len(parts) >= 2:
+                text = parts[1].strip()
+
+        # Try strict JSON (double-quoted)
+        try:
+            data = json.loads(text)
+            if isinstance(data, list):
+                return data  # type: ignore[return-value]
+            if isinstance(data, dict):
+                for key in ("subtasks", "module_subtasks", "tasks", "data"):
+                    if isinstance(data.get(key), list):
+                        return data[key]  # type: ignore[return-value]
+        except Exception:
+            pass
+
+        # Try lenient single-quote JSON
+        try:
+            fixed = text.replace("'", "\"")
+            data = json.loads(fixed)
+            if isinstance(data, list):
+                return data  # type: ignore[return-value]
+            if isinstance(data, dict):
+                for key in ("subtasks", "module_subtasks", "tasks", "data"):
+                    if isinstance(data.get(key), list):
+                        return data[key]  # type: ignore[return-value]
+        except Exception:
+            pass
+
+        # Try to locate first JSON array in the text
+        try:
+            start = text.index("[")
+            end = text.rindex("]")
+            snippet = text[start:end+1]
+            data = json.loads(snippet)
+            if isinstance(data, list):
+                return data  # type: ignore[return-value]
+        except Exception:
+            pass
+
+        # As a last resort, use ast.literal_eval for loose Python-like lists
+        try:
+            import ast
+            data = ast.literal_eval(text)
+            if isinstance(data, list):
+                return data  # type: ignore[return-value]
+            if isinstance(data, dict):
+                for key in ("subtasks", "module_subtasks", "tasks", "data"):
+                    if isinstance(data.get(key), list):
+                        return data[key]  # type: ignore[return-value]
+        except Exception:
+            pass
+
+        return None
 
 
     def _offline_narrative(

@@ -36,6 +36,7 @@ class Proposal(Base):
     )
 
     versions = relationship("ProposalVersion", back_populates="proposal", cascade="all, delete-orphan")
+    documents = relationship("ProposalDocument", back_populates="proposal", cascade="all, delete-orphan")
 
 
 class ProposalVersion(Base):
@@ -49,3 +50,21 @@ class ProposalVersion(Base):
     created_at = Column(DateTime, nullable=False, server_default=text("CURRENT_TIMESTAMP"))
 
     proposal = relationship("Proposal", back_populates="versions")
+
+
+class ProposalDocument(Base):
+    __tablename__ = "proposal_documents"
+
+    id = Column(String(64), primary_key=True, default=lambda: _gen_id("doc"))
+    proposal_id = Column(String(64), ForeignKey("proposals.id"), nullable=False, index=True)
+    version = Column(Integer, nullable=True)
+    kind = Column(String(32), nullable=False, default="report")  # report | attachment | source
+    filename = Column(String(255), nullable=False)
+    content_type = Column(String(128), nullable=True)
+    bucket = Column(String(255), nullable=False)
+    key = Column(String(512), nullable=False)
+    size_bytes = Column(Integer, nullable=True)
+    meta = Column(JSON, nullable=True)
+    created_at = Column(DateTime, nullable=False, server_default=text("CURRENT_TIMESTAMP"))
+
+    proposal = relationship("Proposal", back_populates="documents")
