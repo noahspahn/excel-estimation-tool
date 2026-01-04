@@ -203,6 +203,17 @@ class NarrativeRequest(EstimationRequest):
     tone: str = "professional"
 
 
+class NarrativeSectionPrompt(BaseModel):
+    """Request to rewrite or create a single narrative section with a custom prompt."""
+    section: str
+    estimation_data: Dict[str, Any]
+    input_summary: Optional[Dict[str, Any]] = None
+    prompt: Optional[str] = None
+    current_text: Optional[str] = None
+    tone: str = "professional"
+    model: str = "gpt-4o-mini"
+
+
 class ReportRequest(EstimationRequest):
     """Report request body, allowing optional custom narrative sections."""
     narrative_sections: Optional[Dict[str, str]] = None
@@ -366,6 +377,48 @@ def generate_narrative(req: NarrativeRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
     return JSONResponse({"narrative": narrative})
+
+
+@app.post("/api/v1/narrative/section")
+def rewrite_narrative_section(req: NarrativeSectionPrompt):
+    """Regenerate a single narrative section using a user-provided prompt."""
+    # Lazy import to avoid hard dependency when not configured
+    try:
+        from .services.ai_service import AIService  # type: ignore
+    except Exception:
+        raise HTTPException(status_code=500, detail="AI module missing. Ensure ai_service.py exists.")
+
+    ai = AIService()
+    if not ai.is_configured():
+        raise HTTPException(status_code=400, detail="OPENAI_API_KEY not configured on backend.")
+
+    # Derive a minimal input summary if the caller did not provide one
+    input_summary = req.input_summary
+    if input_summary is None:
+        est_input = (req.estimation_data or {}).get("estimation_input", {}) or {}
+        module_ids = est_input.get("modules") or []
+        if not module_ids:
+            mod_src = (req.estimation_data or {}).get("estimation_result", {}).get("breakdown_by_module", {}) or {}
+            module_ids = list(mod_src.keys()) if isinstance(mod_src, dict) else mod_src
+        input_summary = {
+            "complexity": est_input.get("complexity"),
+            "module_count": len(module_ids or []),
+        }
+
+    try:
+        text, raw = ai.rewrite_narrative_section(
+            estimation_data=req.estimation_data or {},
+            input_summary=input_summary,
+            section=req.section,
+            prompt=req.prompt,
+            current_text=req.current_text,
+            tone=req.tone,
+            model=req.model,
+        )
+    except RuntimeError as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+    return {"section": req.section, "text": text, "raw": raw}
 
 
 @app.post("/api/v1/report")
@@ -686,27 +739,68 @@ def create_proposal(req: ProposalCreate, current_user: str = Depends(get_current
             payload=req.payload,
         )
         session.add(v)
-        return ProposalResponse(
+        response = ProposalResponse(
             id=proposal.id,
             public_id=proposal.public_id,
             title=proposal.title,
             created_at=str(proposal.created_at) if proposal.created_at else None,
         )
 
+    # Optionally persist a copy of the payload to object storage so public previews
+    # still work if the DB is cleaned between deploys.
+    if storage_service.is_configured():
+        try:
+            storage_service.upload_bytes(
+                json.dumps({
+                    "id": response.id,
+                    "public_id": response.public_id,
+                    "title": response.title,
+                    "payload": req.payload,
+                    "created_at": response.created_at,
+                }).encode("utf-8"),
+                key_prefix=f"proposals/{response.public_id}",
+                filename="payload.json",
+                content_type="application/json",
+            )
+        except Exception:
+            # Non-fatal: DB already has the record; storage just improves durability
+            pass
+
+    return response
+
 
 @app.get("/api/v1/proposals/public/{public_id}")
 def get_public_proposal(public_id: str):
     with get_session() as session:
         obj = session.query(Proposal).filter(Proposal.public_id == public_id).one_or_none()
-        if not obj:
-            raise HTTPException(status_code=404, detail="Not found")
-        return {
-            "id": obj.id,
-            "public_id": obj.public_id,
-            "title": obj.title,
-            "payload": obj.payload,
-            "created_at": str(obj.created_at) if obj.created_at else None,
-        }
+        if obj:
+            return {
+                "id": obj.id,
+                "public_id": obj.public_id,
+                "title": obj.title,
+                "payload": obj.payload,
+                "created_at": str(obj.created_at) if obj.created_at else None,
+            }
+
+    # Fallback: attempt to load from object storage if configured
+    if storage_service.is_configured():
+        try:
+            key = f"{storage_service.prefix}/{('proposals/' + public_id).strip('/')}/payload.json" if storage_service.prefix else f"proposals/{public_id}/payload.json"
+            obj = storage_service.s3.get_object(Bucket=storage_service.bucket, Key=key)
+            raw = obj["Body"].read().decode("utf-8")
+            data = json.loads(raw)
+            return {
+                "id": data.get("id"),
+                "public_id": data.get("public_id", public_id),
+                "title": data.get("title"),
+                "payload": data.get("payload"),
+                "created_at": data.get("created_at"),
+                "from_storage": True,
+            }
+        except Exception:
+            pass
+
+    raise HTTPException(status_code=404, detail="Not found")
 
 
 class VersionCreate(BaseModel):

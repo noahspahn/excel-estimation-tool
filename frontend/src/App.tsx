@@ -16,6 +16,7 @@ const IS_LOCALHOST =
     window.location.hostname === '127.0.0.1')
 
 const DEV_STUB_EMAIL = (import.meta as any).env?.VITE_DEV_STUB_EMAIL || 'noahspahn@gmail.com'
+const AUTH_DISABLED = String((import.meta as any).env?.VITE_DISABLE_AUTH ?? 'true').toLowerCase() === 'true'
 
 function App() {
   const [backendStatus, setBackendStatus] = useState('Checking...')
@@ -36,6 +37,7 @@ function App() {
   const [readOnly, setReadOnly] = useState(false)
   const [shareUrl, setShareUrl] = useState<string | null>(null)
   const [sharePublicId, setSharePublicId] = useState<string | null>(null)
+  const [previewIdInput, setPreviewIdInput] = useState<string>('')
   const [proposalId, setProposalId] = useState<string | null>(null)
   const [prereqWarnings, setPrereqWarnings] = useState<string[]>([])
   const [authEmail, setAuthEmail] = useState<string | null>(null)
@@ -55,7 +57,8 @@ function App() {
   const [signupBusy, setSignupBusy] = useState(false)
   const [awaitingVerification, setAwaitingVerification] = useState(false)
   const [devLoginBusy, setDevLoginBusy] = useState(false)
-  const isAuthenticated = !!authToken && !!authEmail
+  const isAuthenticated = AUTH_DISABLED || (!!authToken && !!authEmail)
+  const shouldEnforceAuth = !AUTH_DISABLED && !IS_LOCALHOST
 
   // Simple scraping test state
   const [scrapeUrl, setScrapeUrl] = useState('https://sam.gov/workspace/contract/opp/4cac3a6c4d3f4cb89fde31910c8fe414/view')
@@ -148,9 +151,10 @@ function App() {
           setNarrative(narr)
           setEditableNarrative(narr)
           setEstimate(payload.estimation_result || null)
-          setShowPreview(true)
-          setReadOnly(true)
-          setShareUrl(window.location.href)
+      setShowPreview(true)
+      setReadOnly(true)
+      setShareUrl(window.location.href)
+      setPreviewIdInput(share)
         })
         .catch(err => {
           console.error(err)
@@ -385,7 +389,7 @@ function App() {
       setScrapeError('Enter a URL to scrape')
       return
     }
-    if (!authToken && !IS_LOCALHOST) {
+    if (!AUTH_DISABLED && !authToken && !IS_LOCALHOST) {
       setScrapeError('Sign in to run scraping tests')
       return
     }
@@ -395,7 +399,7 @@ function App() {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          ...(authToken ? { Authorization: `Bearer ${authToken}` } : {}),
+          ...(!AUTH_DISABLED && authToken ? { Authorization: `Bearer ${authToken}` } : {}),
         },
         body: JSON.stringify({
           url,
@@ -823,9 +827,11 @@ function App() {
       const estData = await estRes.json()
       const payload = buildDraft()
       payload.estimation_result = estData?.estimation_result
-      if (!authToken || !authEmail) { alert('Please sign in to create a share link.'); return }
+      if (!AUTH_DISABLED && (!authToken || !authEmail)) { alert('Please sign in to create a share link.'); return }
+      const headers: Record<string, string> = { 'Content-Type': 'application/json' }
+      if (!AUTH_DISABLED && authToken) headers.Authorization = `Bearer ${authToken}`
       const res = await fetch(`${API}/api/v1/proposals`, {
-        method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${authToken}` },
+        method: 'POST', headers,
         body: JSON.stringify({ title: projectName || 'Proposal', payload })
       })
       if (!res.ok) throw new Error('Failed to save proposal')
@@ -834,6 +840,7 @@ function App() {
       const url = `${window.location.origin}/preview/${encodeURIComponent(pub)}`
       setShareUrl(url)
       setSharePublicId(pub)
+      setPreviewIdInput(pub)
       setProposalId(data.id)
       setReadOnly(true)
       alert('Share link created. You can copy it from the banner.')
@@ -848,9 +855,11 @@ function App() {
   const saveVersion = async () => {
     if (!proposalId) { alert('Create a share link first to initialize the proposal.'); return }
     try {
-      if (!authToken || !authEmail) { alert('Please sign in first.'); return }
+      if (!AUTH_DISABLED && (!authToken || !authEmail)) { alert('Please sign in first.'); return }
+      const headers: Record<string, string> = { 'Content-Type': 'application/json' }
+      if (!AUTH_DISABLED && authToken) headers.Authorization = `Bearer ${authToken}`
       const res = await fetch(`${API}/api/v1/proposals/${proposalId}/versions`, {
-        method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${authToken}` },
+        method: 'POST', headers,
         body: JSON.stringify({ title: projectName || undefined, payload: buildDraft() })
       })
       if (!res.ok) throw new Error('Failed to save version')
@@ -865,9 +874,9 @@ function App() {
   const [versionsLoaded, setVersionsLoaded] = useState(false)
 
   const loadVersions = async () => {
-    if (!proposalId || !authToken) { setVersions([]); setVersionsLoaded(true); return }
+    if (!proposalId) { setVersions([]); setVersionsLoaded(true); return }
     try {
-      const res = await fetch(`${API}/api/v1/proposals/${proposalId}/versions`, { headers: { 'Authorization': `Bearer ${authToken}` } })
+      const res = await fetch(`${API}/api/v1/proposals/${proposalId}/versions`, { headers: !AUTH_DISABLED && authToken ? { 'Authorization': `Bearer ${authToken}` } : {} })
       if (!res.ok) throw new Error('Failed to load versions')
       const rows = await res.json()
       setVersions(rows || [])
@@ -878,7 +887,7 @@ function App() {
   }
 
   useEffect(() => {
-    if (proposalId && authToken) {
+    if (proposalId) {
       loadVersions()
     }
   }, [proposalId, authToken])
@@ -913,9 +922,9 @@ function App() {
   }
 
   const restoreVersion = async (ver: number) => {
-    if (!proposalId || !authToken) { alert('Sign in and create a share link first.'); return }
+    if (!proposalId || (!AUTH_DISABLED && !authToken)) { alert('Sign in and create a share link first.'); return }
     try {
-      const res = await fetch(`${API}/api/v1/proposals/${proposalId}/versions/${ver}`, { headers: { 'Authorization': `Bearer ${authToken}` } })
+      const res = await fetch(`${API}/api/v1/proposals/${proposalId}/versions/${ver}`, { headers: !AUTH_DISABLED && authToken ? { 'Authorization': `Bearer ${authToken}` } : {} })
       if (!res.ok) throw new Error('Failed to load version')
       const data = await res.json()
       applyPayloadToEditor(data?.payload)
@@ -1033,6 +1042,13 @@ function App() {
     }
   }
 
+  const openPreviewPage = () => {
+    const id = (previewIdInput || '').trim()
+    if (!id) { alert('Enter a public preview ID.'); return }
+    const url = `/preview/${encodeURIComponent(id)}`
+    window.open(url, '_blank')
+  }
+
   const clearAll = () => {
     setSelectedModules([])
     setComplexity('M')
@@ -1062,7 +1078,7 @@ function App() {
     setWarrantyCost(0)
   }
 
-  if (!authChecked && !IS_LOCALHOST) {
+  if (shouldEnforceAuth && !authChecked) {
     return (
       <div className="app app-shell">
         <h1>Estimation Tool</h1>
@@ -1071,7 +1087,7 @@ function App() {
     )
   }
 
-  if (!isAuthenticated && !IS_LOCALHOST) {
+  if (shouldEnforceAuth && !isAuthenticated) {
     return (
       <div className="app auth-screen">
         <div style={{ maxWidth: 480, width: '100%', padding: 24, border: '1px solid #ddd', borderRadius: 8, boxShadow: '0 2px 6px rgba(0,0,0,0.04)' }}>
@@ -1220,14 +1236,16 @@ function App() {
         <div style={{ minWidth: 320, padding: 8, border: '1px solid #eee', borderRadius: 8 }}>
           <div>
             <div style={{ marginBottom: 6 }}>
-              {authEmail ? (
+              {AUTH_DISABLED ? (
+                <span>Auth temporarily disabled</span>
+              ) : authEmail ? (
                 <>Signed in as <strong>{authEmail}</strong></>
               ) : (
                 <span>Not signed in</span>
               )}
             </div>
             <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-              {authEmail && (
+              {!AUTH_DISABLED && authEmail && (
                 <button
                   className="btn"
                   onClick={() => {
@@ -1240,7 +1258,7 @@ function App() {
                   Sign out
                 </button>
               )}
-              {IS_LOCALHOST && DEV_STUB_EMAIL && !authEmail && (
+              {!AUTH_DISABLED && IS_LOCALHOST && DEV_STUB_EMAIL && !authEmail && (
                 <button
                   className="btn"
                   onClick={handleDevStubLogin}
@@ -1250,7 +1268,7 @@ function App() {
                 </button>
               )}
             </div>
-            {IS_LOCALHOST && DEV_STUB_EMAIL && !authEmail && (
+            {!AUTH_DISABLED && IS_LOCALHOST && DEV_STUB_EMAIL && !authEmail && (
               <div style={{ marginTop: 4, fontSize: 11, color: '#666' }}>
                 Uses backend dev auth endpoints with {DEV_STUB_EMAIL}.
               </div>
@@ -1598,6 +1616,21 @@ function App() {
             Create Share Link
           </button>
         )}
+        <div style={{ display: 'inline-flex', gap: 6, alignItems: 'center' }}>
+          <label>
+            Public preview ID:
+            <input
+              type="text"
+              value={previewIdInput}
+              onChange={(e) => setPreviewIdInput(e.target.value)}
+              placeholder="public id"
+              style={{ marginLeft: 6, padding: '4px 6px', minWidth: 160 }}
+            />
+          </label>
+          <button className="btn" onClick={openPreviewPage}>
+            Open Preview
+          </button>
+        </div>
         {!readOnly && (
           <button className="btn" onClick={saveVersion} disabled={!proposalId}>
             Save Version
@@ -1794,7 +1827,7 @@ function App() {
               </div>
             ))}
           </div>
-          {proposalId && authToken && (
+          {proposalId && (AUTH_DISABLED || authToken) && (
             <div style={{ marginTop: 24 }}>
               <h4>Versions</h4>
               <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 8 }}>

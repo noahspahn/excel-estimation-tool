@@ -1,6 +1,6 @@
 import os
 import json
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Tuple
 
 
 class SubtaskAIError(RuntimeError):
@@ -69,52 +69,20 @@ class AIService:
         if sections is None:
             sections = ["executive_summary", "assumptions", "risks", "recommendations"]
 
-        result = estimation_data.get("estimation_result", {})
-
-        # Prepare a compact, structured context for the model
-        context = {
-            "summary": {
-                "total_labor_hours": round(float(result.get("total_labor_hours", 0)), 2),
-                "total_labor_cost": round(float(result.get("total_labor_cost", 0)), 2),
-                "risk_reserve": round(float(result.get("risk_reserve", 0)), 2),
-                "overhead_cost": round(float(result.get("overhead_cost", 0)), 2),
-                "total_cost": round(float(result.get("total_cost", 0)), 2),
-                "effective_hourly_rate": round(float(result.get("effective_hourly_rate", 0)), 2),
-                "complexity": input_summary.get("complexity"),
-                "module_count": input_summary.get("module_count"),
-            },
-            "modules": [
-                {
-                    "name": m.get("module_name"),
-                    "focus_area": m.get("focus_area"),
-                    "hours": round(float(m.get("hours", 0)), 1),
-                    "cost": round(float(m.get("cost", 0)), 2),
-                }
-                for m in (result.get("breakdown_by_module", {}) or {}).values()
-            ],
-            "roles": [
-                {
-                    "role": r.get("role_name"),
-                    "hours": round(float(r.get("hours", 0)), 1),
-                    "rate": round(float(r.get("effective_rate", 0)), 2),
-                    "cost": round(float(r.get("cost", 0)), 2),
-                }
-                for r in (result.get("breakdown_by_role", {}) or {}).values()
-            ],
-        }
+        context = self._build_narrative_context(estimation_data, input_summary)
 
         sys_prompt = (
-            "You are a consulting engagement manager. Write concise, clear, and client-ready "
-            "narratives for an estimation report. Use the provided data faithfully. Avoid exaggeration."
+            "You are a consulting engagement manager. Write concise, clear, and client-ready narratives "
+            "for an estimation report. Use the provided data faithfully. Avoid exaggeration. "
+            "Return ONLY valid JSON (no code fences, no extra text) with keys matching the requested sections."
         )
 
-        user_prompt = (
-            "Generate the following sections as short paragraphs (3-6 sentences each).\n"
-            f"Tone: {tone}.\n"
-            f"Sections: {', '.join(sections)}.\n"
-            "Return a JSON object with keys exactly matching the requested section names.\n"
-            "Context follows as JSON:\n" + str(context)
-        )
+        user_payload = {
+            "tone": tone,
+            "sections": sections,
+            "context": context,
+        }
+        user_prompt = json.dumps(user_payload)
 
         messages = [
             {"role": "system", "content": sys_prompt},
@@ -127,7 +95,7 @@ class AIService:
                 completion = client.chat.completions.create(
                     model=model,
                     messages=messages,
-                    temperature=0.5,
+                    temperature=0.3,
                 )
                 content = completion.choices[0].message.content or "{}"
             except Exception:
@@ -137,21 +105,16 @@ class AIService:
                 completion = client.ChatCompletion.create(
                     model=model,
                     messages=messages,
-                    temperature=0.5,
+                    temperature=0.3,
                 )
                 content = completion["choices"][0]["message"]["content"] or "{}"
             except Exception:
                 return self._offline_narrative(context, sections, tone)
 
-        # Best-effort parse into a dict; if parsing fails, wrap as a single section
-        try:
-            import json
-
-            data = json.loads(content)
-            if isinstance(data, dict):
-                return {k: str(v) for k, v in data.items()}
-        except Exception:
-            pass
+        data = self._parse_jsonish_object(content)
+        if isinstance(data, dict):
+            # Ensure only requested sections
+            return {k: str(data.get(k, "")) for k in sections}
 
         # Fallback: single blob under 'executive_summary' if JSON parse fails
         return {sections[0] if sections else "executive_summary": content}
@@ -220,6 +183,145 @@ class AIService:
 
         # Fallback: raise with raw content for diagnostics
         raise SubtaskAIError("AI subtask generation returned unparseable response", raw_content=content)
+
+    def rewrite_narrative_section(
+        self,
+        estimation_data: Dict[str, Any],
+        input_summary: Optional[Dict[str, Any]],
+        section: str,
+        prompt: Optional[str] = None,
+        current_text: Optional[str] = None,
+        tone: str = "professional",
+        model: str = "gpt-4o-mini",
+    ) -> Tuple[str, Optional[str]]:
+        """
+        Regenerate or refine a single narrative section with an inline prompt.
+        Returns (text, raw_model_response).
+        """
+        if not self.is_configured():
+            raise RuntimeError("OPENAI_API_KEY not configured")
+
+        estimation_data = estimation_data or {}
+        client, client_mode = self._get_client()
+
+        context = self._build_narrative_context(estimation_data, input_summary)
+        if estimation_data.get("narrative_sections"):
+            context["existing_narrative"] = estimation_data["narrative_sections"]
+
+        sys_prompt = (
+            "You are an expert proposal writer editing one section of a report. "
+            "Respect the provided facts and numbers. Apply the user's change request while keeping the tone aligned. "
+            "Return ONLY JSON with a single key that matches the requested section."
+        )
+        user_payload = {
+            "section": section,
+            "tone": tone,
+            "instructions": prompt or "",
+            "current_text": current_text or "",
+            "context": context,
+        }
+        messages = [
+            {"role": "system", "content": sys_prompt},
+            {"role": "user", "content": json.dumps(user_payload)},
+        ]
+
+        content: Optional[str] = None
+        try:
+            if client_mode == "v1":
+                completion = client.chat.completions.create(
+                    model=model,
+                    messages=messages,
+                    temperature=0.35,
+                )
+                content = completion.choices[0].message.content or "{}"
+            else:
+                completion = client.ChatCompletion.create(
+                    model=model,
+                    messages=messages,
+                    temperature=0.35,
+                )
+                content = completion["choices"][0]["message"]["content"] or "{}"
+        except Exception:
+            fallback = self._offline_narrative(context, [section], tone)
+            return fallback.get(section, current_text or ""), None
+
+        parsed = self._parse_jsonish_object(content or "{}")
+        text = None
+        if isinstance(parsed, dict):
+            for key in (section, "text", "content", "value"):
+                if parsed.get(key) is not None:
+                    text = parsed.get(key)
+                    break
+
+        if text is None and content is not None:
+            text = content.strip()
+
+        final_text = str(text or current_text or "")
+        return final_text, content
+
+    def _build_narrative_context(
+        self,
+        estimation_data: Dict[str, Any],
+        input_summary: Optional[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        """Normalize estimation data into a compact context for AI prompts."""
+        estimation_data = estimation_data or {}
+        result = estimation_data.get("estimation_result", {}) or {}
+        modules_src = result.get("breakdown_by_module", {}) or {}
+        roles_src = result.get("breakdown_by_role", {}) or {}
+        module_items = modules_src.values() if isinstance(modules_src, dict) else modules_src
+        role_items = roles_src.values() if isinstance(roles_src, dict) else roles_src
+        context: Dict[str, Any] = {
+            "summary": {
+                "total_labor_hours": round(float(result.get("total_labor_hours", 0)), 2),
+                "total_labor_cost": round(float(result.get("total_labor_cost", 0)), 2),
+                "risk_reserve": round(float(result.get("risk_reserve", 0)), 2),
+                "overhead_cost": round(float(result.get("overhead_cost", 0)), 2),
+                "total_cost": round(float(result.get("total_cost", 0)), 2),
+                "effective_hourly_rate": round(float(result.get("effective_hourly_rate", 0)), 2),
+                "complexity": (input_summary or {}).get("complexity"),
+                "module_count": (input_summary or {}).get("module_count"),
+            },
+            "modules": [
+                {
+                    "name": m.get("module_name"),
+                    "focus_area": m.get("focus_area"),
+                    "hours": round(float(m.get("hours", 0)), 1),
+                    "cost": round(float(m.get("cost", 0)), 2),
+                }
+                for m in module_items
+            ],
+            "roles": [
+                {
+                    "role": r.get("role_name"),
+                    "hours": round(float(r.get("hours", 0)), 1),
+                    "rate": round(float(r.get("effective_rate", 0)), 2),
+                    "cost": round(float(r.get("cost", 0)), 2),
+                }
+                for r in role_items
+            ],
+        }
+        if estimation_data.get("project_info"):
+            context["project_info"] = estimation_data["project_info"]
+        if estimation_data.get("module_subtasks"):
+            context["module_subtasks"] = estimation_data["module_subtasks"]
+        if estimation_data.get("contract_source"):
+            context["contract_source"] = estimation_data["contract_source"]
+        if estimation_data.get("narrative_sections"):
+            context["narrative_sections"] = estimation_data["narrative_sections"]
+        if estimation_data.get("odc_items") is not None:
+            context["odc_items"] = estimation_data["odc_items"]
+        if estimation_data.get("fixed_price_items") is not None:
+            context["fixed_price_items"] = estimation_data["fixed_price_items"]
+        if estimation_data.get("hardware_subtotal") is not None:
+            context["hardware_subtotal"] = estimation_data["hardware_subtotal"]
+        if estimation_data.get("warranty_months") is not None:
+            context["warranty_months"] = estimation_data["warranty_months"]
+        if estimation_data.get("warranty_cost") is not None:
+            context["warranty_cost"] = estimation_data["warranty_cost"]
+        if input_summary:
+            context["input_summary"] = input_summary
+        return context
 
     def _get_client(self):
         client = None
@@ -316,6 +418,56 @@ class AIService:
                 for key in ("subtasks", "module_subtasks", "tasks", "data"):
                     if isinstance(data.get(key), list):
                         return data[key]  # type: ignore[return-value]
+        except Exception:
+            pass
+
+        return None
+
+    def _parse_jsonish_object(self, content: str) -> Optional[Dict[str, Any]]:
+        """
+        Attempt to parse model output into a dict even if wrapped in code fences or
+        using single quotes.
+        """
+        text = content.strip()
+        if text.startswith("```"):
+            parts = text.split("```")
+            if len(parts) >= 2:
+                text = parts[1].strip()
+
+        # Strict JSON
+        try:
+            data = json.loads(text)
+            if isinstance(data, dict):
+                return data
+        except Exception:
+            pass
+
+        # Lenient single-quote JSON
+        try:
+            fixed = text.replace("'", "\"")
+            data = json.loads(fixed)
+            if isinstance(data, dict):
+                return data
+        except Exception:
+            pass
+
+        # Extract first JSON object braces
+        try:
+            start = text.index("{")
+            end = text.rindex("}")
+            snippet = text[start:end+1]
+            data = json.loads(snippet)
+            if isinstance(data, dict):
+                return data
+        except Exception:
+            pass
+
+        # Final attempt: ast.literal_eval
+        try:
+            import ast
+            data = ast.literal_eval(text)
+            if isinstance(data, dict):
+                return data
         except Exception:
             pass
 
