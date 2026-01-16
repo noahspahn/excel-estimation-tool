@@ -26,8 +26,11 @@ function App() {
   const [downloading, setDownloading] = useState(false)
   const [includeAI, setIncludeAI] = useState(false)
   const [tone, setTone] = useState('professional')
+  const [styleGuide, setStyleGuide] = useState('')
   const [loadingNarrative, setLoadingNarrative] = useState(false)
   const [, setNarrative] = useState<Record<string, string> | null>(null)
+  const [narrativeSectionBusy, setNarrativeSectionBusy] = useState<string | null>(null)
+  const [narrativeSectionError, setNarrativeSectionError] = useState<string | null>(null)
 
   // Report preview state
   const [estimate, setEstimate] = useState<any | null>(null)
@@ -147,6 +150,7 @@ function App() {
           setWarrantyMonths(ei.warranty_months || 0)
           setWarrantyCost(ei.warranty_cost || 0)
           setTone(payload.tone || 'professional')
+          setStyleGuide(payload.style_guide || '')
           const narr = payload.narrative_sections || {}
           setNarrative(narr)
           setEditableNarrative(narr)
@@ -548,6 +552,7 @@ function App() {
           narrative_sections: hasCustomNarrative ? editableNarrative : undefined,
           contract_url: contractUrl,
           contract_excerpt: contractExcerpt,
+          style_guide: styleGuide || undefined,
         })
       })
       if (!res.ok) throw new Error('Failed to generate report')
@@ -581,6 +586,8 @@ function App() {
     setLoadingNarrative(true)
     setNarrative(null)
     try {
+      const contractUrl = scrapeResult?.success ? (scrapeResult.final_url || scrapeResult.url) : undefined
+      const contractExcerpt = scrapeResult?.success ? (scrapeResult.text_excerpt || '') : undefined
       const res = await fetch(`${API}/api/v1/narrative`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -593,6 +600,27 @@ function App() {
           clearance_level: 'secret',
           is_prime_contractor: true,
           custom_role_overrides: {},
+          project_name: projectName || undefined,
+          government_poc: governmentPOC || undefined,
+          account_manager: accountManager || undefined,
+          service_delivery_mgr: serviceDeliveryMgr || undefined,
+          service_delivery_exec: serviceDeliveryExec || undefined,
+          site_location: siteLocation || undefined,
+          email: email || undefined,
+          fy: fy || undefined,
+          rap_number: rapNumber || undefined,
+          psi_code: psiCode || undefined,
+          additional_comments: additionalComments || undefined,
+          sites,
+          overtime,
+          odc_items: odcItems,
+          fixed_price_items: fixedPriceItems,
+          hardware_subtotal: hardwareSubtotal,
+          warranty_months: warrantyMonths,
+          warranty_cost: warrantyCost,
+          contract_url: contractUrl,
+          contract_excerpt: contractExcerpt,
+          style_guide: styleGuide || undefined,
           tone,
           sections: ['executive_summary','assumptions','risks','recommendations']
         })
@@ -614,6 +642,149 @@ function App() {
       alert(e?.message || 'Narrative generation failed (check OPENAI_API_KEY on backend).')
     } finally {
       setLoadingNarrative(false)
+    }
+  }
+
+  const rewriteNarrativeSection = async (sectionKey: string) => {
+    if (readOnly) return
+    if (selectedModules.length === 0) {
+      alert('Please select at least one module.')
+      return
+    }
+    setNarrativeSectionError(null)
+    setNarrativeSectionBusy(sectionKey)
+    try {
+      let estimationResult = estimate
+      if (!estimationResult) {
+        const estRes = await fetch(`${API}/api/v1/estimate`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            modules: selectedModules,
+            complexity,
+            environment: 'production',
+            integration_level: 'moderate_integration',
+            geography: 'dc_metro',
+            clearance_level: 'secret',
+            is_prime_contractor: true,
+            custom_role_overrides: {},
+            project_name: projectName,
+            government_poc: governmentPOC,
+            account_manager: accountManager,
+            service_delivery_mgr: serviceDeliveryMgr,
+            service_delivery_exec: serviceDeliveryExec,
+            site_location: siteLocation,
+            email,
+            fy,
+            rap_number: rapNumber,
+            psi_code: psiCode,
+            additional_comments: additionalComments,
+            sites,
+            overtime,
+            odc_items: odcItems,
+            fixed_price_items: fixedPriceItems,
+            hardware_subtotal: hardwareSubtotal,
+            warranty_months: warrantyMonths,
+            warranty_cost: warrantyCost,
+          })
+        })
+        if (!estRes.ok) throw new Error('Failed to calculate estimate')
+        const estData = await estRes.json()
+        estimationResult = estData?.estimation_result || null
+        setEstimate(estimationResult)
+      }
+
+      const contractUrl = scrapeResult?.success ? (scrapeResult.final_url || scrapeResult.url) : undefined
+      const contractExcerpt = scrapeResult?.success ? (scrapeResult.text_excerpt || '') : undefined
+      const estimationInput = {
+        modules: selectedModules,
+        complexity,
+        environment: 'production',
+        integration_level: 'moderate_integration',
+        geography: 'dc_metro',
+        clearance_level: 'secret',
+        is_prime_contractor: true,
+        custom_role_overrides: {},
+        project_name: projectName,
+        government_poc: governmentPOC,
+        account_manager: accountManager,
+        service_delivery_mgr: serviceDeliveryMgr,
+        service_delivery_exec: serviceDeliveryExec,
+        site_location: siteLocation,
+        email,
+        fy,
+        rap_number: rapNumber,
+        psi_code: psiCode,
+        additional_comments: additionalComments,
+        sites,
+        overtime,
+        odc_items: odcItems,
+        fixed_price_items: fixedPriceItems,
+        hardware_subtotal: hardwareSubtotal,
+        warranty_months: warrantyMonths,
+        warranty_cost: warrantyCost,
+      }
+      const estimationData: any = {
+        estimation_result: estimationResult || {},
+        estimation_input: estimationInput,
+        project_info: {
+          project_name: projectName,
+          government_poc: governmentPOC,
+          account_manager: accountManager,
+          service_delivery_mgr: serviceDeliveryMgr,
+          service_delivery_exec: serviceDeliveryExec,
+          site_location: siteLocation,
+          email,
+          fy,
+          rap_number: rapNumber,
+          psi_code: psiCode,
+          additional_comments: additionalComments,
+        },
+        odc_items: odcItems,
+        fixed_price_items: fixedPriceItems,
+        hardware_subtotal: hardwareSubtotal,
+        warranty_months: warrantyMonths,
+        warranty_cost: warrantyCost,
+        narrative_sections: editableNarrative,
+      }
+      if (contractUrl || contractExcerpt) {
+        estimationData.contract_source = {
+          url: contractUrl,
+          excerpt: contractExcerpt,
+        }
+      }
+      if (styleGuide.trim()) {
+        estimationData.style_guide = styleGuide.trim()
+      }
+
+      const res = await fetch(`${API}/api/v1/narrative/section`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          section: sectionKey,
+          prompt: '',
+          current_text: editableNarrative?.[sectionKey] || '',
+          tone,
+          estimation_data: estimationData,
+          input_summary: {
+            complexity,
+            module_count: selectedModules.length,
+          },
+          style_guide: styleGuide.trim() || undefined,
+        }),
+      })
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}))
+        throw new Error(err?.detail || 'Failed to generate text for this section.')
+      }
+      const data = await res.json()
+      const text = typeof data?.text === 'string' ? data.text : data?.[sectionKey]
+      if (!text) throw new Error('No text returned from AI.')
+      setEditableNarrative(prev => ({ ...prev, [sectionKey]: text }))
+    } catch (e: any) {
+      setNarrativeSectionError(e?.message || 'Unable to update section.')
+    } finally {
+      setNarrativeSectionBusy(null)
     }
   }
 
@@ -715,6 +886,7 @@ function App() {
     narrative_sections: editableNarrative,
     estimation_result: estimate,
     tone,
+    style_guide: styleGuide,
     ts: new Date().toISOString(),
   })
 
@@ -751,6 +923,7 @@ function App() {
       setWarrantyMonths(ei.warranty_months || 0)
       setWarrantyCost(ei.warranty_cost || 0)
       setTone(d.tone || 'professional')
+      setStyleGuide(d.style_guide || '')
       const narr = d.narrative_sections || {}
       setNarrative(narr)
       setEditableNarrative(narr)
@@ -802,6 +975,7 @@ function App() {
         setWarrantyMonths(ei.warranty_months || 0)
         setWarrantyCost(ei.warranty_cost || 0)
         setTone(d.tone || 'professional')
+        setStyleGuide(d.style_guide || '')
         const narr = d.narrative_sections || {}
         setNarrative(narr)
         setEditableNarrative(narr)
@@ -914,6 +1088,7 @@ function App() {
     setHardwareSubtotal(ei.hardware_subtotal || 0)
     setWarrantyMonths(ei.warranty_months || 0)
     setWarrantyCost(ei.warranty_cost || 0)
+    setStyleGuide(payload?.style_guide || '')
     const narr = payload?.narrative_sections || {}
     setNarrative(narr)
     setEditableNarrative(narr)
@@ -983,6 +1158,8 @@ function App() {
 
       // 2) Optionally fetch AI narrative
       if (includeAI) {
+        const contractUrl = scrapeResult?.success ? (scrapeResult.final_url || scrapeResult.url) : undefined
+        const contractExcerpt = scrapeResult?.success ? (scrapeResult.text_excerpt || '') : undefined
         const nRes = await fetch(`${API}/api/v1/narrative`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -1013,6 +1190,9 @@ function App() {
             hardware_subtotal: hardwareSubtotal,
             warranty_months: warrantyMonths,
             warranty_cost: warrantyCost,
+            contract_url: contractUrl,
+            contract_excerpt: contractExcerpt,
+            style_guide: styleGuide || undefined,
             tone,
             sections: ['executive_summary','assumptions','risks','recommendations']
           })
@@ -1054,6 +1234,7 @@ function App() {
     setComplexity('M')
     setIncludeAI(false)
     setTone('professional')
+    setStyleGuide('')
     setNarrative(null)
     setEditableNarrative({})
     setEstimate(null)
@@ -1076,6 +1257,8 @@ function App() {
     setHardwareSubtotal(0)
     setWarrantyMonths(0)
     setWarrantyCost(0)
+    setNarrativeSectionBusy(null)
+    setNarrativeSectionError(null)
   }
 
   if (shouldEnforceAuth && !authChecked) {
@@ -1666,6 +1849,20 @@ function App() {
           </button>
         )}
       </div>
+      <div style={{ marginBottom: 12 }}>
+        <label style={{ display: 'block', fontWeight: 600 }}>Style guide (optional)</label>
+        <textarea
+          value={styleGuide}
+          onChange={(e) => setStyleGuide(e.target.value)}
+          rows={3}
+          style={{ width: '100%', padding: 8, fontFamily: 'inherit' }}
+          disabled={readOnly}
+          placeholder="e.g., concise, active voice, avoid jargon; use client-ready tone"
+        />
+        <div style={{ fontSize: 12, color: '#666' }}>
+          Used when AI generates or rewrites narrative sections.
+        </div>
+      </div>
       {showPreview && estimate && (
         <div style={{ marginTop: 12, padding: 12, border: '1px solid #ddd', borderRadius: 6 }}>
           <h3>Report Preview</h3>
@@ -1812,9 +2009,23 @@ function App() {
 
           <div style={{ marginTop: 16 }}>
             <h4>Editable Narrative</h4>
+            {narrativeSectionError && (
+              <div style={{ fontSize: 12, color: 'crimson', marginBottom: 6 }}>
+                {narrativeSectionError}
+              </div>
+            )}
             {['executive_summary','assumptions','risks','recommendations'].map((k) => (
               <div key={k} style={{ marginBottom: 12 }}>
-                <label style={{ display: 'block', fontWeight: 600 }}>{k.replace('_',' ').toUpperCase()}</label>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8 }}>
+                  <label style={{ display: 'block', fontWeight: 600 }}>{k.replace('_',' ').toUpperCase()}</label>
+                  <button
+                    className="btn"
+                    onClick={() => rewriteNarrativeSection(k)}
+                    disabled={readOnly || narrativeSectionBusy === k}
+                  >
+                    {narrativeSectionBusy === k ? 'Regenerating...' : 'Regenerate'}
+                  </button>
+                </div>
                 <textarea
                   value={editableNarrative?.[k] || ''}
                   onChange={(e) => setEditableNarrative(prev => ({ ...prev, [k]: e.target.value }))}

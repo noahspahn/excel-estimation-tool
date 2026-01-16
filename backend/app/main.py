@@ -201,6 +201,11 @@ class EstimationRequest(BaseModel):
 class NarrativeRequest(EstimationRequest):
     sections: Optional[List[str]] = None
     tone: str = "professional"
+    # Optional scraped contract context for narrative generation
+    contract_url: Optional[str] = None
+    contract_excerpt: Optional[str] = None
+    # Optional style guide for AI narrative
+    style_guide: Optional[str] = None
 
 
 class NarrativeSectionPrompt(BaseModel):
@@ -212,11 +217,14 @@ class NarrativeSectionPrompt(BaseModel):
     current_text: Optional[str] = None
     tone: str = "professional"
     model: str = "gpt-4o-mini"
+    style_guide: Optional[str] = None
 
 
 class ReportRequest(EstimationRequest):
     """Report request body, allowing optional custom narrative sections."""
     narrative_sections: Optional[Dict[str, str]] = None
+    # Optional style guide for AI narrative
+    style_guide: Optional[str] = None
     # Optional scraped contract context to embed in the report
     contract_url: Optional[str] = None
     contract_excerpt: Optional[str] = None
@@ -360,6 +368,48 @@ def generate_narrative(req: NarrativeRequest):
 
     result = calculation_service.calculate_estimate(est_input)
     estimation_data = {"estimation_result": asdict(result)}
+    project_info = {
+        "project_name": req.project_name,
+        "government_poc": req.government_poc,
+        "account_manager": req.account_manager,
+        "service_delivery_mgr": req.service_delivery_mgr,
+        "service_delivery_exec": req.service_delivery_exec,
+        "site_location": req.site_location,
+        "email": req.email,
+        "fy": req.fy,
+        "rap_number": req.rap_number,
+        "psi_code": req.psi_code,
+        "additional_comments": req.additional_comments,
+    }
+    if any(v for v in project_info.values()):
+        estimation_data["project_info"] = project_info
+    if req.odc_items:
+        estimation_data["odc_items"] = req.odc_items
+    if req.fixed_price_items:
+        estimation_data["fixed_price_items"] = req.fixed_price_items
+    if req.hardware_subtotal:
+        estimation_data["hardware_subtotal"] = req.hardware_subtotal
+    if req.warranty_months:
+        estimation_data["warranty_months"] = req.warranty_months
+    if req.warranty_cost:
+        estimation_data["warranty_cost"] = req.warranty_cost
+    if req.contract_url or req.contract_excerpt:
+        estimation_data["contract_source"] = {
+            "url": req.contract_url,
+            "excerpt": req.contract_excerpt,
+        }
+    if req.style_guide:
+        estimation_data["style_guide"] = req.style_guide
+    # Add deterministic scope details for richer narrative context
+    try:
+        module_subtasks = calculation_service.build_module_subtasks(
+            est_input,
+            contract_excerpt=req.contract_excerpt,
+        )
+        estimation_data["module_subtasks"] = module_subtasks
+    except Exception:
+        # Narrative can still be generated without subtasks
+        pass
     input_summary = {"complexity": req.complexity, "module_count": len(req.modules)}
 
     ai = AIService()
@@ -392,22 +442,75 @@ def rewrite_narrative_section(req: NarrativeSectionPrompt):
     if not ai.is_configured():
         raise HTTPException(status_code=400, detail="OPENAI_API_KEY not configured on backend.")
 
+    estimation_data = req.estimation_data or {}
+    if req.style_guide and not estimation_data.get("style_guide"):
+        estimation_data["style_guide"] = req.style_guide
+
     # Derive a minimal input summary if the caller did not provide one
     input_summary = req.input_summary
     if input_summary is None:
-        est_input = (req.estimation_data or {}).get("estimation_input", {}) or {}
+        est_input = estimation_data.get("estimation_input", {}) or {}
         module_ids = est_input.get("modules") or []
         if not module_ids:
-            mod_src = (req.estimation_data or {}).get("estimation_result", {}).get("breakdown_by_module", {}) or {}
+            mod_src = estimation_data.get("estimation_result", {}).get("breakdown_by_module", {}) or {}
             module_ids = list(mod_src.keys()) if isinstance(mod_src, dict) else mod_src
         input_summary = {
             "complexity": est_input.get("complexity"),
             "module_count": len(module_ids or []),
         }
 
+    if not estimation_data.get("module_subtasks"):
+        est_input = estimation_data.get("estimation_input", {}) or {}
+        module_ids = est_input.get("modules") or []
+        if module_ids:
+            try:
+                complexity_level = ComplexityLevel(est_input.get("complexity", "M"))
+            except ValueError:
+                complexity_level = ComplexityLevel.MEDIUM
+            contract_excerpt = None
+            contract_src = estimation_data.get("contract_source") or {}
+            if isinstance(contract_src, dict):
+                contract_excerpt = contract_src.get("excerpt")
+            est_input_obj = EstimationInput(
+                modules=module_ids,
+                complexity=complexity_level,
+                environment=est_input.get("environment", "production"),
+                integration_level=est_input.get("integration_level", "moderate_integration"),
+                geography=est_input.get("geography", "dc_metro"),
+                clearance_level=est_input.get("clearance_level", "secret"),
+                is_prime_contractor=bool(est_input.get("is_prime_contractor", True)),
+                custom_role_overrides=est_input.get("custom_role_overrides") or {},
+                project_name=est_input.get("project_name"),
+                government_poc=est_input.get("government_poc"),
+                account_manager=est_input.get("account_manager"),
+                service_delivery_mgr=est_input.get("service_delivery_mgr"),
+                service_delivery_exec=est_input.get("service_delivery_exec"),
+                site_location=est_input.get("site_location"),
+                email=est_input.get("email"),
+                fy=est_input.get("fy"),
+                rap_number=est_input.get("rap_number"),
+                psi_code=est_input.get("psi_code"),
+                additional_comments=est_input.get("additional_comments"),
+                sites=est_input.get("sites") or 1,
+                overtime=bool(est_input.get("overtime")),
+                odc_items=est_input.get("odc_items") or [],
+                fixed_price_items=est_input.get("fixed_price_items") or [],
+                hardware_subtotal=est_input.get("hardware_subtotal") or 0.0,
+                warranty_months=est_input.get("warranty_months") or 0,
+                warranty_cost=est_input.get("warranty_cost") or 0.0,
+            )
+            try:
+                module_subtasks = calculation_service.build_module_subtasks(
+                    est_input_obj,
+                    contract_excerpt=contract_excerpt,
+                )
+                estimation_data["module_subtasks"] = module_subtasks
+            except Exception:
+                pass
+
     try:
         text, raw = ai.rewrite_narrative_section(
-            estimation_data=req.estimation_data or {},
+            estimation_data=estimation_data,
             input_summary=input_summary,
             section=req.section,
             prompt=req.prompt,

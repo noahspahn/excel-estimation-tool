@@ -10,6 +10,14 @@ import os
 import ssl
 import json
 
+# Use a modern browser-like user agent by default so sites like Google Docs
+# return full content instead of a "browser not supported" placeholder.
+DEFAULT_USER_AGENT = os.getenv(
+    "SCRAPER_USER_AGENT",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36 EstimationToolScraper/0.2",
+)
+
 
 @dataclass
 class ScrapeRequest:
@@ -25,7 +33,7 @@ class ScrapeRequest:
     max_bytes: int = 500_000
     max_chars: int = 4_000
     timeout: float = 10.0
-    user_agent: str = "EstimationToolScraper/0.1"
+    user_agent: str = DEFAULT_USER_AGENT
 
 
 @dataclass
@@ -87,6 +95,21 @@ def _extract_visible_text(html: str, max_chars: int) -> str:
     return text
 
 
+def _extract_google_doc_id(url: str) -> Optional[str]:
+    parsed = urlparse(url)
+    host = parsed.netloc.lower()
+    if "docs.google.com" not in host:
+        return None
+
+    parts = [p for p in parsed.path.split("/") if p]
+    for idx, part in enumerate(parts):
+        if part == "d" and idx + 1 < len(parts):
+            doc_id = parts[idx + 1]
+            if doc_id and len(doc_id) > 8:  # basic sanity check to avoid catching "edit"
+                return doc_id
+    return None
+
+
 def _scrape_sam_opportunity(opp_id: str, timeout: float, ssl_context: ssl.SSLContext) -> Optional[str]:
     """
     Best-effort scrape for SAM.gov opportunity pages without JS rendering.
@@ -97,7 +120,7 @@ def _scrape_sam_opportunity(opp_id: str, timeout: float, ssl_context: ssl.SSLCon
     api_url = f"https://sam.gov/api/prod/opps/v2/opportunities/{opp_id}"
     headers = {
         "Accept": "*/*",
-        "User-Agent": "EstimationToolScraper/0.1",
+        "User-Agent": DEFAULT_USER_AGENT,
         "Referer": "https://sam.gov/",
     }
 
@@ -169,6 +192,91 @@ def _scrape_sam_opportunity(opp_id: str, timeout: float, ssl_context: ssl.SSLCon
     return "\n\n".join(desc_parts)
 
 
+def _scrape_google_doc(
+    doc_id: str,
+    target_url: str,
+    request: ScrapeRequest,
+    ssl_context: ssl.SSLContext,
+    fetched_at: datetime,
+) -> tuple[Optional[ScrapeResult], Optional[str]]:
+    """
+    Fetch a Google Doc using its export endpoints to obtain readable text.
+
+    The standard HTML view returns a heavy JS app (and may block custom
+    user agents), so we prefer the lightweight export formats.
+    """
+    base_url = f"https://docs.google.com/document/d/{doc_id}"
+    export_urls = [
+        (f"{base_url}/export?format=txt", "text"),
+        (f"{base_url}/export?format=html", "html"),
+    ]
+    headers = {
+        "User-Agent": request.user_agent or DEFAULT_USER_AGENT,
+        "Accept": "text/plain, text/html;q=0.9, */*;q=0.8",
+    }
+
+    last_error: Optional[str] = None
+    for export_url, kind in export_urls:
+        try:
+            with urlopen(
+                Request(export_url, headers=headers), context=ssl_context, timeout=request.timeout
+            ) as resp:
+                status = getattr(resp, "status", None)
+                final_url = getattr(resp, "url", export_url)
+                content_type = resp.headers.get("Content-Type")
+                raw = resp.read(request.max_bytes + 1)
+        except Exception as e:
+            last_error = str(e)
+            continue
+
+        if "accounts.google.com" in final_url:
+            last_error = "Google Docs link requires authentication or is not publicly accessible."
+            continue
+
+        truncated = len(raw) > request.max_bytes
+        if truncated:
+            raw = raw[: request.max_bytes]
+
+        encoding: Optional[str] = None
+        if content_type and "charset=" in content_type:
+            try:
+                encoding = content_type.split("charset=", 1)[1].split(";", 1)[0].strip()
+            except Exception:
+                encoding = None
+        if not encoding:
+            encoding = "utf-8"
+
+        if "html" in (content_type or "") or kind == "html":
+            html = raw.decode(encoding, errors="replace")
+            text_excerpt = _extract_visible_text(html, request.max_chars)
+        else:
+            text_excerpt = raw.decode(encoding, errors="replace")
+            if request.max_chars and request.max_chars > 0 and len(text_excerpt) > request.max_chars:
+                text_excerpt = text_excerpt[: request.max_chars]
+
+        error_msg: Optional[str] = None
+        if truncated:
+            error_msg = "Response truncated to max_bytes; text excerpt may be incomplete."
+
+        return (
+            ScrapeResult(
+                url=target_url,
+                final_url=final_url,
+                success=True,
+                status_code=status,
+                content_type=content_type,
+                encoding=encoding,
+                text_excerpt=text_excerpt,
+                fetched_at=fetched_at,
+                truncated=truncated,
+                error=error_msg,
+            ),
+            None,
+        )
+
+    return None, last_error
+
+
 class WebScraperService:
     """
     Simple HTTP/HTML scraper focused on producing clean text.
@@ -179,7 +287,7 @@ class WebScraperService:
     """
 
     def __init__(self, default_user_agent: Optional[str] = None) -> None:
-        self._default_user_agent = default_user_agent or "EstimationToolScraper/0.1"
+        self._default_user_agent = default_user_agent or DEFAULT_USER_AGENT
 
         # Allow optional TLS verification disablement for environments where
         # the system trust store is incomplete (e.g., certain App Runner configs).
@@ -228,8 +336,18 @@ class WebScraperService:
         }
         fetched_at = datetime.now(timezone.utc)
 
-        # Special-case SAM.gov pages to use their JSON API so we get real content.
         parsed = urlparse(target_url)
+
+        google_error: Optional[str] = None
+        google_doc_id = _extract_google_doc_id(target_url)
+        if google_doc_id:
+            google_result, google_error = _scrape_google_doc(
+                google_doc_id, target_url, request, self._ssl_context, fetched_at
+            )
+            if google_result:
+                return google_result
+
+        # Special-case SAM.gov pages to use their JSON API so we get real content.
         sam_text: Optional[str] = None
         if parsed.netloc.endswith("sam.gov") and "/opp/" in parsed.path:
             try:
@@ -268,6 +386,9 @@ class WebScraperService:
                 content_type = resp.headers.get("Content-Type")
                 raw = resp.read(request.max_bytes + 1)
         except Exception as e:
+            err = str(e)
+            if google_error:
+                err = f"{google_error} | {err}"
             return ScrapeResult(
                 url=target_url,
                 final_url=None,
@@ -278,7 +399,7 @@ class WebScraperService:
                 text_excerpt="",
                 fetched_at=fetched_at,
                 truncated=False,
-                error=str(e),
+                error=err,
             )
 
         truncated = len(raw) > request.max_bytes

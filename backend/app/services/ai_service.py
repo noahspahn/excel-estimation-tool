@@ -1,5 +1,6 @@
 import os
 import json
+import re
 from typing import Dict, Any, List, Optional, Tuple
 
 
@@ -74,13 +75,18 @@ class AIService:
         sys_prompt = (
             "You are a consulting engagement manager. Write concise, clear, and client-ready narratives "
             "for an estimation report. Use the provided data faithfully. Avoid exaggeration. "
-            "Return ONLY valid JSON (no code fences, no extra text) with keys matching the requested sections."
+            "Return ONLY valid JSON (no code fences, no extra text) with keys matching the requested sections. "
+            "Each value MUST be a single string paragraph with 2-4 sentences (no lists or objects). "
+            "Do NOT include JSON, braces, or key-value formatting inside the section text. "
+            "Use context (scope_outline, contract_highlights, project_info, style_guide) to add human context beyond raw numbers. "
+            "If contract_source/excerpt is provided, weave in 1-2 relevant details without quoting large blocks."
         )
 
         user_payload = {
             "tone": tone,
             "sections": sections,
             "context": context,
+            "section_guidance": self._build_section_guidance(sections),
         }
         user_prompt = json.dumps(user_payload)
 
@@ -113,8 +119,8 @@ class AIService:
 
         data = self._parse_jsonish_object(content)
         if isinstance(data, dict):
-            # Ensure only requested sections
-            return {k: str(data.get(k, "")) for k in sections}
+            # Ensure only requested sections and always return string paragraphs
+            return {k: self._normalize_section_text(k, data.get(k, "")) for k in sections}
 
         # Fallback: single blob under 'executive_summary' if JSON parse fails
         return {sections[0] if sections else "executive_summary": content}
@@ -211,7 +217,10 @@ class AIService:
         sys_prompt = (
             "You are an expert proposal writer editing one section of a report. "
             "Respect the provided facts and numbers. Apply the user's change request while keeping the tone aligned. "
-            "Return ONLY JSON with a single key that matches the requested section."
+            "Return ONLY JSON with a single key that matches the requested section. "
+            "The value must be a single string paragraph with 2-4 sentences (no lists or objects). "
+            "Do NOT include JSON, braces, or key-value formatting inside the section text. "
+            "Use scope_outline, contract_highlights, and style_guide from context when relevant."
         )
         user_payload = {
             "section": section,
@@ -219,6 +228,7 @@ class AIService:
             "instructions": prompt or "",
             "current_text": current_text or "",
             "context": context,
+            "section_guidance": self._build_section_guidance([section]),
         }
         messages = [
             {"role": "system", "content": sys_prompt},
@@ -256,7 +266,7 @@ class AIService:
         if text is None and content is not None:
             text = content.strip()
 
-        final_text = str(text or current_text or "")
+        final_text = self._normalize_section_text(section, text or current_text or "")
         return final_text, content
 
     def _build_narrative_context(
@@ -304,9 +314,18 @@ class AIService:
         if estimation_data.get("project_info"):
             context["project_info"] = estimation_data["project_info"]
         if estimation_data.get("module_subtasks"):
-            context["module_subtasks"] = estimation_data["module_subtasks"]
+            module_subtasks = estimation_data["module_subtasks"]
+            context["module_subtasks"] = self._trim_module_subtasks(module_subtasks)
+            context["scope_outline"] = self._build_scope_outline(module_subtasks)
         if estimation_data.get("contract_source"):
-            context["contract_source"] = estimation_data["contract_source"]
+            contract_src = estimation_data["contract_source"]
+            context["contract_source"] = contract_src
+            excerpt = contract_src.get("excerpt") if isinstance(contract_src, dict) else None
+            if excerpt:
+                context["contract_highlights"] = self._extract_contract_highlights(str(excerpt))
+        style_guide = estimation_data.get("style_guide")
+        if style_guide:
+            context["style_guide"] = self._trim_text(style_guide, 2000)
         if estimation_data.get("narrative_sections"):
             context["narrative_sections"] = estimation_data["narrative_sections"]
         if estimation_data.get("odc_items") is not None:
@@ -359,6 +378,368 @@ class AIService:
                 details.append(f"v0 import error: {legacy_e}")
                 raise RuntimeError("; ".join(details))
         return client, client_mode
+
+    def _build_section_guidance(self, sections: List[str]) -> Dict[str, str]:
+        guidance = {
+            "executive_summary": (
+                "Summarize the project intent and scope in 2-4 sentences. "
+                "Mention the project name if available, include 1-2 key figures "
+                "(hours or cost), and reference 1-2 module themes. "
+                "Weave in contract_highlights or scope_outline when relevant."
+            ),
+            "assumptions": (
+                "State delivery assumptions tied to the scope and contract context. "
+                "Address access to stakeholders or data, dependencies, approvals, or "
+                "security/compliance where applicable. Avoid restating raw numbers."
+            ),
+            "risks": (
+                "Describe 2-3 key risks linked to the scope or contract context and "
+                "their potential impact. Avoid generic risks that could apply to any project."
+            ),
+            "recommendations": (
+                "Provide action-oriented next steps aligned to scope and governance. "
+                "Examples include validating assumptions, confirming interfaces, or "
+                "sequencing work to reduce delivery risk."
+            ),
+            "next_steps": (
+                "Provide concise, action-oriented next steps aligned to scope and governance."
+            ),
+        }
+        return {s: guidance[s] for s in sections if s in guidance}
+
+    def _trim_text(self, text: Any, max_chars: int) -> str:
+        if text is None:
+            return ""
+        cleaned = self._compact_whitespace(str(text))
+        if max_chars and max_chars > 0 and len(cleaned) > max_chars:
+            return cleaned[:max_chars]
+        return cleaned
+
+    def _compact_whitespace(self, text: str) -> str:
+        return re.sub(r"\s+", " ", text or "").strip()
+
+    def _split_into_sentences(self, text: str) -> List[str]:
+        cleaned = self._compact_whitespace(text)
+        if not cleaned:
+            return []
+        parts = re.split(r"(?<=[.!?])\s+", cleaned)
+        return [p.strip() for p in parts if p.strip()]
+
+    def _extract_contract_highlights(
+        self,
+        excerpt: str,
+        max_sentences: int = 4,
+        max_chars: int = 900,
+    ) -> List[str]:
+        cleaned = self._compact_whitespace(excerpt)
+        sentences = self._split_into_sentences(cleaned)
+        if not sentences:
+            return []
+        keywords = [
+            "scope",
+            "deliverable",
+            "deliverables",
+            "objective",
+            "requirements",
+            "shall",
+            "must",
+            "period of performance",
+            "timeline",
+            "schedule",
+            "security",
+            "compliance",
+            "rmf",
+            "dfars",
+            "cloud",
+            "migration",
+            "data",
+            "integration",
+            "stakeholder",
+            "reporting",
+        ]
+        prioritized = [s for s in sentences if any(k in s.lower() for k in keywords)]
+        if not prioritized:
+            prioritized = sentences[:2]
+        highlights: List[str] = []
+        total = 0
+        for sentence in prioritized:
+            if sentence in highlights:
+                continue
+            if total + len(sentence) > max_chars and highlights:
+                break
+            highlights.append(sentence)
+            total += len(sentence)
+            if len(highlights) >= max_sentences:
+                break
+        return highlights
+
+    def _trim_module_subtasks(self, module_subtasks: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        trimmed: List[Dict[str, Any]] = []
+        for subtask in module_subtasks or []:
+            tasks = subtask.get("tasks") or []
+            task_titles = [t.get("title") for t in tasks if t.get("title")]
+            trimmed.append({
+                "module_name": subtask.get("module_name"),
+                "focus_area": subtask.get("focus_area") or subtask.get("focus_label"),
+                "work_scope": self._trim_text(subtask.get("work_scope"), 320),
+                "estimate_basis": self._trim_text(subtask.get("estimate_basis"), 260),
+                "period_of_performance": self._trim_text(subtask.get("period_of_performance"), 220),
+                "reasonableness": self._trim_text(subtask.get("reasonableness"), 220),
+                "total_hours": subtask.get("total_hours"),
+                "key_tasks": task_titles[:5],
+                "customer_context": self._trim_text(subtask.get("customer_context"), 400),
+            })
+        return trimmed
+
+    def _build_scope_outline(self, module_subtasks: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        outline: List[Dict[str, Any]] = []
+        for subtask in module_subtasks or []:
+            tasks = subtask.get("tasks") or []
+            task_titles = [t.get("title") for t in tasks if t.get("title")]
+            outline.append({
+                "module_name": subtask.get("module_name"),
+                "focus_area": subtask.get("focus_area") or subtask.get("focus_label"),
+                "work_scope": self._trim_text(subtask.get("work_scope"), 220),
+                "key_tasks": task_titles[:3],
+            })
+        return outline
+
+    def _coerce_narrative_text(self, value: Any) -> str:
+        """Ensure narrative sections are returned as plain text paragraphs."""
+        if value is None:
+            return ""
+        if isinstance(value, str):
+            text = value.strip()
+            parsed = self._coerce_jsonish_string(text)
+            if parsed is not None:
+                return parsed
+            return text
+        if isinstance(value, (int, float, bool)):
+            return str(value)
+        if isinstance(value, list):
+            return self._format_list_value(value)
+        if isinstance(value, dict):
+            return self._format_dict_value(value)
+        try:
+            return json.dumps(value, ensure_ascii=True)
+        except Exception:
+            return str(value)
+
+    def _normalize_section_text(self, section: str, value: Any) -> str:
+        structured = self._extract_structured_value(value)
+        if structured is not None:
+            return self._format_structured_section(section, structured)
+        return self._coerce_narrative_text(value)
+
+    def _extract_structured_value(self, value: Any) -> Optional[Any]:
+        if isinstance(value, (dict, list)):
+            return value
+        if not isinstance(value, str):
+            return None
+        text = value.strip()
+        if not text:
+            return None
+        if text.startswith("{") and text.endswith("}"):
+            parsed = self._parse_jsonish_object(text)
+            if isinstance(parsed, dict):
+                return parsed
+        if text.startswith("[") and text.endswith("]"):
+            parsed = self._parse_jsonish_list(text)
+            if parsed is not None:
+                return parsed
+        if "{" in text and "}" in text:
+            try:
+                start = text.index("{")
+                end = text.rindex("}")
+                snippet = text[start:end + 1]
+                parsed = self._parse_jsonish_object(snippet)
+                if isinstance(parsed, dict):
+                    return parsed
+            except Exception:
+                pass
+        if "[" in text and "]" in text:
+            try:
+                start = text.index("[")
+                end = text.rindex("]")
+                snippet = text[start:end + 1]
+                parsed = self._parse_jsonish_list(snippet)
+                if parsed is not None:
+                    return parsed
+            except Exception:
+                pass
+        return None
+
+    def _coerce_jsonish_string(self, text: str) -> Optional[str]:
+        structured = self._extract_structured_value(text)
+        if structured is None:
+            return None
+        if isinstance(structured, dict):
+            return self._format_dict_value(structured)
+        if isinstance(structured, list):
+            return self._format_list_value(structured)
+        return None
+
+    def _format_structured_section(self, section: str, value: Any) -> str:
+        if section == "executive_summary" and isinstance(value, dict):
+            return self._format_executive_summary(value)
+        prefix = {
+            "assumptions": "Assume",
+            "risks": "Key risk",
+            "recommendations": "Recommendation",
+            "next_steps": "Next step",
+        }.get(section)
+        items: List[str] = []
+        if isinstance(value, dict):
+            for key, val in value.items():
+                val_text = self._coerce_narrative_text(val)
+                if not val_text:
+                    continue
+                if not self._looks_like_sentence(val_text):
+                    label = self._format_key_label(key)
+                    if label and label.lower() not in val_text.lower():
+                        val_text = f"{label} {val_text}".strip()
+                    if prefix:
+                        val_text = f"{prefix} {val_text}".strip()
+                items.append(self._ensure_sentence(val_text))
+        elif isinstance(value, list):
+            for item in value:
+                val_text = self._coerce_narrative_text(item)
+                if not val_text:
+                    continue
+                if not self._looks_like_sentence(val_text) and prefix:
+                    val_text = f"{prefix} {val_text}".strip()
+                items.append(self._ensure_sentence(val_text))
+        paragraph = " ".join([p for p in items if p])
+        return paragraph.strip()
+
+    def _format_executive_summary(self, data: Dict[str, Any]) -> str:
+        project_name = data.get("project_name") or ""
+        total_hours = self._safe_float(data.get("total_labor_hours"))
+        total_cost = self._safe_float(data.get("total_cost"))
+        labor_cost = self._safe_float(data.get("total_labor_cost"))
+        risk_reserve = self._safe_float(data.get("risk_reserve"))
+        overhead_cost = self._safe_float(data.get("overhead_cost"))
+        rate = self._safe_float(data.get("effective_hourly_rate"))
+        complexity = self._format_complexity(data.get("complexity"))
+        module_count = self._safe_int(data.get("module_count"))
+        modules = data.get("modules") if isinstance(data.get("modules"), list) else []
+        module_names = [m.get("name") for m in modules if isinstance(m, dict) and m.get("name")]
+
+        sentences: List[str] = []
+        if project_name:
+            sentences.append(f"This estimate supports {project_name}.")
+        if total_hours is not None or total_cost is not None:
+            parts = []
+            if total_hours is not None:
+                parts.append(f"approximately {total_hours:,.1f} labor hours")
+            if total_cost is not None:
+                parts.append(f"a total cost of ${total_cost:,.2f}")
+            if parts:
+                sentences.append(f"The projected effort includes {', and '.join(parts)}.")
+        cost_parts = []
+        if labor_cost is not None:
+            cost_parts.append(f"labor ${labor_cost:,.2f}")
+        if risk_reserve is not None:
+            cost_parts.append(f"risk reserve ${risk_reserve:,.2f}")
+        if overhead_cost is not None:
+            cost_parts.append(f"overhead ${overhead_cost:,.2f}")
+        if cost_parts:
+            sentences.append(f"Cost composition reflects {', '.join(cost_parts)}.")
+        if rate is not None or complexity or module_count:
+            detail_parts = []
+            if rate is not None:
+                detail_parts.append(f"a blended rate of about ${rate:,.2f} per hour")
+            if complexity:
+                detail_parts.append(f"{complexity} complexity")
+            if module_count is not None:
+                detail_parts.append(f"{module_count} modules")
+            if detail_parts:
+                sentences.append(f"The profile reflects {', '.join(detail_parts)}.")
+        if module_names:
+            sentences.append(f"Modules include {', '.join(module_names)}.")
+
+        if not sentences:
+            return self._format_dict_value(data)
+        return " ".join(sentences).strip()
+
+    def _safe_float(self, value: Any) -> Optional[float]:
+        try:
+            return float(value)
+        except Exception:
+            return None
+
+    def _safe_int(self, value: Any) -> Optional[int]:
+        try:
+            return int(float(value))
+        except Exception:
+            return None
+
+    def _format_complexity(self, value: Any) -> Optional[str]:
+        if value is None:
+            return None
+        val = str(value).strip()
+        mapping = {
+            "S": "low",
+            "M": "medium",
+            "L": "high",
+            "XL": "very high",
+            "LOW": "low",
+            "MEDIUM": "medium",
+            "HIGH": "high",
+            "VERY HIGH": "very high",
+        }
+        return mapping.get(val.upper(), val)
+
+    def _ensure_sentence(self, text: str) -> str:
+        cleaned = (text or "").strip()
+        if not cleaned:
+            return ""
+        if cleaned[-1] not in ".!?":
+            cleaned += "."
+        return cleaned
+
+    def _looks_like_sentence(self, text: str) -> bool:
+        if not text:
+            return False
+        cleaned = text.strip()
+        if not cleaned:
+            return False
+        return cleaned[-1] in ".!?" or " " in cleaned
+
+    def _format_key_label(self, key: str) -> str:
+        label = str(key or "").replace("_", " ").replace("-", " ").strip()
+        if not label:
+            return "Detail"
+        return label[0].upper() + label[1:]
+
+    def _format_dict_value(self, data: Dict[str, Any], inline: bool = False) -> str:
+        parts: List[str] = []
+        for key, val in data.items():
+            val_text = self._coerce_narrative_text(val)
+            if not val_text:
+                continue
+            label = self._format_key_label(key)
+            parts.append(f"{label}: {val_text}")
+        text = "; ".join(parts)
+        if not inline and text and text[-1] not in ".!?":
+            text += "."
+        return text
+
+    def _format_list_value(self, items: List[Any]) -> str:
+        parts: List[str] = []
+        for item in items:
+            if item is None:
+                continue
+            if isinstance(item, dict):
+                chunk = self._format_dict_value(item, inline=True)
+            else:
+                chunk = self._coerce_narrative_text(item)
+            if chunk:
+                parts.append(chunk)
+        text = "; ".join(parts)
+        if text and text[-1] not in ".!?":
+            text += "."
+        return text
 
     def _parse_jsonish_list(self, content: str) -> Optional[List[Dict[str, Any]]]:
         """
@@ -509,7 +890,7 @@ class AIService:
 
         if "assumptions" in secs:
             text["assumptions"] = (
-                f"Estimates assume a typical staffing mix ({top_roles or 'multi‑disciplinary team'}) and standard project cadence. "
+                f"Estimates assume a typical staffing mix ({top_roles or 'multi-disciplinary team'}) and standard project cadence. "
                 f"Module sequencing accounts for prerequisites and reasonable dependency alignment. "
                 f"Stakeholder access and decision cadence are consistent with the proposed schedule."
             )
@@ -517,14 +898,14 @@ class AIService:
         if "risks" in secs:
             text["risks"] = (
                 f"Primary risks include scope growth and integration unknowns that could extend effort beyond the baseline {total_hours:.0f} hours. "
-                f"Multi‑module dependencies ({module_names}) may impact sequencing and throughput. "
+                f"Multi-module dependencies ({module_names}) may impact sequencing and throughput. "
                 f"The allocated risk reserve of ${risk_reserve:,.2f} is intended to buffer typical variance."
             )
 
         if "recommendations" in secs:
             text["recommendations"] = (
                 "Begin with a short planning sprint to refine scope and confirm interfaces. "
-                "Sequence delivery to realize early value while de‑risking complex integrations. "
+                "Sequence delivery to realize early value while de-risking complex integrations. "
                 "Review staffing against milestones and adjust to maintain schedule confidence."
             )
 
