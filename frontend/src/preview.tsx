@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
-import { useParams, Link } from 'react-router-dom'
+import { useParams } from 'react-router-dom'
 import './App.css'
+import TopNav from './TopNav'
 
 const API = (import.meta as any).env?.VITE_API_URL || 'http://localhost:8000'
 
@@ -380,8 +381,8 @@ export default function Preview() {
 
   return (
     <div className="app preview-page">
+      <TopNav />
       <div style={{ marginBottom: 12, display: 'flex', gap: 12, alignItems: 'center', flexWrap: 'wrap' }}>
-        <Link to="/">Back to Editor</Link>
         <label style={{ display: 'inline-flex', gap: 6, alignItems: 'center' }}>
           <input type="checkbox" checked={editMode} onChange={(e) => setEditMode(e.target.checked)} />
           Enable editing

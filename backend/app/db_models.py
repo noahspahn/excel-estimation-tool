@@ -4,7 +4,7 @@ import datetime as dt
 import secrets
 from typing import Any, Dict
 
-from sqlalchemy import Column, DateTime, String, JSON, Integer, ForeignKey, text
+from sqlalchemy import Column, DateTime, String, JSON, Integer, ForeignKey, text, Text, Float, UniqueConstraint
 from sqlalchemy.orm import relationship
 from sqlalchemy.orm import declarative_base
 
@@ -37,6 +37,7 @@ class Proposal(Base):
 
     versions = relationship("ProposalVersion", back_populates="proposal", cascade="all, delete-orphan")
     documents = relationship("ProposalDocument", back_populates="proposal", cascade="all, delete-orphan")
+    contracts = relationship("ContractOpportunity", back_populates="proposal", cascade="all, delete-orphan")
 
 
 class ProposalVersion(Base):
@@ -68,3 +69,59 @@ class ProposalDocument(Base):
     created_at = Column(DateTime, nullable=False, server_default=text("CURRENT_TIMESTAMP"))
 
     proposal = relationship("Proposal", back_populates="documents")
+
+
+class ContractOpportunity(Base):
+    __tablename__ = "contract_opportunities"
+    __table_args__ = (
+        UniqueConstraint("source", "source_id", name="uq_contract_source"),
+    )
+
+    id = Column(String(64), primary_key=True, default=lambda: _gen_id("con"))
+    source = Column(String(64), nullable=False, index=True, default="sam.gov")
+    source_id = Column(String(128), nullable=True, index=True)
+    title = Column(String(512), nullable=True)
+    agency = Column(String(255), nullable=True)
+    sub_agency = Column(String(255), nullable=True)
+    office = Column(String(255), nullable=True)
+    naics = Column(String(32), nullable=True)
+    psc = Column(String(32), nullable=True)
+    set_aside = Column(String(128), nullable=True)
+    posted_at = Column(DateTime, nullable=True)
+    due_at = Column(DateTime, nullable=True)
+    value = Column(String(128), nullable=True)
+    location = Column(String(255), nullable=True)
+    url = Column(String(1024), nullable=True)
+    synopsis = Column(Text, nullable=True)
+    contract_excerpt = Column(Text, nullable=True)
+    status = Column(String(32), nullable=False, default="new", index=True)
+    proposal_id = Column(String(64), ForeignKey("proposals.id"), nullable=True, index=True)
+    report_submitted_at = Column(DateTime, nullable=True)
+    decision_date = Column(DateTime, nullable=True)
+    awardee_name = Column(String(255), nullable=True)
+    award_value = Column(Float, nullable=True)
+    award_notes = Column(Text, nullable=True)
+    win_factors = Column(Text, nullable=True)
+    loss_factors = Column(Text, nullable=True)
+    analysis_notes = Column(Text, nullable=True)
+    tags = Column(JSON, nullable=True)
+    raw_payload = Column(JSON, nullable=True)
+    last_seen_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, nullable=False, server_default=text("CURRENT_TIMESTAMP"))
+    updated_at = Column(DateTime, nullable=False, server_default=text("CURRENT_TIMESTAMP"))
+
+    proposal = relationship("Proposal", back_populates="contracts")
+
+
+class ContractSyncState(Base):
+    __tablename__ = "contract_sync_state"
+
+    source = Column(String(64), primary_key=True)
+    last_run_at = Column(DateTime, nullable=True)
+    last_error = Column(Text, nullable=True)
+    last_status = Column(String(32), nullable=True)
+    requests_today = Column(Integer, nullable=False, default=0)
+    requests_today_date = Column(String(10), nullable=True)
+    last_result = Column(JSON, nullable=True)
+    created_at = Column(DateTime, nullable=False, server_default=text("CURRENT_TIMESTAMP"))
+    updated_at = Column(DateTime, nullable=False, server_default=text("CURRENT_TIMESTAMP"))

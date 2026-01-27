@@ -90,7 +90,9 @@ if (-not $SkipFrontend) {
   Write-Host "`n[Frontend] Building React app with VITE_API_URL=$backendUrl ..."
   Push-Location frontend
   $env:VITE_API_URL = "$backendUrl/"
-  $env:VITE_EXCEL_API_ENABLED = "true"
+  if (-not $env:VITE_EXCEL_API_ENABLED) {
+    $env:VITE_EXCEL_API_ENABLED = "true"
+  }
 
   if (Test-Path package-lock.json) {
     npm ci

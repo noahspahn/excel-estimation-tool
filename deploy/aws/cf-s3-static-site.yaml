@@ -25,7 +25,6 @@ Resources:
   CloudFrontOAC:
     Type: AWS::CloudFront::OriginAccessControl
     Properties:
-      Name: !Sub "${BucketName}-oac"
       OriginAccessControlConfig:
         Name: !Sub "${BucketName}-oac"
         OriginAccessControlOriginType: s3
@@ -78,4 +77,3 @@ Outputs:
     Value: !Ref Distribution
   CloudFrontDomainName:
     Value: !GetAtt Distribution.DomainName
-

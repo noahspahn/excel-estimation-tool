@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react'
+import TopNav from './TopNav'
 import './App.css'
 
 const rawApi = (import.meta as any).env?.VITE_API_URL || 'http://localhost:8000'
@@ -1403,6 +1404,7 @@ function App() {
 
   return (
     <div className="app app-shell">
+      <TopNav />
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 12 }}>
         <div style={{ flex: 1 }}>
           {readOnly && (

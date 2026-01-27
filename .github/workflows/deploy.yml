@@ -1,0 +1,116 @@
+name: Deploy
+
+on:
+  push:
+    branches:
+      - main
+      - stage
+      - develop
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: ${{ github.ref_name == 'main' && 'prod' || github.ref_name == 'stage' && 'stage' || 'dev' }}
+    env:
+      DEPLOY_ENV: ${{ github.ref_name == 'main' && 'prod' || github.ref_name == 'stage' && 'stage' || 'dev' }}
+      AWS_REGION: ${{ vars.AWS_REGION || 'us-east-1' }}
+      ECR_REPO: ${{ vars.ECR_REPO }}
+      APP_RUNNER_SERVICE: ${{ vars.APP_RUNNER_SERVICE }}
+      S3_BUCKET: ${{ vars.S3_BUCKET }}
+      VITE_EXCEL_API_ENABLED: ${{ vars.VITE_EXCEL_API_ENABLED || 'true' }}
+      VITE_DISABLE_AUTH: ${{ vars.VITE_DISABLE_AUTH || '' }}
+      VITE_COGNITO_REGION: ${{ vars.VITE_COGNITO_REGION || '' }}
+      VITE_COGNITO_CLIENT_ID: ${{ vars.VITE_COGNITO_CLIENT_ID || '' }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Verify environment config
+        run: |
+          set -euo pipefail
+          if [ -z "${ECR_REPO}" ]; then
+            echo "ECR_REPO not set (use GitHub Environment vars)."
+            exit 1
+          fi
+          if [ -z "${APP_RUNNER_SERVICE}" ]; then
+            echo "APP_RUNNER_SERVICE not set (use GitHub Environment vars)."
+            exit 1
+          fi
+          if [ -z "${S3_BUCKET}" ]; then
+            echo "S3_BUCKET not set (use GitHub Environment vars)."
+            exit 1
+          fi
+
+      - name: Login to ECR
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build and push backend image
+        run: |
+          set -euo pipefail
+          ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+          ECR_URI="${ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPO}"
+          IMAGE_TAG="${GITHUB_SHA::7}"
+
+          if ! aws ecr describe-repositories --repository-names "${ECR_REPO}" --region "${AWS_REGION}" >/dev/null 2>&1; then
+            aws ecr create-repository --repository-name "${ECR_REPO}" --region "${AWS_REGION}" >/dev/null
+          fi
+
+          docker build -t "${ECR_REPO}:${IMAGE_TAG}" backend
+          docker tag "${ECR_REPO}:${IMAGE_TAG}" "${ECR_URI}:${IMAGE_TAG}"
+          docker tag "${ECR_REPO}:${IMAGE_TAG}" "${ECR_URI}:latest"
+          docker push "${ECR_URI}:${IMAGE_TAG}"
+          docker push "${ECR_URI}:latest"
+
+      - name: Trigger App Runner deployment
+        run: |
+          set -euo pipefail
+          SERVICE_ARN=$(aws apprunner list-services --region "${AWS_REGION}" \
+            --query "ServiceSummaryList[?ServiceName=='${APP_RUNNER_SERVICE}'].ServiceArn" \
+            --output text)
+
+          if [ -z "${SERVICE_ARN}" ] || [ "${SERVICE_ARN}" = "None" ]; then
+            echo "App Runner service '${APP_RUNNER_SERVICE}' not found."
+            exit 1
+          fi
+
+          aws apprunner start-deployment --service-arn "${SERVICE_ARN}" --region "${AWS_REGION}" >/dev/null
+          BACKEND_URL=$(aws apprunner describe-service --service-arn "${SERVICE_ARN}" --region "${AWS_REGION}" \
+            --query "Service.ServiceUrl" --output text)
+
+          if [[ "${BACKEND_URL}" != http* ]]; then
+            BACKEND_URL="https://${BACKEND_URL}"
+          fi
+          echo "BACKEND_URL=${BACKEND_URL%/}" >> $GITHUB_ENV
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 18
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Build frontend
+        run: |
+          set -euo pipefail
+          cd frontend
+          export VITE_API_URL="${BACKEND_URL}/"
+          if [ -n "${VITE_EXCEL_API_ENABLED}" ]; then export VITE_EXCEL_API_ENABLED; fi
+          if [ -n "${VITE_DISABLE_AUTH}" ]; then export VITE_DISABLE_AUTH; fi
+          if [ -n "${VITE_COGNITO_REGION}" ]; then export VITE_COGNITO_REGION; fi
+          if [ -n "${VITE_COGNITO_CLIENT_ID}" ]; then export VITE_COGNITO_CLIENT_ID; fi
+          npm ci
+          npm run build
+
+      - name: Deploy frontend to S3
+        run: |
+          set -euo pipefail
+          aws s3 sync frontend/dist "s3://${S3_BUCKET}/" --delete --region "${AWS_REGION}"

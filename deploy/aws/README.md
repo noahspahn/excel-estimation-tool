@@ -90,6 +90,35 @@ Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
   -ServiceName "estimation-backend-AR"
 ```
 
+## Dev / Stage / Prod environments
+
+The repo now includes a small wrapper that reads environment-specific settings
+and calls `deploy-simple.ps1` with the correct resource names.
+
+1) Copy the example config:
+
+```powershell
+Copy-Item deploy/aws/environments.example.json deploy/aws/environments.json
+```
+
+2) Edit `deploy/aws/environments.json` with your real bucket names, App Runner
+service names, and optional frontend Vite variables (no secrets should go here).
+
+3) Deploy:
+
+```powershell
+.\deploy\aws\deploy-env.ps1 -Environment dev
+.\deploy\aws\deploy-env.ps1 -Environment stage
+.\deploy\aws\deploy-env.ps1 -Environment prod
+```
+
+Notes:
+- Each environment should have its own App Runner service + S3 bucket.
+- If you need different Cognito pools per environment, set `VITE_COGNITO_REGION`
+  and `VITE_COGNITO_CLIENT_ID` in the config file for each environment.
+- `deploy-simple.ps1` respects any `VITE_*` variables already set in your shell,
+  so you can also export them directly instead of using the config.
+
 ## Manual deploy overview
 
 If you prefer to run the steps yourself:
@@ -144,3 +173,13 @@ This folder also contains templates for a more automated, CloudFormation-driven 
 - `deploy/aws/deploy-apprunner.sh` – a Bash script that builds and pushes the backend image, deploys the App Runner stack, builds the frontend, deploys the S3+CloudFront stack, and invalidates CloudFront.
 
 In environments where you _can_ manage CloudFront, that remains the most production-friendly option. In this project’s current setup, the simpler App Runner + S3 website + Cognito direct-auth path described above is what’s actually in use.
+
+### Multi-environment CloudFormation example
+
+The Bash deployer already supports distinct app names. For example:
+
+```bash
+./deploy/aws/deploy-apprunner.sh --app-name estimation-dev --s3-bucket meshai-estimation-frontend-dev
+./deploy/aws/deploy-apprunner.sh --app-name estimation-stage --s3-bucket meshai-estimation-frontend-stage
+./deploy/aws/deploy-apprunner.sh --app-name estimation-prod --s3-bucket meshai-estimation-frontend-prod
+```

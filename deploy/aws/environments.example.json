@@ -1,0 +1,38 @@
+{
+  "dev": {
+    "region": "us-east-1",
+    "ecrRepo": "estimation-backend-dev",
+    "serviceName": "estimation-backend-dev-AR",
+    "bucket": "meshai-estimation-frontend-dev",
+    "frontendEnv": {
+      "VITE_EXCEL_API_ENABLED": "true",
+      "VITE_DISABLE_AUTH": "true",
+      "VITE_COGNITO_REGION": "",
+      "VITE_COGNITO_CLIENT_ID": ""
+    }
+  },
+  "stage": {
+    "region": "us-east-1",
+    "ecrRepo": "estimation-backend-stage",
+    "serviceName": "estimation-backend-stage-AR",
+    "bucket": "meshai-estimation-frontend-stage",
+    "frontendEnv": {
+      "VITE_EXCEL_API_ENABLED": "true",
+      "VITE_DISABLE_AUTH": "false",
+      "VITE_COGNITO_REGION": "",
+      "VITE_COGNITO_CLIENT_ID": ""
+    }
+  },
+  "prod": {
+    "region": "us-east-1",
+    "ecrRepo": "estimation-backend-prod",
+    "serviceName": "estimation-backend-prod-AR",
+    "bucket": "meshai-estimation-frontend-prod",
+    "frontendEnv": {
+      "VITE_EXCEL_API_ENABLED": "true",
+      "VITE_DISABLE_AUTH": "false",
+      "VITE_COGNITO_REGION": "",
+      "VITE_COGNITO_CLIENT_ID": ""
+    }
+  }
+}

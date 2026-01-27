@@ -8,12 +8,15 @@ import uvicorn
 import os
 import json
 import time
+import threading
 import urllib.request
+from collections import Counter
 from pathlib import Path
 from dotenv import load_dotenv, find_dotenv
 from jose import jwt, JWTError, jwk
 from jose.utils import base64url_decode
 from datetime import datetime, timedelta, timezone
+from sqlalchemy import or_, func
 
 # Load environment variables from a local .env if present
 # 1) Try auto-discovery up the directory tree
@@ -34,7 +37,12 @@ from .services.web_scraper_service import WebScraperService, ScrapeRequest
 from .services.storage_service import StorageService
 from .models import ComplexityLevel, EstimationInput
 from .db import engine, get_session
-from .db_models import Base, Proposal, ProposalVersion, ProposalDocument
+from .db_models import Base, Proposal, ProposalVersion, ProposalDocument, ContractOpportunity, ContractSyncState
+from .services.sam_contract_service import (
+    fetch_sam_opportunities,
+    extract_sam_results,
+    normalize_sam_record,
+)
 
 app = FastAPI(title="Estimation Tool API", version="2.0.0")
 
@@ -57,6 +65,22 @@ data_service = DataService()
 web_scraper_service = WebScraperService()
 storage_service = StorageService()
 # Note: ExportService (and ReportLab) are imported lazily in the report endpoint
+
+CONTRACT_STATUSES = {"new", "in_progress", "submitted", "awarded", "lost"}
+
+SAM_API_KEY = os.getenv("SAM_API_KEY")
+SAM_SYNC_SOURCE = "sam.gov"
+SAM_SYNC_SCHEDULED = os.getenv("SAM_SYNC_SCHEDULED", "true").lower() in ("1", "true", "yes")
+SAM_SYNC_INTERVAL_MINUTES = int(os.getenv("SAM_SYNC_INTERVAL_MINUTES", "1440"))
+SAM_SYNC_MIN_INTERVAL_MINUTES = int(os.getenv("SAM_SYNC_MIN_INTERVAL_MINUTES", "1440"))
+SAM_SYNC_MAX_REQUESTS_PER_DAY = int(os.getenv("SAM_SYNC_MAX_REQUESTS_PER_DAY", "10"))
+SAM_SYNC_DAYS_BACK = int(os.getenv("SAM_SYNC_DAYS_BACK", "7"))
+SAM_SYNC_QUERY = os.getenv("SAM_SYNC_QUERY", "")
+SAM_SYNC_LIMIT = int(os.getenv("SAM_SYNC_LIMIT", "1000"))
+SAM_SYNC_PAGES = int(os.getenv("SAM_SYNC_PAGES", "1"))
+SAM_SYNC_STATE: Dict[str, Any] = {"last_run": None, "last_error": None, "last_result": None}
+SAM_SYNC_LOCK = threading.Lock()
+SAM_SYNC_STARTED = False
 
 # -----------------------------
 # Simple auth / identity helper (must be defined before endpoints use it)
@@ -257,6 +281,332 @@ class ScrapeUrlResponse(BaseModel):
     fetched_at: datetime
     truncated: bool = False
     error: Optional[str] = None
+
+
+class ContractCreate(BaseModel):
+    source: Optional[str] = "manual"
+    source_id: Optional[str] = None
+    title: Optional[str] = None
+    agency: Optional[str] = None
+    sub_agency: Optional[str] = None
+    office: Optional[str] = None
+    naics: Optional[str] = None
+    psc: Optional[str] = None
+    set_aside: Optional[str] = None
+    posted_at: Optional[datetime] = None
+    due_at: Optional[datetime] = None
+    value: Optional[str] = None
+    location: Optional[str] = None
+    url: Optional[str] = None
+    synopsis: Optional[str] = None
+    contract_excerpt: Optional[str] = None
+    status: Optional[str] = "new"
+    proposal_id: Optional[str] = None
+    report_submitted_at: Optional[datetime] = None
+    decision_date: Optional[datetime] = None
+    awardee_name: Optional[str] = None
+    award_value: Optional[float] = None
+    award_notes: Optional[str] = None
+    win_factors: Optional[str] = None
+    loss_factors: Optional[str] = None
+    analysis_notes: Optional[str] = None
+    tags: Optional[List[str]] = None
+
+
+class ContractUpdate(BaseModel):
+    source: Optional[str] = None
+    source_id: Optional[str] = None
+    title: Optional[str] = None
+    agency: Optional[str] = None
+    sub_agency: Optional[str] = None
+    office: Optional[str] = None
+    naics: Optional[str] = None
+    psc: Optional[str] = None
+    set_aside: Optional[str] = None
+    posted_at: Optional[datetime] = None
+    due_at: Optional[datetime] = None
+    value: Optional[str] = None
+    location: Optional[str] = None
+    url: Optional[str] = None
+    synopsis: Optional[str] = None
+    contract_excerpt: Optional[str] = None
+    status: Optional[str] = None
+    proposal_id: Optional[str] = None
+    report_submitted_at: Optional[datetime] = None
+    decision_date: Optional[datetime] = None
+    awardee_name: Optional[str] = None
+    award_value: Optional[float] = None
+    award_notes: Optional[str] = None
+    win_factors: Optional[str] = None
+    loss_factors: Optional[str] = None
+    analysis_notes: Optional[str] = None
+    tags: Optional[List[str]] = None
+
+
+def _normalize_contract_status(raw: Optional[str]) -> Optional[str]:
+    if raw is None:
+        return None
+    val = raw.strip().lower().replace("-", "_").replace(" ", "_")
+    if val == "pending":
+        val = "submitted"
+    if val not in CONTRACT_STATUSES:
+        raise HTTPException(status_code=400, detail=f"Invalid status '{raw}'")
+    return val
+
+
+def _dt_to_str(value: Optional[datetime]) -> Optional[str]:
+    if not value:
+        return None
+    if value.tzinfo:
+        value = value.astimezone(timezone.utc).replace(tzinfo=None)
+    return value.isoformat()
+
+
+def _contract_to_dict(contract: ContractOpportunity, include_raw: bool = False) -> Dict[str, Any]:
+    data = {
+        "id": contract.id,
+        "source": contract.source,
+        "source_id": contract.source_id,
+        "title": contract.title,
+        "agency": contract.agency,
+        "sub_agency": contract.sub_agency,
+        "office": contract.office,
+        "naics": contract.naics,
+        "psc": contract.psc,
+        "set_aside": contract.set_aside,
+        "posted_at": _dt_to_str(contract.posted_at),
+        "due_at": _dt_to_str(contract.due_at),
+        "value": contract.value,
+        "location": contract.location,
+        "url": contract.url,
+        "synopsis": contract.synopsis,
+        "contract_excerpt": contract.contract_excerpt,
+        "status": contract.status,
+        "proposal_id": contract.proposal_id,
+        "report_submitted_at": _dt_to_str(contract.report_submitted_at),
+        "decision_date": _dt_to_str(contract.decision_date),
+        "awardee_name": contract.awardee_name,
+        "award_value": contract.award_value,
+        "award_notes": contract.award_notes,
+        "win_factors": contract.win_factors,
+        "loss_factors": contract.loss_factors,
+        "analysis_notes": contract.analysis_notes,
+        "tags": contract.tags or [],
+        "last_seen_at": _dt_to_str(contract.last_seen_at),
+        "created_at": _dt_to_str(contract.created_at),
+        "updated_at": _dt_to_str(contract.updated_at),
+    }
+    if include_raw:
+        data["raw_payload"] = contract.raw_payload
+    return data
+
+
+def _get_sync_state(session) -> ContractSyncState:
+    state = (
+        session.query(ContractSyncState)
+        .filter(ContractSyncState.source == SAM_SYNC_SOURCE)
+        .one_or_none()
+    )
+    if not state:
+        state = ContractSyncState(source=SAM_SYNC_SOURCE, requests_today=0)
+        session.add(state)
+        session.flush()
+    return state
+
+
+def _reset_daily_budget(state: ContractSyncState, now: datetime) -> None:
+    today = now.strftime("%Y-%m-%d")
+    if state.requests_today_date != today:
+        state.requests_today_date = today
+        state.requests_today = 0
+
+
+def _update_contract_from_source(contract: ContractOpportunity, payload: Dict[str, Any], now: datetime) -> None:
+    for field in [
+        "title",
+        "agency",
+        "sub_agency",
+        "office",
+        "naics",
+        "psc",
+        "set_aside",
+        "posted_at",
+        "due_at",
+        "value",
+        "location",
+        "url",
+        "synopsis",
+        "contract_excerpt",
+    ]:
+        val = payload.get(field)
+        if val is None:
+            continue
+        if isinstance(val, str) and not val.strip():
+            continue
+        setattr(contract, field, val)
+    contract.raw_payload = payload.get("raw_payload") or contract.raw_payload
+    contract.last_seen_at = now
+    contract.updated_at = now
+
+
+def _sync_sam_contracts(trigger: str = "manual") -> Dict[str, Any]:
+    if not SAM_API_KEY:
+        result = {"status": "skipped", "reason": "missing_api_key"}
+        SAM_SYNC_STATE.update({"last_run": _dt_to_str(datetime.utcnow()), "last_error": "missing_api_key", "last_result": result})
+        return result
+    if SAM_SYNC_MAX_REQUESTS_PER_DAY <= 0:
+        result = {"status": "skipped", "reason": "daily_limit_disabled"}
+        SAM_SYNC_STATE.update({"last_run": _dt_to_str(datetime.utcnow()), "last_error": "daily_limit_disabled", "last_result": result})
+        return result
+    if not SAM_SYNC_LOCK.acquire(blocking=False):
+        return {"status": "busy"}
+    now = datetime.utcnow()
+    try:
+        inserted = 0
+        updated = 0
+        seen: set[str] = set()
+        request_count = 0
+        with get_session() as session:
+            state = _get_sync_state(session)
+            _reset_daily_budget(state, now)
+
+            if trigger == "scheduled" and state.last_run_at:
+                delta = (now - state.last_run_at).total_seconds()
+                if delta < max(0, SAM_SYNC_MIN_INTERVAL_MINUTES) * 60:
+                    result = {
+                        "status": "skipped",
+                        "reason": "min_interval",
+                        "seconds_since_last_run": round(delta, 1),
+                    }
+                    state.last_status = result["status"]
+                    state.last_error = result["reason"]
+                    state.last_result = result
+                    state.updated_at = now
+                    SAM_SYNC_STATE.update({"last_run": _dt_to_str(state.last_run_at), "last_error": result["reason"], "last_result": result})
+                    return result
+
+            remaining = max(0, SAM_SYNC_MAX_REQUESTS_PER_DAY - (state.requests_today or 0))
+            if remaining <= 0:
+                result = {"status": "skipped", "reason": "daily_limit_reached", "remaining": 0}
+                state.last_status = result["status"]
+                state.last_error = result["reason"]
+                state.last_result = result
+                state.last_run_at = now
+                state.updated_at = now
+                SAM_SYNC_STATE.update({"last_run": _dt_to_str(now), "last_error": result["reason"], "last_result": result})
+                return result
+
+            days_back = SAM_SYNC_DAYS_BACK
+            if state.last_run_at:
+                delta_days = max(1, int((now - state.last_run_at).total_seconds() // 86400) + 1)
+                days_back = min(SAM_SYNC_DAYS_BACK, delta_days)
+
+            pages = max(1, SAM_SYNC_PAGES)
+            pages = min(pages, remaining)
+            for page in range(pages):
+                request_count += 1
+                state.requests_today = (state.requests_today or 0) + 1
+                try:
+                    payload = fetch_sam_opportunities(
+                        api_key=SAM_API_KEY,
+                        query=SAM_SYNC_QUERY or None,
+                        days_back=days_back,
+                        limit=SAM_SYNC_LIMIT,
+                        offset=page * SAM_SYNC_LIMIT,
+                    )
+                except Exception as exc:
+                    err = str(exc)
+                    result = {
+                        "status": "error",
+                        "error": err,
+                        "request_count": request_count,
+                        "remaining_quota": max(0, SAM_SYNC_MAX_REQUESTS_PER_DAY - (state.requests_today or 0)),
+                        "trigger": trigger,
+                    }
+                    state.last_run_at = now
+                    state.last_status = "error"
+                    state.last_error = err
+                    state.last_result = result
+                    state.updated_at = now
+                    SAM_SYNC_STATE.update({"last_run": _dt_to_str(now), "last_error": err, "last_result": result})
+                    return result
+                rows = extract_sam_results(payload)
+                for row in rows:
+                    normalized = normalize_sam_record(row or {})
+                    source_id = normalized.get("source_id")
+                    if not source_id or source_id in seen:
+                        continue
+                    seen.add(source_id)
+                    existing = (
+                        session.query(ContractOpportunity)
+                        .filter(
+                            ContractOpportunity.source == normalized.get("source", "sam.gov"),
+                            ContractOpportunity.source_id == source_id,
+                        )
+                        .one_or_none()
+                    )
+                    if existing:
+                        _update_contract_from_source(existing, normalized, now)
+                        updated += 1
+                    else:
+                        contract = ContractOpportunity(**normalized)
+                        contract.status = "new"
+                        contract.last_seen_at = now
+                        contract.updated_at = now
+                        session.add(contract)
+                        inserted += 1
+            result = {
+                "status": "ok",
+                "inserted": inserted,
+                "updated": updated,
+                "total_seen": len(seen),
+                "request_count": request_count,
+                "days_back": days_back,
+                "remaining_quota": max(0, SAM_SYNC_MAX_REQUESTS_PER_DAY - (state.requests_today or 0)),
+                "trigger": trigger,
+            }
+            state.last_run_at = now
+            state.last_status = result["status"]
+            state.last_error = None
+            state.last_result = result
+            state.updated_at = now
+        SAM_SYNC_STATE.update({"last_run": _dt_to_str(now), "last_error": None, "last_result": result})
+        return result
+    except Exception as exc:
+        err = str(exc)
+        try:
+            with get_session() as session:
+                state = _get_sync_state(session)
+                state.last_run_at = now
+                state.last_status = "error"
+                state.last_error = err
+                state.last_result = None
+                state.updated_at = now
+        except Exception:
+            pass
+        SAM_SYNC_STATE.update({"last_run": _dt_to_str(now), "last_error": err, "last_result": None})
+        return {"status": "error", "error": err}
+    finally:
+        SAM_SYNC_LOCK.release()
+
+
+def _sam_sync_loop() -> None:
+    while True:
+        _sync_sam_contracts(trigger="scheduled")
+        time.sleep(max(60, SAM_SYNC_INTERVAL_MINUTES * 60))
+
+
+def _start_sam_sync() -> None:
+    global SAM_SYNC_STARTED
+    if SAM_SYNC_STARTED or not SAM_SYNC_SCHEDULED:
+        return
+    if not SAM_API_KEY:
+        return
+    if SAM_SYNC_MAX_REQUESTS_PER_DAY <= 0:
+        return
+    thread = threading.Thread(target=_sam_sync_loop, daemon=True)
+    thread.start()
+    SAM_SYNC_STARTED = True
 
 
 @app.post("/api/v1/estimate")
@@ -743,6 +1093,190 @@ def scrape_url(req: ScrapeUrlRequest, current_user: str = Depends(get_current_us
         truncated=result.truncated,
         error=result.error,
     )
+
+
+@app.post("/api/v1/contracts/sam/sync")
+def sync_sam_contracts(current_user: str = Depends(get_current_user)):
+    return _sync_sam_contracts(trigger="manual")
+
+
+@app.get("/api/v1/contracts/sam/status")
+def sam_sync_status():
+    now = datetime.utcnow()
+    with get_session() as session:
+        state = _get_sync_state(session)
+        _reset_daily_budget(state, now)
+        remaining = max(0, SAM_SYNC_MAX_REQUESTS_PER_DAY - (state.requests_today or 0))
+        return {
+            "source": state.source,
+            "last_run": _dt_to_str(state.last_run_at),
+            "last_status": state.last_status,
+            "last_error": state.last_error,
+            "requests_today": state.requests_today,
+            "requests_today_date": state.requests_today_date,
+            "remaining_quota": remaining,
+            "max_requests_per_day": SAM_SYNC_MAX_REQUESTS_PER_DAY,
+            "last_result": state.last_result,
+        }
+
+
+@app.get("/api/v1/contracts")
+def list_contracts(
+    status: Optional[str] = None,
+    q: Optional[str] = None,
+    source: Optional[str] = None,
+    limit: int = 100,
+    offset: int = 0,
+    current_user: str = Depends(get_current_user),
+):
+    with get_session() as session:
+        query = session.query(ContractOpportunity)
+        if status:
+            statuses = [
+                _normalize_contract_status(s)
+                for s in status.split(",")
+                if s.strip()
+            ]
+            if statuses:
+                query = query.filter(ContractOpportunity.status.in_(statuses))
+        if source:
+            query = query.filter(ContractOpportunity.source == source)
+        if q:
+            needle = f"%{q.strip().lower()}%"
+            query = query.filter(
+                or_(
+                    func.lower(ContractOpportunity.title).like(needle),
+                    func.lower(ContractOpportunity.agency).like(needle),
+                    func.lower(ContractOpportunity.naics).like(needle),
+                )
+            )
+        rows = (
+            query.order_by(ContractOpportunity.posted_at.desc(), ContractOpportunity.created_at.desc())
+            .offset(max(0, offset))
+            .limit(max(1, min(limit, 500)))
+            .all()
+        )
+        return [_contract_to_dict(row) for row in rows]
+
+
+@app.get("/api/v1/contracts/{contract_id}")
+def get_contract(contract_id: str, current_user: str = Depends(get_current_user)):
+    with get_session() as session:
+        row = session.query(ContractOpportunity).filter(ContractOpportunity.id == contract_id).one_or_none()
+        if not row:
+            raise HTTPException(status_code=404, detail="Contract not found")
+        return _contract_to_dict(row, include_raw=True)
+
+
+@app.post("/api/v1/contracts")
+def create_contract(body: ContractCreate, current_user: str = Depends(get_current_user)):
+    status = _normalize_contract_status(body.status or "new")
+    now = datetime.utcnow()
+    synopsis = body.synopsis or None
+    excerpt = body.contract_excerpt or (synopsis[:4000] if synopsis else None)
+    proposal_id = body.proposal_id or None
+    with get_session() as session:
+        contract = ContractOpportunity(
+            source=body.source or "manual",
+            source_id=body.source_id,
+            title=body.title,
+            agency=body.agency,
+            sub_agency=body.sub_agency,
+            office=body.office,
+            naics=body.naics,
+            psc=body.psc,
+            set_aside=body.set_aside,
+            posted_at=body.posted_at,
+            due_at=body.due_at,
+            value=body.value,
+            location=body.location,
+            url=body.url,
+            synopsis=synopsis,
+            contract_excerpt=excerpt,
+            status=status,
+            proposal_id=proposal_id,
+            report_submitted_at=body.report_submitted_at,
+            decision_date=body.decision_date,
+            awardee_name=body.awardee_name,
+            award_value=body.award_value,
+            award_notes=body.award_notes,
+            win_factors=body.win_factors,
+            loss_factors=body.loss_factors,
+            analysis_notes=body.analysis_notes,
+            tags=body.tags or [],
+            last_seen_at=now,
+            updated_at=now,
+        )
+        session.add(contract)
+        session.flush()
+        return _contract_to_dict(contract, include_raw=True)
+
+
+@app.patch("/api/v1/contracts/{contract_id}")
+def update_contract(contract_id: str, body: ContractUpdate, current_user: str = Depends(get_current_user)):
+    patch = body.dict(exclude_unset=True)
+    if "status" in patch:
+        patch["status"] = _normalize_contract_status(patch["status"])
+    if "proposal_id" in patch:
+        patch["proposal_id"] = patch["proposal_id"] or None
+    if "tags" in patch and patch["tags"] is not None:
+        patch["tags"] = [t.strip() for t in patch["tags"] if t and t.strip()]
+    now = datetime.utcnow()
+    with get_session() as session:
+        contract = session.query(ContractOpportunity).filter(ContractOpportunity.id == contract_id).one_or_none()
+        if not contract:
+            raise HTTPException(status_code=404, detail="Contract not found")
+        for key, val in patch.items():
+            setattr(contract, key, val)
+        if patch.get("status") == "submitted" and not contract.report_submitted_at:
+            contract.report_submitted_at = now
+        if patch.get("status") in ("awarded", "lost") and not contract.decision_date:
+            contract.decision_date = now
+        if not contract.contract_excerpt and contract.synopsis:
+            contract.contract_excerpt = contract.synopsis[:4000]
+        contract.updated_at = now
+        session.flush()
+        return _contract_to_dict(contract, include_raw=True)
+
+
+@app.get("/api/v1/contracts/stats")
+def contract_stats(current_user: str = Depends(get_current_user)):
+    with get_session() as session:
+        rows = session.query(ContractOpportunity).all()
+        state = _get_sync_state(session)
+
+    total = len(rows)
+    by_status = Counter([r.status for r in rows if r.status])
+    awarded = by_status.get("awarded", 0)
+    lost = by_status.get("lost", 0)
+    win_rate = round((awarded / (awarded + lost)) * 100, 1) if (awarded + lost) > 0 else 0.0
+
+    awarded_values = [r.award_value for r in rows if r.status == "awarded" and r.award_value]
+    lost_values = [r.award_value for r in rows if r.status == "lost" and r.award_value]
+    avg_award_value = round(sum(awarded_values) / len(awarded_values), 2) if awarded_values else None
+    avg_lost_value = round(sum(lost_values) / len(lost_values), 2) if lost_values else None
+
+    def top_counts(attr: str, status_key: str) -> List[Dict[str, Any]]:
+        counts = Counter(
+            [getattr(r, attr) for r in rows if r.status == status_key and getattr(r, attr)]
+        )
+        return [{"name": k, "count": v} for k, v in counts.most_common(5)]
+
+    return {
+        "total": total,
+        "by_status": dict(by_status),
+        "awarded": awarded,
+        "lost": lost,
+        "win_rate": win_rate,
+        "avg_award_value": avg_award_value,
+        "avg_lost_value": avg_lost_value,
+        "top_agencies_awarded": top_counts("agency", "awarded"),
+        "top_agencies_lost": top_counts("agency", "lost"),
+        "top_naics_awarded": top_counts("naics", "awarded"),
+        "top_naics_lost": top_counts("naics", "lost"),
+        "last_sync": _dt_to_str(state.last_run_at),
+        "last_sync_error": state.last_error,
+    }
 
 
 @app.post("/api/v1/subtasks/preview")
@@ -1279,6 +1813,8 @@ def auth_exchange(body: TokenExchange):
     access = _issue_token(email, ttl_minutes=60 * 24 * 7, purpose="access")
     return {"access_token": access, "token_type": "bearer", "email": email}
 
+
+_start_sam_sync()
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8000)
