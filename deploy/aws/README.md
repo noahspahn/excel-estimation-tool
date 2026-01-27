@@ -4,16 +4,16 @@
 
 - **Backend**: FastAPI app (`backend/app/main.py`) deployed as a Docker container on **AWS App Runner**, pulling from ECR.
 - **Frontend**: Vite/React app (`frontend/`) built to static assets and served from an **S3 static website endpoint**.
-- **Auth**: **Amazon Cognito User Pool** for email/password users. The frontend talks directly to Cognito’s `InitiateAuth`, `SignUp`, and `ConfirmSignUp` APIs. The backend verifies Cognito JWTs via JWKS.
+- **Auth**: Temporarily disabled via `VITE_DISABLE_AUTH=true`. Cognito setup can be postponed until auth is re-enabled.
 - Goal: simple, low-ops deployment you can drive from your dev machine with minimal manual AWS configuration.
 
 ## Prerequisites
 
 - AWS CLI v2 configured (`aws configure`) with access to:
-  - ECR, App Runner, S3, Cognito, IAM.
+  - ECR, App Runner, S3, IAM (Cognito optional).
 - Docker installed and logged in locally (for building/pushing backend images).
 - Node 18+ for building the frontend.
-- A Cognito User Pool with:
+- (Optional for later) A Cognito User Pool with:
   - An App Client (`VITE_COGNITO_CLIENT_ID` / `COGNITO_CLIENT_ID`).
   - Email as sign-in alias.
   - Auth flows enabled: `ALLOW_USER_PASSWORD_AUTH`, `ALLOW_REFRESH_TOKEN_AUTH`.
@@ -32,8 +32,8 @@ The “live” setup looks like this:
     - `SECRET_KEY`, `ALGORITHM`, `ACCESS_TOKEN_EXPIRE_MINUTES`.
     - `OPENAI_API_KEY` (optional).
     - `ALLOWED_ORIGINS` for CORS (`http://localhost:3000,http://localhost:3001` etc).
-    - `COGNITO_REGION`, `COGNITO_USER_POOL_ID`, `COGNITO_CLIENT_ID`.
-  - `get_current_user()` in `backend/app/main.py` verifies Cognito JWTs by fetching the pool’s JWKS and checking `iss`, `aud/client_id`, `exp`, and the `email` claim.
+    - `COGNITO_REGION`, `COGNITO_USER_POOL_ID`, `COGNITO_CLIENT_ID` (only needed when auth is enabled).
+  - `get_current_user()` in `backend/app/main.py` verifies Cognito JWTs when auth is enabled.
 
 - **Frontend app**
 
@@ -43,10 +43,11 @@ The “live” setup looks like this:
   - At build time, the frontend reads these Vite env vars:
     - `VITE_API_URL` → points at the App Runner backend (e.g. `https://cqdcypvz3e.us-east-1.awsapprunner.com/`).
     - `VITE_EXCEL_API_ENABLED` → enables Excel-related UI.
+    - `VITE_APP_ENV` -> `dev` or `stage` shows a badge in the top nav (prod stays hidden).
     - `VITE_COGNITO_REGION` / `VITE_COGNITO_CLIENT_ID` → used to call Cognito’s JSON APIs.
-  - On load, the app shows a **sign-in / sign-up gate**. Until a user is authenticated, nothing else is rendered.
+  - On load, the app shows a **sign-in / sign-up gate** only when `VITE_DISABLE_AUTH=false`.
 
-- **Cognito auth (frontend behavior)**
+- **Cognito auth (optional)**
   - Sign-in:
     - User enters email + password on the login screen.
     - Frontend POSTs to `https://cognito-idp.<region>.amazonaws.com/` with:
@@ -114,8 +115,8 @@ service names, and optional frontend Vite variables (no secrets should go here).
 
 Notes:
 - Each environment should have its own App Runner service + S3 bucket.
-- If you need different Cognito pools per environment, set `VITE_COGNITO_REGION`
-  and `VITE_COGNITO_CLIENT_ID` in the config file for each environment.
+- If you need different Cognito pools per environment, set `VITE_COGNITO_REGION` and `VITE_COGNITO_CLIENT_ID` in the config file for each environment.
+- Set `VITE_APP_ENV` to `dev` or `stage` to show the environment badge.
 - `deploy-simple.ps1` respects any `VITE_*` variables already set in your shell,
   so you can also export them directly instead of using the config.
 
@@ -142,6 +143,9 @@ If you prefer to run the steps yourself:
      ```powershell
      $env:VITE_API_URL = "https://<your-apprunner-url>/"
      $env:VITE_EXCEL_API_ENABLED = "true"
+     $env:VITE_DISABLE_AUTH = "true"
+     $env:VITE_APP_ENV = "dev"
+     # Cognito vars only needed when auth is enabled
      $env:VITE_COGNITO_REGION = "us-east-1"
      $env:VITE_COGNITO_CLIENT_ID = "<your-app-client-id>"
      npm install

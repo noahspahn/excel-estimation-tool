@@ -96,6 +96,9 @@ class EstimationInput:
     rap_number: Optional[str] = None
     psi_code: Optional[str] = None
     additional_comments: Optional[str] = None
+    security_protocols: Optional[str] = None
+    compliance_frameworks: Optional[str] = None
+    additional_assumptions: Optional[str] = None
     sites: int = 1
     overtime: bool = False
     # Other costs and fixed-price items (simple shape: {description, price})

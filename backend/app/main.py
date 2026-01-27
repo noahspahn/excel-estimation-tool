@@ -211,6 +211,9 @@ class EstimationRequest(BaseModel):
     rap_number: Optional[str] = None
     psi_code: Optional[str] = None
     additional_comments: Optional[str] = None
+    security_protocols: Optional[str] = None
+    compliance_frameworks: Optional[str] = None
+    additional_assumptions: Optional[str] = None
     # Site and schedule
     sites: int = 1
     overtime: bool = False
@@ -637,6 +640,9 @@ def estimate(req: EstimationRequest):
         rap_number=req.rap_number,
         psi_code=req.psi_code,
         additional_comments=req.additional_comments,
+        security_protocols=req.security_protocols,
+        compliance_frameworks=req.compliance_frameworks,
+        additional_assumptions=req.additional_assumptions,
         sites=req.sites,
         overtime=req.overtime,
         odc_items=req.odc_items or [],
@@ -664,6 +670,9 @@ def estimate(req: EstimationRequest):
             "rap_number": req.rap_number,
             "psi_code": req.psi_code,
             "additional_comments": req.additional_comments,
+            "security_protocols": req.security_protocols,
+            "compliance_frameworks": req.compliance_frameworks,
+            "additional_assumptions": req.additional_assumptions,
         },
         "odc_items": req.odc_items or [],
         "fixed_price_items": req.fixed_price_items or [],
@@ -707,6 +716,9 @@ def generate_narrative(req: NarrativeRequest):
         rap_number=req.rap_number,
         psi_code=req.psi_code,
         additional_comments=req.additional_comments,
+        security_protocols=req.security_protocols,
+        compliance_frameworks=req.compliance_frameworks,
+        additional_assumptions=req.additional_assumptions,
         sites=req.sites,
         overtime=req.overtime,
         odc_items=req.odc_items or [],
@@ -730,6 +742,9 @@ def generate_narrative(req: NarrativeRequest):
         "rap_number": req.rap_number,
         "psi_code": req.psi_code,
         "additional_comments": req.additional_comments,
+        "security_protocols": req.security_protocols,
+        "compliance_frameworks": req.compliance_frameworks,
+        "additional_assumptions": req.additional_assumptions,
     }
     if any(v for v in project_info.values()):
         estimation_data["project_info"] = project_info
@@ -841,6 +856,9 @@ def rewrite_narrative_section(req: NarrativeSectionPrompt):
                 rap_number=est_input.get("rap_number"),
                 psi_code=est_input.get("psi_code"),
                 additional_comments=est_input.get("additional_comments"),
+                security_protocols=est_input.get("security_protocols"),
+                compliance_frameworks=est_input.get("compliance_frameworks"),
+                additional_assumptions=est_input.get("additional_assumptions"),
                 sites=est_input.get("sites") or 1,
                 overtime=bool(est_input.get("overtime")),
                 odc_items=est_input.get("odc_items") or [],
@@ -907,6 +925,9 @@ def generate_report(req: ReportRequest, include_ai: bool = False, tone: str = "p
         rap_number=req.rap_number,
         psi_code=req.psi_code,
         additional_comments=req.additional_comments,
+        security_protocols=req.security_protocols,
+        compliance_frameworks=req.compliance_frameworks,
+        additional_assumptions=req.additional_assumptions,
         sites=req.sites,
         overtime=req.overtime,
         odc_items=req.odc_items or [],
@@ -932,6 +953,9 @@ def generate_report(req: ReportRequest, include_ai: bool = False, tone: str = "p
             "rap_number": req.rap_number,
             "psi_code": req.psi_code,
             "additional_comments": req.additional_comments,
+            "security_protocols": req.security_protocols,
+            "compliance_frameworks": req.compliance_frameworks,
+            "additional_assumptions": req.additional_assumptions,
         },
         "odc_items": req.odc_items or [],
         "fixed_price_items": req.fixed_price_items or [],
@@ -1309,6 +1333,9 @@ def preview_subtasks(req: ReportRequest, tone: str = "professional", current_use
         rap_number=req.rap_number,
         psi_code=req.psi_code,
         additional_comments=req.additional_comments,
+        security_protocols=req.security_protocols,
+        compliance_frameworks=req.compliance_frameworks,
+        additional_assumptions=req.additional_assumptions,
         sites=req.sites,
         overtime=req.overtime,
         odc_items=req.odc_items or [],

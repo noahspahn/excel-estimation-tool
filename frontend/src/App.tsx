@@ -92,6 +92,9 @@ function App() {
   const [rapNumber, setRapNumber] = useState('')
   const [psiCode, setPsiCode] = useState('')
   const [additionalComments, setAdditionalComments] = useState('')
+  const [securityProtocols, setSecurityProtocols] = useState('')
+  const [complianceFrameworks, setComplianceFrameworks] = useState('')
+  const [additionalAssumptions, setAdditionalAssumptions] = useState('')
   const [sites, setSites] = useState<number>(1)
   const [overtime, setOvertime] = useState<boolean>(false)
   const [odcItems, setOdcItems] = useState<{ description: string; price: number }[]>([])
@@ -143,6 +146,9 @@ function App() {
           setRapNumber(ei.rap_number || '')
           setPsiCode(ei.psi_code || '')
           setAdditionalComments(ei.additional_comments || '')
+          setSecurityProtocols(ei.security_protocols || '')
+          setComplianceFrameworks(ei.compliance_frameworks || '')
+          setAdditionalAssumptions(ei.additional_assumptions || '')
           setSites(ei.sites || 1)
           setOvertime(!!ei.overtime)
           setOdcItems(ei.odc_items || [])
@@ -386,6 +392,91 @@ function App() {
     }
   }
 
+  const extractScrapeSuggestions = (text: string) => {
+    const cleaned = String(text || '').replace(/\r/g, '\n')
+    const lines = cleaned.split('\n').map(line => line.trim()).filter(Boolean)
+    const findLine = (regex: RegExp) => lines.find(line => regex.test(line))
+    const extractAfterLabel = (regex: RegExp) => {
+      const line = findLine(regex)
+      if (!line) return ''
+      return line.replace(regex, '').replace(/^[:\s-]+/, '').trim()
+    }
+
+    let projectName =
+      extractAfterLabel(/^(title|solicitation title|notice title|opportunity title)\s*[:\-]/i) || ''
+    if (!projectName && lines.length) {
+      const firstLine = lines[0]
+      if (firstLine.length <= 120) projectName = firstLine
+    }
+
+    const siteLocation =
+      extractAfterLabel(/^(place of performance|location|site location|place of delivery)\s*[:\-]/i) || ''
+    const governmentPOC =
+      extractAfterLabel(/^(point of contact|poc|contracting officer|contact name)\s*[:\-]/i) || ''
+
+    const emailMatch = cleaned.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i)
+    const email = emailMatch ? emailMatch[0] : ''
+
+    const fyMatch =
+      cleaned.match(/\bFY\s*([0-9]{4})\b/i) || cleaned.match(/\bFiscal Year\s*([0-9]{4})\b/i)
+    const fy = fyMatch ? fyMatch[1] : ''
+
+    const complianceCandidates: { label: string; re: RegExp }[] = [
+      { label: 'NIST 800-53', re: /NIST\s*800-53/i },
+      { label: 'NIST 800-171', re: /NIST\s*800-171/i },
+      { label: 'RMF', re: /\bRMF\b/i },
+      { label: 'DFARS', re: /\bDFARS\b/i },
+      { label: 'CMMC', re: /\bCMMC\b/i },
+      { label: 'FedRAMP', re: /\bFedRAMP\b/i },
+      { label: 'FISMA', re: /\bFISMA\b/i },
+      { label: 'HIPAA', re: /\bHIPAA\b/i },
+      { label: 'CJIS', re: /\bCJIS\b/i },
+      { label: 'ISO 27001', re: /ISO\s*27001/i },
+      { label: 'SOC 2', re: /\bSOC\s*2\b/i },
+      { label: 'PCI DSS', re: /\bPCI\s*DSS\b/i },
+    ]
+    const complianceHits = complianceCandidates
+      .filter(item => item.re.test(cleaned))
+      .map(item => item.label)
+    const complianceFrameworks = Array.from(new Set(complianceHits)).join(', ')
+
+    const securityCandidates: { label: string; re: RegExp }[] = [
+      { label: 'Multi-factor authentication (MFA)', re: /\bMFA\b|multi[-\s]?factor/i },
+      { label: 'Encryption at rest/in transit', re: /encryption|encrypt/i },
+      { label: 'Zero Trust', re: /zero[-\s]?trust/i },
+      { label: 'SIEM monitoring', re: /\bSIEM\b/i },
+      { label: 'Incident response', re: /incident response/i },
+      { label: 'Access control', re: /access control/i },
+      { label: 'Continuous monitoring', re: /continuous monitoring/i },
+      { label: 'Vulnerability management', re: /vulnerabil/i },
+    ]
+    const securityHits = securityCandidates
+      .filter(item => item.re.test(cleaned))
+      .map(item => item.label)
+    const securityProtocols = Array.from(new Set(securityHits)).join(', ')
+
+    return {
+      projectName,
+      siteLocation,
+      governmentPOC,
+      email,
+      fy,
+      complianceFrameworks,
+      securityProtocols,
+    }
+  }
+
+  const applyScrapeSuggestions = (text: string) => {
+    const suggestions = extractScrapeSuggestions(text || '')
+    if (suggestions.projectName && !projectName) setProjectName(suggestions.projectName)
+    if (suggestions.siteLocation && !siteLocation) setSiteLocation(suggestions.siteLocation)
+    if (suggestions.governmentPOC && !governmentPOC) setGovernmentPOC(suggestions.governmentPOC)
+    if (suggestions.email && !email) setEmail(suggestions.email)
+    if (suggestions.fy && !fy) setFy(suggestions.fy)
+    if (suggestions.securityProtocols && !securityProtocols) setSecurityProtocols(suggestions.securityProtocols)
+    if (suggestions.complianceFrameworks && !complianceFrameworks) setComplianceFrameworks(suggestions.complianceFrameworks)
+  }
+
   const runScrapeTest = async () => {
     setScrapeError(null)
     setScrapeResult(null)
@@ -424,6 +515,9 @@ function App() {
       }
       const data = await res.json()
       setScrapeResult(data)
+      if (data?.success && data?.text_excerpt) {
+        applyScrapeSuggestions(data.text_excerpt)
+      }
     } catch (e) {
       console.error('Scrape error', e)
       setScrapeError('Network or server error while scraping')
@@ -540,6 +634,9 @@ function App() {
           rap_number: rapNumber,
           psi_code: psiCode,
           additional_comments: additionalComments,
+          security_protocols: securityProtocols,
+          compliance_frameworks: complianceFrameworks,
+          additional_assumptions: additionalAssumptions,
           sites,
           overtime,
           odc_items: odcItems,
@@ -612,6 +709,9 @@ function App() {
           rap_number: rapNumber || undefined,
           psi_code: psiCode || undefined,
           additional_comments: additionalComments || undefined,
+          security_protocols: securityProtocols || undefined,
+          compliance_frameworks: complianceFrameworks || undefined,
+          additional_assumptions: additionalAssumptions || undefined,
           sites,
           overtime,
           odc_items: odcItems,
@@ -680,6 +780,9 @@ function App() {
             rap_number: rapNumber,
             psi_code: psiCode,
             additional_comments: additionalComments,
+            security_protocols: securityProtocols,
+            compliance_frameworks: complianceFrameworks,
+            additional_assumptions: additionalAssumptions,
             sites,
             overtime,
             odc_items: odcItems,
@@ -717,6 +820,9 @@ function App() {
         rap_number: rapNumber,
         psi_code: psiCode,
         additional_comments: additionalComments,
+        security_protocols: securityProtocols,
+        compliance_frameworks: complianceFrameworks,
+        additional_assumptions: additionalAssumptions,
         sites,
         overtime,
         odc_items: odcItems,
@@ -740,6 +846,9 @@ function App() {
           rap_number: rapNumber,
           psi_code: psiCode,
           additional_comments: additionalComments,
+          security_protocols: securityProtocols,
+          compliance_frameworks: complianceFrameworks,
+          additional_assumptions: additionalAssumptions,
         },
         odc_items: odcItems,
         fixed_price_items: fixedPriceItems,
@@ -823,6 +932,9 @@ function App() {
           rap_number: rapNumber || undefined,
           psi_code: psiCode || undefined,
           additional_comments: additionalComments || undefined,
+          security_protocols: securityProtocols || undefined,
+          compliance_frameworks: complianceFrameworks || undefined,
+          additional_assumptions: additionalAssumptions || undefined,
           sites,
           overtime,
           odc_items: odcItems,
@@ -876,6 +988,9 @@ function App() {
       rap_number: rapNumber,
       psi_code: psiCode,
       additional_comments: additionalComments,
+      security_protocols: securityProtocols,
+      compliance_frameworks: complianceFrameworks,
+      additional_assumptions: additionalAssumptions,
       sites,
       overtime,
       odc_items: odcItems,
@@ -916,6 +1031,9 @@ function App() {
       setRapNumber(ei.rap_number || '')
       setPsiCode(ei.psi_code || '')
       setAdditionalComments(ei.additional_comments || '')
+      setSecurityProtocols(ei.security_protocols || '')
+      setComplianceFrameworks(ei.compliance_frameworks || '')
+      setAdditionalAssumptions(ei.additional_assumptions || '')
       setSites(ei.sites || 1)
       setOvertime(!!ei.overtime)
       setOdcItems(ei.odc_items || [])
@@ -968,6 +1086,9 @@ function App() {
         setRapNumber(ei.rap_number || '')
         setPsiCode(ei.psi_code || '')
         setAdditionalComments(ei.additional_comments || '')
+        setSecurityProtocols(ei.security_protocols || '')
+        setComplianceFrameworks(ei.compliance_frameworks || '')
+        setAdditionalAssumptions(ei.additional_assumptions || '')
         setSites(ei.sites || 1)
         setOvertime(!!ei.overtime)
         setOdcItems(ei.odc_items || [])
@@ -1082,6 +1203,9 @@ function App() {
     setRapNumber(ei.rap_number || '')
     setPsiCode(ei.psi_code || '')
     setAdditionalComments(ei.additional_comments || '')
+    setSecurityProtocols(ei.security_protocols || '')
+    setComplianceFrameworks(ei.compliance_frameworks || '')
+    setAdditionalAssumptions(ei.additional_assumptions || '')
     setSites(ei.sites || 1)
     setOvertime(!!ei.overtime)
     setOdcItems(ei.odc_items || [])
@@ -1144,6 +1268,9 @@ function App() {
           rap_number: rapNumber,
           psi_code: psiCode,
           additional_comments: additionalComments,
+          security_protocols: securityProtocols,
+          compliance_frameworks: complianceFrameworks,
+          additional_assumptions: additionalAssumptions,
           sites,
           overtime,
           odc_items: odcItems,
@@ -1184,6 +1311,9 @@ function App() {
             rap_number: rapNumber,
             psi_code: psiCode,
             additional_comments: additionalComments,
+            security_protocols: securityProtocols,
+            compliance_frameworks: complianceFrameworks,
+            additional_assumptions: additionalAssumptions,
             sites,
             overtime,
             odc_items: odcItems,
@@ -1251,6 +1381,9 @@ function App() {
     setRapNumber('')
     setPsiCode('')
     setAdditionalComments('')
+    setSecurityProtocols('')
+    setComplianceFrameworks('')
+    setAdditionalAssumptions('')
     setSites(1)
     setOvertime(false)
     setOdcItems([])
@@ -1553,6 +1686,26 @@ function App() {
         <label>Additional Comments
           <textarea value={additionalComments} onChange={(e) => setAdditionalComments(e.target.value)} rows={2} style={{ width: '100%' }} disabled={readOnly} />
         </label>
+      </div>
+
+      <h2 style={{ marginTop: 24 }}>Security & Compliance</h2>
+      <div className="form-grid">
+        <label>Security Protocols
+          <textarea value={securityProtocols} onChange={(e) => setSecurityProtocols(e.target.value)} rows={2} style={{ width: '100%' }} disabled={readOnly} />
+        </label>
+        <label>Compliance Frameworks
+          <textarea value={complianceFrameworks} onChange={(e) => setComplianceFrameworks(e.target.value)} rows={2} style={{ width: '100%' }} disabled={readOnly} />
+        </label>
+      </div>
+
+      <h2 style={{ marginTop: 24 }}>Assumptions</h2>
+      <div style={{ marginTop: 8 }}>
+        <label>Additional Assumptions
+          <textarea value={additionalAssumptions} onChange={(e) => setAdditionalAssumptions(e.target.value)} rows={3} style={{ width: '100%' }} disabled={readOnly} />
+        </label>
+        <div style={{ fontSize: 12, color: '#666' }}>
+          Used to expand the narrative assumptions section.
+        </div>
       </div>
 
       <h2 style={{ marginTop: 24 }}>Scope Options</h2>
@@ -1969,6 +2122,8 @@ function App() {
                     <div style={{ fontSize: 12, marginTop: 4 }}><strong>Work Scope:</strong> {st.work_scope}</div>
                     <div style={{ fontSize: 12, marginTop: 2 }}><strong>Estimate Basis:</strong> {st.estimate_basis}</div>
                     <div style={{ fontSize: 12, marginTop: 2 }}><strong>Period of Performance:</strong> {st.period_of_performance}</div>
+                    {st.security_protocols && <div style={{ fontSize: 12, marginTop: 2 }}><strong>Security Protocols:</strong> {st.security_protocols}</div>}
+                    {st.compliance_frameworks && <div style={{ fontSize: 12, marginTop: 2 }}><strong>Compliance Frameworks:</strong> {st.compliance_frameworks}</div>}
                     {st.customer_context && <div style={{ fontSize: 12, marginTop: 2 }}><strong>Context:</strong> {st.customer_context}</div>}
                     <div style={{ marginTop: 6 }}>
                       <table style={{ width: '100%', borderCollapse: 'collapse' }}>

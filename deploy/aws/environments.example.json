@@ -7,6 +7,7 @@
     "frontendEnv": {
       "VITE_EXCEL_API_ENABLED": "true",
       "VITE_DISABLE_AUTH": "true",
+      "VITE_APP_ENV": "dev",
       "VITE_COGNITO_REGION": "",
       "VITE_COGNITO_CLIENT_ID": ""
     }
@@ -18,7 +19,8 @@
     "bucket": "meshai-estimation-frontend-stage",
     "frontendEnv": {
       "VITE_EXCEL_API_ENABLED": "true",
-      "VITE_DISABLE_AUTH": "false",
+      "VITE_DISABLE_AUTH": "true",
+      "VITE_APP_ENV": "stage",
       "VITE_COGNITO_REGION": "",
       "VITE_COGNITO_CLIENT_ID": ""
     }
@@ -30,7 +32,8 @@
     "bucket": "meshai-estimation-frontend-prod",
     "frontendEnv": {
       "VITE_EXCEL_API_ENABLED": "true",
-      "VITE_DISABLE_AUTH": "false",
+      "VITE_DISABLE_AUTH": "true",
+      "VITE_APP_ENV": "prod",
       "VITE_COGNITO_REGION": "",
       "VITE_COGNITO_CLIENT_ID": ""
     }

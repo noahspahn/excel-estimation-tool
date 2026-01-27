@@ -19,6 +19,7 @@ jobs:
       S3_BUCKET: ${{ vars.S3_BUCKET }}
       VITE_EXCEL_API_ENABLED: ${{ vars.VITE_EXCEL_API_ENABLED || 'true' }}
       VITE_DISABLE_AUTH: ${{ vars.VITE_DISABLE_AUTH || '' }}
+      VITE_APP_ENV: ${{ github.ref_name == 'main' && 'prod' || github.ref_name == 'stage' && 'stage' || 'dev' }}
       VITE_COGNITO_REGION: ${{ vars.VITE_COGNITO_REGION || '' }}
       VITE_COGNITO_CLIENT_ID: ${{ vars.VITE_COGNITO_CLIENT_ID || '' }}
 
@@ -105,6 +106,7 @@ jobs:
           export VITE_API_URL="${BACKEND_URL}/"
           if [ -n "${VITE_EXCEL_API_ENABLED}" ]; then export VITE_EXCEL_API_ENABLED; fi
           if [ -n "${VITE_DISABLE_AUTH}" ]; then export VITE_DISABLE_AUTH; fi
+          if [ -n "${VITE_APP_ENV}" ]; then export VITE_APP_ENV; fi
           if [ -n "${VITE_COGNITO_REGION}" ]; then export VITE_COGNITO_REGION; fi
           if [ -n "${VITE_COGNITO_CLIENT_ID}" ]; then export VITE_COGNITO_CLIENT_ID; fi
           npm ci

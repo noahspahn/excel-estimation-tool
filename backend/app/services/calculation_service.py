@@ -179,6 +179,12 @@ class CalculationService:
                 ),
             }
 
+            if module.focus_area.value == "SA":
+                if input_data.security_protocols:
+                    subtask["security_protocols"] = input_data.security_protocols
+                if input_data.compliance_frameworks:
+                    subtask["compliance_frameworks"] = input_data.compliance_frameworks
+
             if contract_excerpt:
                 subtask["customer_context"] = contract_excerpt.strip()[:1200]
 
@@ -188,13 +194,38 @@ class CalculationService:
         if contract_excerpt:
             lowered = contract_excerpt.lower()
             keywords = []
-            for k in ["rmf", "dfars", "migration", "cloud", "server", "network", "audit", "compliance", "vmware", "aws", "azure", "tight timeline", "documentation"]:
+            compliance_map = {
+                "rmf": "RMF",
+                "dfars": "DFARS",
+                "cmmc": "CMMC",
+                "fedramp": "FedRAMP",
+                "fisma": "FISMA",
+                "hipaa": "HIPAA",
+                "cjis": "CJIS",
+                "pci dss": "PCI DSS",
+                "iso 27001": "ISO 27001",
+                "soc 2": "SOC 2",
+                "nist 800-53": "NIST 800-53",
+                "nist 800-171": "NIST 800-171",
+            }
+            for k in ["migration", "cloud", "server", "network", "audit", "compliance", "vmware", "aws", "azure", "tight timeline", "documentation"]:
                 if k in lowered:
                     keywords.append(k)
+            detected_compliance = []
+            for key, label in compliance_map.items():
+                if key in lowered:
+                    detected_compliance.append(label)
+            if detected_compliance:
+                keywords.extend(detected_compliance)
             if keywords:
                 for st in subtasks:
                     ctx = st.get("customer_context", "")
                     st["customer_context"] = (ctx + "\n\nDetected requirements: " + ", ".join(sorted(set(keywords)))).strip()
+            if detected_compliance and not input_data.compliance_frameworks:
+                frameworks = ", ".join(sorted(set(detected_compliance)))
+                for st in subtasks:
+                    if st.get("focus_area") == "SA":
+                        st["compliance_frameworks"] = frameworks
 
         # Ensure subtasks are ordered and numbered
         for i, st in enumerate(subtasks, start=1):

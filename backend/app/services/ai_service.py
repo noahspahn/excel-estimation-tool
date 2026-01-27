@@ -76,9 +76,10 @@ class AIService:
             "You are a consulting engagement manager. Write concise, clear, and client-ready narratives "
             "for an estimation report. Use the provided data faithfully. Avoid exaggeration. "
             "Return ONLY valid JSON (no code fences, no extra text) with keys matching the requested sections. "
-            "Each value MUST be a single string paragraph with 2-4 sentences (no lists or objects). "
+            "Each value MUST be a single string paragraph with 2-5 sentences (no lists or objects). "
             "Do NOT include JSON, braces, or key-value formatting inside the section text. "
-            "Use context (scope_outline, contract_highlights, project_info, style_guide) to add human context beyond raw numbers. "
+            "Use context (scope_outline, contract_highlights, project_info, security_protocols, compliance_frameworks, additional_assumptions, style_guide) "
+            "to add human context beyond raw numbers. "
             "If contract_source/excerpt is provided, weave in 1-2 relevant details without quoting large blocks."
         )
 
@@ -155,7 +156,8 @@ class AIService:
                 "Preserve hours and calculations exactly.",
                 "Include work_scope, estimate_basis, period_of_performance, reasonableness.",
                 "If customer context is provided, weave it into work_scope and customer_context.",
-                "Return JSON array of subtasks with keys: sequence, module_name, focus_area, work_scope, estimate_basis, period_of_performance, reasonableness, customer_context (optional), tasks (array of {title, calculation, hours, description optional}), total_hours.",
+                "Preserve security_protocols and compliance_frameworks if provided.",
+                "Return JSON array of subtasks with keys: sequence, module_name, focus_area, work_scope, estimate_basis, period_of_performance, reasonableness, security_protocols (optional), compliance_frameworks (optional), customer_context (optional), tasks (array of {title, calculation, hours, description optional}), total_hours.",
             ],
             "subtasks": deterministic_subtasks,
         })
@@ -311,8 +313,15 @@ class AIService:
                 for r in role_items
             ],
         }
-        if estimation_data.get("project_info"):
-            context["project_info"] = estimation_data["project_info"]
+        project_info = estimation_data.get("project_info")
+        if project_info:
+            context["project_info"] = project_info
+            if project_info.get("security_protocols"):
+                context["security_protocols"] = project_info.get("security_protocols")
+            if project_info.get("compliance_frameworks"):
+                context["compliance_frameworks"] = project_info.get("compliance_frameworks")
+            if project_info.get("additional_assumptions"):
+                context["additional_assumptions"] = project_info.get("additional_assumptions")
         if estimation_data.get("module_subtasks"):
             module_subtasks = estimation_data["module_subtasks"]
             context["module_subtasks"] = self._trim_module_subtasks(module_subtasks)
@@ -382,14 +391,16 @@ class AIService:
     def _build_section_guidance(self, sections: List[str]) -> Dict[str, str]:
         guidance = {
             "executive_summary": (
-                "Summarize the project intent and scope in 2-4 sentences. "
-                "Mention the project name if available, include 1-2 key figures "
-                "(hours or cost), and reference 1-2 module themes. "
+                "Summarize the project intent and scope in 3-5 sentences. "
+                "Include key project_info fields when present (project name, FY, POC, location), "
+                "1-2 key figures (hours or cost), and a brief services summary based on the selected modules. "
+                "If provided, mention security_protocols and compliance_frameworks. "
                 "Weave in contract_highlights or scope_outline when relevant."
             ),
             "assumptions": (
                 "State delivery assumptions tied to the scope and contract context. "
-                "Address access to stakeholders or data, dependencies, approvals, or "
+                "Incorporate any additional_assumptions or project_info notes when provided. "
+                "Address access to stakeholders or data, dependencies, approvals, schedule, and "
                 "security/compliance where applicable. Avoid restating raw numbers."
             ),
             "risks": (
@@ -486,6 +497,8 @@ class AIService:
                 "period_of_performance": self._trim_text(subtask.get("period_of_performance"), 220),
                 "reasonableness": self._trim_text(subtask.get("reasonableness"), 220),
                 "total_hours": subtask.get("total_hours"),
+                "security_protocols": self._trim_text(subtask.get("security_protocols"), 220),
+                "compliance_frameworks": self._trim_text(subtask.get("compliance_frameworks"), 220),
                 "key_tasks": task_titles[:5],
                 "customer_context": self._trim_text(subtask.get("customer_context"), 400),
             })
@@ -865,6 +878,7 @@ class AIService:
         summary = context.get("summary", {})
         modules = context.get("modules", [])
         roles = context.get("roles", [])
+        project_info = context.get("project_info", {}) or {}
 
         total_hours = summary.get("total_labor_hours") or 0
         total_cost = summary.get("total_cost") or 0
@@ -876,24 +890,52 @@ class AIService:
 
         module_names = ", ".join([m.get("name") or "module" for m in modules]) or "selected modules"
         top_roles = ", ".join([r.get("role") or "role" for r in roles[:3]])
+        project_bits = []
+        if project_info.get("project_name"):
+            project_bits.append(str(project_info.get("project_name")))
+        if project_info.get("fy"):
+            project_bits.append(f"FY {project_info.get('fy')}")
+        if project_info.get("site_location"):
+            project_bits.append(str(project_info.get("site_location")))
+        if project_info.get("government_poc"):
+            project_bits.append(f"POC: {project_info.get('government_poc')}")
+        project_intro = ", ".join(project_bits)
+        security_protocols = project_info.get("security_protocols")
+        compliance_frameworks = project_info.get("compliance_frameworks")
+        additional_assumptions = project_info.get("additional_assumptions")
 
         text: Dict[str, str] = {}
 
         if "executive_summary" in secs:
-            text["executive_summary"] = (
+            sentences = []
+            if project_intro:
+                sentences.append(f"Project overview: {project_intro}.")
+            sentences.append(
                 f"This estimate covers {mod_count} {('module' if mod_count==1 else 'modules')} "
-                f"with a {complexity} complexity profile. The projected effort is approximately "
-                f"{total_hours:.0f} labor hours, with a total cost of ${total_cost:,.2f}. "
-                f"The figure includes a risk reserve of ${risk_reserve:,.2f} and overhead of ${overhead_cost:,.2f}. "
-                f"The effective blended rate is about ${eff_rate:,.2f} per hour."
+                f"with a {complexity} complexity profile and approximately {total_hours:.0f} labor hours, "
+                f"totaling ${total_cost:,.2f} (risk reserve ${risk_reserve:,.2f}, overhead ${overhead_cost:,.2f})."
             )
+            sentences.append(f"Services include {module_names} aligned to the RFP scope.")
+            if security_protocols or compliance_frameworks:
+                sec_bits = []
+                if security_protocols:
+                    sec_bits.append(f"security protocols: {security_protocols}")
+                if compliance_frameworks:
+                    sec_bits.append(f"compliance frameworks: {compliance_frameworks}")
+                sentences.append("Security posture highlights " + "; ".join(sec_bits) + ".")
+            sentences.append(f"The effective blended rate is about ${eff_rate:,.2f} per hour.")
+            text["executive_summary"] = " ".join(sentences[:5])
 
         if "assumptions" in secs:
-            text["assumptions"] = (
-                f"Estimates assume a typical staffing mix ({top_roles or 'multi-disciplinary team'}) and standard project cadence. "
-                f"Module sequencing accounts for prerequisites and reasonable dependency alignment. "
-                f"Stakeholder access and decision cadence are consistent with the proposed schedule."
-            )
+            assumption_sentences = [
+                f"Estimates assume a typical staffing mix ({top_roles or 'multi-disciplinary team'}) and standard project cadence.",
+                "Module sequencing accounts for prerequisites, dependency alignment, and access to required data and stakeholders.",
+                "Security reviews, compliance checkpoints, and approvals are aligned with the proposed schedule.",
+            ]
+            if additional_assumptions:
+                trimmed = self._trim_text(additional_assumptions, 240)
+                assumption_sentences.append(f"Additional assumptions provided: {trimmed}.")
+            text["assumptions"] = " ".join(assumption_sentences[:4])
 
         if "risks" in secs:
             text["risks"] = (

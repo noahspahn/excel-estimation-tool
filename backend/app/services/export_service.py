@@ -2,6 +2,8 @@
 from typing import Dict, Any, Optional, List
 from datetime import datetime
 import io
+import re
+from xml.sax.saxutils import escape
 from reportlab.lib.pagesizes import letter, A4
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.units import inch
@@ -68,6 +70,79 @@ class ExportService:
             wordWrap='CJK',  # wrap long continuous strings
             leading=10,
         ))
+        self.styles.add(ParagraphStyle(
+            name='SubsectionHeader',
+            parent=self.styles['Heading3'],
+            fontSize=12,
+            spaceAfter=6,
+            textColor=colors.darkblue,
+        ))
+        self.styles.add(ParagraphStyle(
+            name='ProjectInfoLabel',
+            parent=self.styles['Normal'],
+            fontSize=9,
+            textColor=colors.black,
+            fontName='Helvetica-Bold',
+        ))
+        self.styles.add(ParagraphStyle(
+            name='ProjectInfoValue',
+            parent=self.styles['Normal'],
+            fontSize=9,
+            textColor=colors.black,
+            leading=11,
+            wordWrap='CJK',
+        ))
+        self.styles.add(ParagraphStyle(
+            name='ContractBody',
+            parent=self.styles['Normal'],
+            fontSize=10,
+            textColor=colors.black,
+            leading=13,
+            wordWrap='CJK',
+        ))
+
+    def _build_services_summary(self, result: Dict[str, Any]) -> str:
+        modules = result.get("breakdown_by_module") or {}
+        names: List[str] = []
+        if isinstance(modules, dict):
+            for item in modules.values():
+                name = item.get("module_name")
+                if name and name not in names:
+                    names.append(name)
+        return ", ".join(names)
+
+    def _format_contract_excerpt(self, excerpt: str) -> List[Paragraph]:
+        cleaned = re.sub(r"\r\n?", "\n", str(excerpt or "")).strip()
+        if not cleaned:
+            return []
+        chunks = [c.strip() for c in re.split(r"\n\s*\n", cleaned) if c.strip()]
+        if not chunks:
+            chunks = [cleaned]
+        paragraphs: List[Paragraph] = []
+        for chunk in chunks:
+            line = " ".join(chunk.split())
+            intro = ""
+            rest = ""
+            match = re.match(r"(.{0,180}?[.!?:])\s+(.*)", line)
+            if match:
+                intro = match.group(1).strip()
+                rest = match.group(2).strip()
+            else:
+                words = line.split()
+                if len(words) > 12:
+                    intro = " ".join(words[:12])
+                    rest = " ".join(words[12:])
+                else:
+                    intro = line
+                    rest = ""
+            safe_intro = escape(intro)
+            safe_rest = escape(rest)
+            if safe_rest:
+                formatted = f"<b>{safe_intro}</b> {safe_rest}"
+            else:
+                formatted = f"<b>{safe_intro}</b>"
+            paragraphs.append(Paragraph(formatted, self.styles['ContractBody']))
+        return paragraphs
 
     def generate_estimation_pdf(
         self,
@@ -92,9 +167,20 @@ class ExportService:
         
         # Executive Summary
         story.append(Paragraph("Executive Summary", self.styles['SectionHeader']))
-        
+
         result = estimation_data['estimation_result']
-        
+        project_info = estimation_data.get('project_info') or {}
+
+        if narrative_sections and narrative_sections.get('executive_summary'):
+            story.append(Paragraph("Narrative Summary", self.styles['SubsectionHeader']))
+            story.append(Paragraph(narrative_sections['executive_summary'], self.styles['Normal']))
+            story.append(Spacer(1, 10))
+
+        services_summary = self._build_services_summary(result)
+        if services_summary:
+            story.append(Paragraph(f"<b>Services Summary:</b> {escape(services_summary)}", self.styles['Normal']))
+            story.append(Spacer(1, 10))
+
         summary_data = [
             ['Total Project Hours:', f"{result['total_labor_hours']:,.1f}"],
             ['Total Project Cost:', f"${result['total_cost']:,.2f}"],
@@ -102,7 +188,7 @@ class ExportService:
             ['Project Complexity:', input_summary['complexity']],
             ['Number of Modules:', str(input_summary['module_count'])]
         ]
-        
+
         summary_table = Table(summary_data, colWidths=[3*inch, 2*inch])
         summary_table.setStyle(TableStyle([
             ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
@@ -114,20 +200,20 @@ class ExportService:
             ('GRID', (0, 0), (-1, -1), 0.5, colors.grey),
             ('BACKGROUND', (0, 0), (0, -1), colors.lightgrey),
         ]))
-        
-        story.append(summary_table)
-        story.append(Spacer(1, 20))
 
-        # Project Information (if available)
-        project_info = estimation_data.get('project_info') or {}
+        story.append(summary_table)
+        story.append(Spacer(1, 12))
+
         if project_info:
-            story.append(Spacer(1, 12))
-            story.append(Paragraph("Project Information", self.styles['SectionHeader']))
+            story.append(Paragraph("Project Information", self.styles['SubsectionHeader']))
             pi_rows = []
             def add_pi(label: str, key: str):
                 val = project_info.get(key)
                 if val:
-                    pi_rows.append([label, str(val)])
+                    pi_rows.append([
+                        Paragraph(escape(label), self.styles['ProjectInfoLabel']),
+                        Paragraph(escape(str(val)), self.styles['ProjectInfoValue']),
+                    ])
             add_pi('Project Name', 'project_name')
             add_pi('Government POC', 'government_poc')
             add_pi('Account Manager', 'account_manager')
@@ -138,18 +224,24 @@ class ExportService:
             add_pi('Fiscal Year', 'fy')
             add_pi('RAP #', 'rap_number')
             add_pi('PSI Code', 'psi_code')
+            add_pi('Security Protocols', 'security_protocols')
+            add_pi('Compliance Frameworks', 'compliance_frameworks')
+            add_pi('Additional Assumptions', 'additional_assumptions')
             if project_info.get('additional_comments'):
-                pi_rows.append(['Comments', project_info.get('additional_comments')])
+                pi_rows.append([
+                    Paragraph('Comments', self.styles['ProjectInfoLabel']),
+                    Paragraph(escape(str(project_info.get('additional_comments'))), self.styles['ProjectInfoValue']),
+                ])
 
             if pi_rows:
                 pi_table = Table(pi_rows, colWidths=[2.2*inch, 4.3*inch])
                 pi_table.setStyle(TableStyle([
                     ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
-                    ('FONTNAME', (0, 0), (-1, -1), 'Helvetica'),
-                    ('FONTNAME', (0, 0), (0, -1), 'Helvetica-Bold'),
-                    ('FONTSIZE', (0, 0), (-1, -1), 10),
+                    ('FONTSIZE', (0, 0), (-1, -1), 9),
                     ('BOTTOMPADDING', (0, 0), (-1, -1), 4),
                     ('GRID', (0, 0), (-1, -1), 0.25, colors.lightgrey),
+                    ('VALIGN', (0, 0), (-1, -1), 'TOP'),
+                    ('WORDWRAP', (0, 0), (-1, -1), 'CJK'),
                 ]))
                 story.append(pi_table)
                 story.append(Spacer(1, 16))
@@ -159,21 +251,16 @@ class ExportService:
         if contract_src.get('url') or contract_src.get('excerpt'):
             story.append(Spacer(1, 12))
             story.append(Paragraph("Contract Source (Scraped)", self.styles['SectionHeader']))
-            url = contract_src.get('url')
-            if url:
-                story.append(Paragraph(f"URL: {url}", self.styles['Normal']))
-                story.append(Spacer(1, 6))
             excerpt = contract_src.get('excerpt')
             if excerpt:
-                story.append(Paragraph(str(excerpt), self.styles['Normal']))
-                story.append(Spacer(1, 16))
+                paragraphs = self._format_contract_excerpt(str(excerpt))
+                for para in paragraphs:
+                    story.append(para)
+                    story.append(Spacer(1, 6))
+                story.append(Spacer(1, 10))
 
         # Optional AI-generated narrative blocks
         if narrative_sections:
-            if narrative_sections.get('executive_summary'):
-                story.append(Paragraph("Narrative Summary", self.styles['SectionHeader']))
-                story.append(Paragraph(narrative_sections['executive_summary'], self.styles['Normal']))
-                story.append(Spacer(1, 16))
             for key in ["assumptions", "risks", "recommendations", "next_steps"]:
                 if narrative_sections.get(key):
                     title = key.replace('_', ' ').title()
@@ -298,6 +385,10 @@ class ExportService:
                 ]
                 if subtask.get('reasonableness'):
                     detail_rows.append([p('What makes the estimate reasonable?', 'SubtaskLabel'), p(subtask.get('reasonableness', ''))])
+                if subtask.get('security_protocols'):
+                    detail_rows.append([p('Security Protocols', 'SubtaskLabel'), p(subtask.get('security_protocols', ''))])
+                if subtask.get('compliance_frameworks'):
+                    detail_rows.append([p('Compliance Frameworks', 'SubtaskLabel'), p(subtask.get('compliance_frameworks', ''))])
                 if subtask.get('customer_context'):
                     detail_rows.append([p('Customer Context', 'SubtaskLabel'), p(subtask.get('customer_context', ''))])
 
