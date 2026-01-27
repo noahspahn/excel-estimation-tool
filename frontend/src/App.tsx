@@ -107,6 +107,8 @@ function App() {
   const [subtaskError, setSubtaskError] = useState<string | null>(null)
   const [subtaskLoading, setSubtaskLoading] = useState(false)
   const [subtaskRaw, setSubtaskRaw] = useState<string | null>(null)
+  const [assumptionsBusy, setAssumptionsBusy] = useState(false)
+  const [assumptionsError, setAssumptionsError] = useState<string | null>(null)
 
   useEffect(() => {
     // Test backend connection
@@ -401,18 +403,53 @@ function App() {
       if (!line) return ''
       return line.replace(regex, '').replace(/^[:\s-]+/, '').trim()
     }
+    const extractByPatterns = (patterns: RegExp[]) => {
+      for (const pattern of patterns) {
+        const match = cleaned.match(pattern)
+        if (match && match[1]) return match[1].trim()
+      }
+      return ''
+    }
 
     let projectName =
-      extractAfterLabel(/^(title|solicitation title|notice title|opportunity title)\s*[:\-]/i) || ''
+      extractByPatterns([
+        /Request for Proposal\s*\(RFP\)\s*-\s*([^\n]+)/i,
+        /RFP\s*-\s*([^\n]+)/i,
+      ]) ||
+      extractAfterLabel(/^(title|solicitation title|notice title|opportunity title)\s*[:\-]/i) ||
+      ''
     if (!projectName && lines.length) {
       const firstLine = lines[0]
       if (firstLine.length <= 120) projectName = firstLine
     }
 
     const siteLocation =
-      extractAfterLabel(/^(place of performance|location|site location|place of delivery)\s*[:\-]/i) || ''
+      extractByPatterns([
+        /Site Location\s*[:\-]\s*([^\n]+)/i,
+        /Place of Performance\s*[:\-]\s*([^\n]+)/i,
+        /Location\s*[:\-]\s*([^\n]+)/i,
+      ]) ||
+      extractAfterLabel(/^(place of performance|location|site location|place of delivery)\s*[:\-]/i) ||
+      ''
     const governmentPOC =
-      extractAfterLabel(/^(point of contact|poc|contracting officer|contact name)\s*[:\-]/i) || ''
+      extractByPatterns([
+        /Government POC\s*[:\-]\s*([^\n]+)/i,
+        /Procurement Officer,?\s*([A-Za-z .'-]+)/i,
+        /Point of Contact\s*[:\-]\s*([^\n]+)/i,
+        /Contracting Officer\s*[:\-]\s*([^\n]+)/i,
+      ]) ||
+      extractAfterLabel(/^(point of contact|poc|contracting officer|contact name)\s*[:\-]/i) ||
+      ''
+    const accountManager =
+      extractByPatterns([/Account Manager\s*[:\-]\s*([^\n]+)/i]) || ''
+    const serviceDeliveryMgr =
+      extractByPatterns([/Service Delivery Manager\s*[:\-]\s*([^\n]+)/i]) || ''
+    const serviceDeliveryExec =
+      extractByPatterns([/Service Delivery Executive\s*[:\-]\s*([^\n]+)/i]) || ''
+    const rapNumber =
+      extractByPatterns([/RAP\s*#?\s*[:\-]\s*([A-Za-z0-9-]+)/i]) || ''
+    const psiCode =
+      extractByPatterns([/PSI\s*Code\s*[:\-]\s*([A-Za-z0-9-]+)/i]) || ''
 
     const emailMatch = cleaned.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i)
     const email = emailMatch ? emailMatch[0] : ''
@@ -424,6 +461,7 @@ function App() {
     const complianceCandidates: { label: string; re: RegExp }[] = [
       { label: 'NIST 800-53', re: /NIST\s*800-53/i },
       { label: 'NIST 800-171', re: /NIST\s*800-171/i },
+      { label: 'NIST', re: /\bNIST\b/i },
       { label: 'RMF', re: /\bRMF\b/i },
       { label: 'DFARS', re: /\bDFARS\b/i },
       { label: 'CMMC', re: /\bCMMC\b/i },
@@ -434,6 +472,7 @@ function App() {
       { label: 'ISO 27001', re: /ISO\s*27001/i },
       { label: 'SOC 2', re: /\bSOC\s*2\b/i },
       { label: 'PCI DSS', re: /\bPCI\s*DSS\b/i },
+      { label: 'State Data Security Guidelines', re: /State Data Security Guidelines/i },
     ]
     const complianceHits = complianceCandidates
       .filter(item => item.re.test(cleaned))
@@ -449,6 +488,9 @@ function App() {
       { label: 'Access control', re: /access control/i },
       { label: 'Continuous monitoring', re: /continuous monitoring/i },
       { label: 'Vulnerability management', re: /vulnerabil/i },
+      { label: 'Firewall modernization', re: /firewall/i },
+      { label: 'IDS/IPS', re: /\bIDS\/IPS\b|\bIDS\b|\bIPS\b/i },
+      { label: 'Threat protection', re: /threat protection/i },
     ]
     const securityHits = securityCandidates
       .filter(item => item.re.test(cleaned))
@@ -457,10 +499,15 @@ function App() {
 
     return {
       projectName,
+      accountManager,
+      serviceDeliveryMgr,
+      serviceDeliveryExec,
       siteLocation,
       governmentPOC,
       email,
       fy,
+      rapNumber,
+      psiCode,
       complianceFrameworks,
       securityProtocols,
     }
@@ -469,12 +516,65 @@ function App() {
   const applyScrapeSuggestions = (text: string) => {
     const suggestions = extractScrapeSuggestions(text || '')
     if (suggestions.projectName && !projectName) setProjectName(suggestions.projectName)
+    if (suggestions.accountManager && !accountManager) setAccountManager(suggestions.accountManager)
+    if (suggestions.serviceDeliveryMgr && !serviceDeliveryMgr) setServiceDeliveryMgr(suggestions.serviceDeliveryMgr)
+    if (suggestions.serviceDeliveryExec && !serviceDeliveryExec) setServiceDeliveryExec(suggestions.serviceDeliveryExec)
     if (suggestions.siteLocation && !siteLocation) setSiteLocation(suggestions.siteLocation)
     if (suggestions.governmentPOC && !governmentPOC) setGovernmentPOC(suggestions.governmentPOC)
     if (suggestions.email && !email) setEmail(suggestions.email)
     if (suggestions.fy && !fy) setFy(suggestions.fy)
+    if (suggestions.rapNumber && !rapNumber) setRapNumber(suggestions.rapNumber)
+    if (suggestions.psiCode && !psiCode) setPsiCode(suggestions.psiCode)
     if (suggestions.securityProtocols && !securityProtocols) setSecurityProtocols(suggestions.securityProtocols)
     if (suggestions.complianceFrameworks && !complianceFrameworks) setComplianceFrameworks(suggestions.complianceFrameworks)
+  }
+
+  const generateAdditionalAssumptions = async () => {
+    setAssumptionsError(null)
+    if (!scrapeResult?.success || !scrapeResult.text_excerpt) {
+      setAssumptionsError('Scrape the contract first to generate assumptions.')
+      return
+    }
+    if (!AUTH_DISABLED && !authToken && !IS_LOCALHOST) {
+      setAssumptionsError('Sign in to generate assumptions.')
+      return
+    }
+    setAssumptionsBusy(true)
+    try {
+      const moduleNames = selectedModules.map((id) => {
+        const mod = modules.find((m) => m.id === id)
+        return mod?.name || id
+      })
+      const res = await fetch(`${API}/api/v1/assumptions/generate`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(!AUTH_DISABLED && authToken ? { Authorization: `Bearer ${authToken}` } : {}),
+        },
+        body: JSON.stringify({
+          scraped_text: scrapeResult.text_excerpt,
+          project_name: projectName || undefined,
+          site_location: siteLocation || undefined,
+          government_poc: governmentPOC || undefined,
+          fy: fy || undefined,
+          selected_modules: moduleNames,
+        }),
+      })
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}))
+        throw new Error(err?.detail || 'Failed to generate assumptions.')
+      }
+      const data = await res.json()
+      const text = (data?.text || '').trim()
+      if (!text) {
+        throw new Error('No assumptions returned from the model.')
+      }
+      setAdditionalAssumptions(text)
+    } catch (e: any) {
+      setAssumptionsError(e?.message || 'Failed to generate assumptions.')
+    } finally {
+      setAssumptionsBusy(false)
+    }
   }
 
   const runScrapeTest = async () => {
@@ -500,7 +600,7 @@ function App() {
         body: JSON.stringify({
           url,
           max_bytes: 200000,
-          max_chars: 2000,
+          max_chars: 8000,
           timeout: 10.0,
         }),
       })
@@ -1703,6 +1803,14 @@ function App() {
         <label>Additional Assumptions
           <textarea value={additionalAssumptions} onChange={(e) => setAdditionalAssumptions(e.target.value)} rows={3} style={{ width: '100%' }} disabled={readOnly} />
         </label>
+        <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', marginTop: 6 }}>
+          <button className="btn" onClick={generateAdditionalAssumptions} disabled={assumptionsBusy || readOnly}>
+            {assumptionsBusy ? 'Generating...' : 'Generate from Scrape'}
+          </button>
+          {assumptionsError && (
+            <span style={{ fontSize: 12, color: 'crimson' }}>{assumptionsError}</span>
+          )}
+        </div>
         <div style={{ fontSize: 12, color: '#666' }}>
           Used to expand the narrative assumptions section.
         </div>

@@ -30,6 +30,8 @@ _backend_env = Path(__file__).resolve().parents[1] / ".env"
 if _backend_env.exists():
     load_dotenv(_backend_env.as_posix(), override=False)
 
+PROMPTS_DIR = Path(os.getenv("PROMPTS_DIR", Path(__file__).resolve().parent / "prompts"))
+
 # Import our services
 from .services.calculation_service import CalculationService
 from .services.data_service import DataService
@@ -284,6 +286,15 @@ class ScrapeUrlResponse(BaseModel):
     fetched_at: datetime
     truncated: bool = False
     error: Optional[str] = None
+
+
+class AssumptionsPromptRequest(BaseModel):
+    scraped_text: str
+    project_name: Optional[str] = None
+    site_location: Optional[str] = None
+    government_poc: Optional[str] = None
+    fy: Optional[str] = None
+    selected_modules: Optional[List[str]] = None
 
 
 class ContractCreate(BaseModel):
@@ -890,6 +901,55 @@ def rewrite_narrative_section(req: NarrativeSectionPrompt):
         raise HTTPException(status_code=500, detail=str(e))
 
     return {"section": req.section, "text": text, "raw": raw}
+
+
+@app.post("/api/v1/assumptions/generate")
+def generate_additional_assumptions(req: AssumptionsPromptRequest, current_user: str = Depends(get_current_user)):
+    """
+    Generate additional assumptions text from scraped RFP content.
+    """
+    try:
+        from .services.ai_service import AIService  # type: ignore
+    except Exception:
+        raise HTTPException(status_code=500, detail="AI module missing. Ensure ai_service.py exists.")
+
+    ai = AIService()
+    if not ai.is_configured():
+        raise HTTPException(status_code=500, detail="OPENAI_API_KEY not configured")
+
+    prompt_path = PROMPTS_DIR / "additional_assumptions_prompt.txt"
+    if not prompt_path.exists():
+        raise HTTPException(status_code=500, detail="Prompt template not found.")
+
+    scraped_text = (req.scraped_text or "").strip()
+    if not scraped_text:
+        raise HTTPException(status_code=400, detail="scraped_text is required.")
+
+    max_chars = 8000
+    if len(scraped_text) > max_chars:
+        scraped_text = scraped_text[:max_chars]
+
+    modules = req.selected_modules or []
+    context = {
+        "PROJECT_NAME": req.project_name or "",
+        "SITE_LOCATION": req.site_location or "",
+        "GOV_POC": req.government_poc or "",
+        "FY": req.fy or "",
+        "SELECTED_MODULES": ", ".join(modules),
+        "SCRAPED_TEXT": scraped_text,
+    }
+
+    try:
+        prompt_template = prompt_path.read_text(encoding="utf-8")
+    except Exception:
+        raise HTTPException(status_code=500, detail="Unable to read prompt template.")
+
+    try:
+        text, raw = ai.generate_additional_assumptions(prompt_template, context)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+    return {"text": text, "raw": raw}
 
 
 @app.post("/api/v1/report")

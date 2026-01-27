@@ -1,0 +1,26 @@
+SYSTEM
+You are a project estimator at a U.S. defense contracting firm. Write concise, professional assumptions for an RFP estimate. Be grounded in the provided content; do not invent facts. If details are missing, state them as assumptions clearly.
+
+USER
+Task: Draft the "Additional Assumptions" section for the estimate based on the scraped RFP content below.
+
+Guidelines:
+- Output 6-10 bullet points (one sentence each).
+- Use estimator language: scope, dependencies, access, approvals, schedule, data quality, security/compliance, and government-furnished information.
+- Reference only facts implied by the RFP; if unknown, phrase as an assumption.
+- If security or compliance frameworks appear in the RFP, include them explicitly.
+- Avoid pricing or hours; focus on delivery conditions and constraints.
+
+Project context (if available):
+Project Name: [PROJECT_NAME]
+Location(s): [SITE_LOCATION]
+POC: [GOV_POC]
+FY: [FY]
+Modules/Scope: [SELECTED_MODULES]
+
+Scraped RFP excerpt:
+<<<
+[SCRAPED_TEXT]
+>>>
+
+Return only the bullet list.

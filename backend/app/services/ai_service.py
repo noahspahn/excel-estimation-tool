@@ -271,6 +271,46 @@ class AIService:
         final_text = self._normalize_section_text(section, text or current_text or "")
         return final_text, content
 
+    def generate_additional_assumptions(
+        self,
+        prompt_template: str,
+        context: Dict[str, Any],
+        model: str = "gpt-4o-mini",
+    ) -> Tuple[str, Optional[str]]:
+        """
+        Generate the additional assumptions section from a prompt template and context.
+        Returns (text, raw_model_response).
+        """
+        if not self.is_configured():
+            raise RuntimeError("OPENAI_API_KEY not configured")
+
+        client, client_mode = self._get_client()
+        rendered = self._render_prompt_template(prompt_template, context)
+        system_prompt, user_prompt = self._split_prompt_template(rendered)
+
+        messages: List[Dict[str, str]] = []
+        if system_prompt:
+            messages.append({"role": "system", "content": system_prompt})
+        messages.append({"role": "user", "content": user_prompt})
+
+        content: Optional[str] = None
+        if client_mode == "v1":
+            completion = client.chat.completions.create(
+                model=model,
+                messages=messages,
+                temperature=0.25,
+            )
+            content = completion.choices[0].message.content or ""
+        else:
+            completion = client.ChatCompletion.create(
+                model=model,
+                messages=messages,
+                temperature=0.25,
+            )
+            content = completion["choices"][0]["message"]["content"] or ""
+
+        return (content or "").strip(), content
+
     def _build_narrative_context(
         self,
         estimation_data: Dict[str, Any],
@@ -417,6 +457,24 @@ class AIService:
             ),
         }
         return {s: guidance[s] for s in sections if s in guidance}
+
+    def _render_prompt_template(self, template: str, context: Dict[str, Any]) -> str:
+        rendered = template or ""
+        for key, value in (context or {}).items():
+            placeholder = f"[{key}]"
+            rendered = rendered.replace(placeholder, str(value or ""))
+        return rendered
+
+    def _split_prompt_template(self, template: str) -> Tuple[Optional[str], str]:
+        if not template:
+            return None, ""
+        normalized = template.strip()
+        parts = re.split(r"\nUSER\n", normalized, flags=re.IGNORECASE)
+        if len(parts) == 2:
+            system_block = re.sub(r"^SYSTEM\n?", "", parts[0].strip(), flags=re.IGNORECASE)
+            user_block = parts[1].strip()
+            return system_block or None, user_block
+        return None, normalized
 
     def _trim_text(self, text: Any, max_chars: int) -> str:
         if text is None:
