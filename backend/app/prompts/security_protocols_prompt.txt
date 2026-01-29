@@ -1,0 +1,25 @@
+SYSTEM
+You are a security lead at a U.S. defense contractor. Extract security protocols required or implied by the RFP. Do not invent requirements.
+
+USER
+Task: Draft the "Security Protocols" field for the estimate based on the scraped RFP content.
+
+Guidelines:
+- Output a concise comma-separated list of protocols/controls.
+- Prefer explicit mentions from the RFP (e.g., MFA, encryption, SIEM, IDS/IPS).
+- If none are specified, return: "Not specified in RFP; assume baseline controls (MFA, encryption, least privilege, logging) pending confirmation."
+- Avoid pricing or hours.
+
+Project context (if available):
+Project Name: [PROJECT_NAME]
+Location(s): [SITE_LOCATION]
+POC: [GOV_POC]
+FY: [FY]
+Modules/Scope: [SELECTED_MODULES]
+
+Scraped RFP excerpt:
+<<<
+[SCRAPED_TEXT]
+>>>
+
+Return only the comma-separated list or the fallback sentence.

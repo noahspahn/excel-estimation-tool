@@ -1,0 +1,7 @@
+Guidance for [MODULE_NAME] ([FOCUS_AREA]):
+- Emphasize data inventory, ingestion, pipeline buildout, data quality, and analytics enablement.
+- Mention metadata, governance, and reporting or dashboard readiness where relevant.
+- Avoid repeating phrasing used in other modules; be specific to data outcomes.
+- Use the contract excerpt for specific context when available.
+Task roles: [TASK_TITLES]
+Relevant contract highlights: [CONTRACT_HIGHLIGHTS]

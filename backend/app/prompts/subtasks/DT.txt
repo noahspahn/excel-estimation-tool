@@ -1,0 +1,7 @@
+Guidance for [MODULE_NAME] ([FOCUS_AREA]):
+- Emphasize discovery, stakeholder workshops, current-state mapping, and future-state roadmap activities.
+- Call out deliverables such as current-state assessment, target architecture, requirements baseline, and decision log.
+- Tie language to government transformation objectives and avoid generic phrasing.
+- Use the contract excerpt for specific context when available.
+Task roles: [TASK_TITLES]
+Relevant contract highlights: [CONTRACT_HIGHLIGHTS]

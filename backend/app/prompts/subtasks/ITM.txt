@@ -1,0 +1,7 @@
+Guidance for [MODULE_NAME] ([FOCUS_AREA]):
+- Emphasize legacy system assessment, infrastructure refresh, migration planning/execution, cutover coordination, and validation.
+- Call out continuity, performance, and operational readiness requirements.
+- Avoid repeating phrasing used in other modules; be specific to modernization outcomes.
+- Use the contract excerpt for specific context when available.
+Task roles: [TASK_TITLES]
+Relevant contract highlights: [CONTRACT_HIGHLIGHTS]

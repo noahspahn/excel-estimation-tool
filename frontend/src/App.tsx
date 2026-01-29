@@ -109,6 +109,12 @@ function App() {
   const [subtaskRaw, setSubtaskRaw] = useState<string | null>(null)
   const [assumptionsBusy, setAssumptionsBusy] = useState(false)
   const [assumptionsError, setAssumptionsError] = useState<string | null>(null)
+  const [commentsBusy, setCommentsBusy] = useState(false)
+  const [commentsError, setCommentsError] = useState<string | null>(null)
+  const [securityBusy, setSecurityBusy] = useState(false)
+  const [securityError, setSecurityError] = useState<string | null>(null)
+  const [complianceBusy, setComplianceBusy] = useState(false)
+  const [complianceError, setComplianceError] = useState<string | null>(null)
 
   useEffect(() => {
     // Test backend connection
@@ -529,52 +535,102 @@ function App() {
     if (suggestions.complianceFrameworks && !complianceFrameworks) setComplianceFrameworks(suggestions.complianceFrameworks)
   }
 
-  const generateAdditionalAssumptions = async () => {
-    setAssumptionsError(null)
+  const buildScrapePromptPayload = () => {
+    const moduleNames = selectedModules.map((id) => {
+      const mod = modules.find((m) => m.id === id)
+      return mod?.name || id
+    })
+    return {
+      scraped_text: scrapeResult?.text_excerpt || '',
+      project_name: projectName || undefined,
+      site_location: siteLocation || undefined,
+      government_poc: governmentPOC || undefined,
+      fy: fy || undefined,
+      selected_modules: moduleNames,
+    }
+  }
+
+  const generatePromptedText = async (
+    endpoint: string,
+    label: string,
+    onSuccess: (text: string) => void,
+    setBusy: (busy: boolean) => void,
+    setError: (msg: string | null) => void,
+  ) => {
+    setError(null)
     if (!scrapeResult?.success || !scrapeResult.text_excerpt) {
-      setAssumptionsError('Scrape the contract first to generate assumptions.')
+      setError(`Scrape the contract first to generate ${label}.`)
       return
     }
     if (!AUTH_DISABLED && !authToken && !IS_LOCALHOST) {
-      setAssumptionsError('Sign in to generate assumptions.')
+      setError(`Sign in to generate ${label}.`)
       return
     }
-    setAssumptionsBusy(true)
+    setBusy(true)
     try {
-      const moduleNames = selectedModules.map((id) => {
-        const mod = modules.find((m) => m.id === id)
-        return mod?.name || id
-      })
-      const res = await fetch(`${API}/api/v1/assumptions/generate`, {
+      const res = await fetch(`${API}${endpoint}`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
           ...(!AUTH_DISABLED && authToken ? { Authorization: `Bearer ${authToken}` } : {}),
         },
-        body: JSON.stringify({
-          scraped_text: scrapeResult.text_excerpt,
-          project_name: projectName || undefined,
-          site_location: siteLocation || undefined,
-          government_poc: governmentPOC || undefined,
-          fy: fy || undefined,
-          selected_modules: moduleNames,
-        }),
+        body: JSON.stringify(buildScrapePromptPayload()),
       })
       if (!res.ok) {
         const err = await res.json().catch(() => ({}))
-        throw new Error(err?.detail || 'Failed to generate assumptions.')
+        throw new Error(err?.detail || `Failed to generate ${label}.`)
       }
       const data = await res.json()
       const text = (data?.text || '').trim()
       if (!text) {
-        throw new Error('No assumptions returned from the model.')
+        throw new Error(`No ${label} returned from the model.`)
       }
-      setAdditionalAssumptions(text)
+      onSuccess(text)
     } catch (e: any) {
-      setAssumptionsError(e?.message || 'Failed to generate assumptions.')
+      setError(e?.message || `Failed to generate ${label}.`)
     } finally {
-      setAssumptionsBusy(false)
+      setBusy(false)
     }
+  }
+
+  const generateAdditionalAssumptions = async () => {
+    await generatePromptedText(
+      '/api/v1/assumptions/generate',
+      'assumptions',
+      setAdditionalAssumptions,
+      setAssumptionsBusy,
+      setAssumptionsError,
+    )
+  }
+
+  const generateAdditionalComments = async () => {
+    await generatePromptedText(
+      '/api/v1/comments/generate',
+      'additional comments',
+      setAdditionalComments,
+      setCommentsBusy,
+      setCommentsError,
+    )
+  }
+
+  const generateSecurityProtocols = async () => {
+    await generatePromptedText(
+      '/api/v1/security-protocols/generate',
+      'security protocols',
+      setSecurityProtocols,
+      setSecurityBusy,
+      setSecurityError,
+    )
+  }
+
+  const generateComplianceFrameworks = async () => {
+    await generatePromptedText(
+      '/api/v1/compliance-frameworks/generate',
+      'compliance frameworks',
+      setComplianceFrameworks,
+      setComplianceBusy,
+      setComplianceError,
+    )
   }
 
   const runScrapeTest = async () => {
@@ -1493,6 +1549,14 @@ function App() {
     setWarrantyCost(0)
     setNarrativeSectionBusy(null)
     setNarrativeSectionError(null)
+    setAssumptionsBusy(false)
+    setAssumptionsError(null)
+    setCommentsBusy(false)
+    setCommentsError(null)
+    setSecurityBusy(false)
+    setSecurityError(null)
+    setComplianceBusy(false)
+    setComplianceError(null)
   }
 
   if (shouldEnforceAuth && !authChecked) {
@@ -1786,6 +1850,14 @@ function App() {
         <label>Additional Comments
           <textarea value={additionalComments} onChange={(e) => setAdditionalComments(e.target.value)} rows={2} style={{ width: '100%' }} disabled={readOnly} />
         </label>
+        <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', marginTop: 6 }}>
+          <button className="btn" onClick={generateAdditionalComments} disabled={commentsBusy || readOnly}>
+            {commentsBusy ? 'Generating...' : 'Generate from Scrape'}
+          </button>
+          {commentsError && (
+            <span style={{ fontSize: 12, color: 'crimson' }}>{commentsError}</span>
+          )}
+        </div>
       </div>
 
       <h2 style={{ marginTop: 24 }}>Security & Compliance</h2>
@@ -1796,6 +1868,20 @@ function App() {
         <label>Compliance Frameworks
           <textarea value={complianceFrameworks} onChange={(e) => setComplianceFrameworks(e.target.value)} rows={2} style={{ width: '100%' }} disabled={readOnly} />
         </label>
+      </div>
+      <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', marginTop: 6 }}>
+        <button className="btn" onClick={generateSecurityProtocols} disabled={securityBusy || readOnly}>
+          {securityBusy ? 'Generating...' : 'Generate Security from Scrape'}
+        </button>
+        {securityError && (
+          <span style={{ fontSize: 12, color: 'crimson' }}>{securityError}</span>
+        )}
+        <button className="btn" onClick={generateComplianceFrameworks} disabled={complianceBusy || readOnly}>
+          {complianceBusy ? 'Generating...' : 'Generate Compliance from Scrape'}
+        </button>
+        {complianceError && (
+          <span style={{ fontSize: 12, color: 'crimson' }}>{complianceError}</span>
+        )}
       </div>
 
       <h2 style={{ marginTop: 24 }}>Assumptions</h2>

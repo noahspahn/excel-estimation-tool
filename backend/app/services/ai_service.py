@@ -1,7 +1,11 @@
 import os
 import json
 import re
+from pathlib import Path
 from typing import Dict, Any, List, Optional, Tuple
+
+PROMPTS_DIR = Path(os.getenv("PROMPTS_DIR", Path(__file__).resolve().parents[1] / "prompts"))
+SUBTASK_PROMPTS_DIR = PROMPTS_DIR / "subtasks"
 
 
 class SubtaskAIError(RuntimeError):
@@ -145,18 +149,25 @@ class AIService:
             "You are a proposal writer. Rewrite the provided module subtasks into a concise, SOP-style "
             "format. Incorporate customer context when provided. DO NOT change hours, calculations, or "
             "the number of subtasks/tasks. Keep titles clear and outcomes-focused. "
+            "Make each subtask distinct and tailored to its module_name and focus_area; avoid repeating "
+            "phrases across modules. Use module_guidance when provided. "
             "Return ONLY a JSON array; no code fences or extra text. Use double quotes in JSON."
         )
+
+        module_guidance = self._build_subtask_guidance(deterministic_subtasks, contract_excerpt)
 
         user_prompt = json.dumps({
             "tone": tone,
             "contract_excerpt": (contract_excerpt or "")[:2000],
+            "module_guidance": module_guidance,
             "instructions": [
                 "Keep the same subtasks and tasks count.",
                 "Preserve hours and calculations exactly.",
                 "Include work_scope, estimate_basis, period_of_performance, reasonableness.",
+                "Use module_guidance keyed by module_id (or module_name) when present.",
                 "If customer context is provided, weave it into work_scope and customer_context.",
                 "Preserve security_protocols and compliance_frameworks if provided.",
+                "Do not include helper fields like module_guidance in the output.",
                 "Return JSON array of subtasks with keys: sequence, module_name, focus_area, work_scope, estimate_basis, period_of_performance, reasonableness, security_protocols (optional), compliance_frameworks (optional), customer_context (optional), tasks (array of {title, calculation, hours, description optional}), total_hours.",
             ],
             "subtasks": deterministic_subtasks,
@@ -281,6 +292,42 @@ class AIService:
         Generate the additional assumptions section from a prompt template and context.
         Returns (text, raw_model_response).
         """
+        return self._generate_from_prompt_template(prompt_template, context, model=model, temperature=0.25)
+
+    def generate_additional_comments(
+        self,
+        prompt_template: str,
+        context: Dict[str, Any],
+        model: str = "gpt-4o-mini",
+    ) -> Tuple[str, Optional[str]]:
+        """Generate additional comments text from a prompt template and context."""
+        return self._generate_from_prompt_template(prompt_template, context, model=model, temperature=0.25)
+
+    def generate_security_protocols(
+        self,
+        prompt_template: str,
+        context: Dict[str, Any],
+        model: str = "gpt-4o-mini",
+    ) -> Tuple[str, Optional[str]]:
+        """Generate security protocols text from a prompt template and context."""
+        return self._generate_from_prompt_template(prompt_template, context, model=model, temperature=0.2)
+
+    def generate_compliance_frameworks(
+        self,
+        prompt_template: str,
+        context: Dict[str, Any],
+        model: str = "gpt-4o-mini",
+    ) -> Tuple[str, Optional[str]]:
+        """Generate compliance frameworks text from a prompt template and context."""
+        return self._generate_from_prompt_template(prompt_template, context, model=model, temperature=0.2)
+
+    def _generate_from_prompt_template(
+        self,
+        prompt_template: str,
+        context: Dict[str, Any],
+        model: str = "gpt-4o-mini",
+        temperature: float = 0.25,
+    ) -> Tuple[str, Optional[str]]:
         if not self.is_configured():
             raise RuntimeError("OPENAI_API_KEY not configured")
 
@@ -298,14 +345,14 @@ class AIService:
             completion = client.chat.completions.create(
                 model=model,
                 messages=messages,
-                temperature=0.25,
+                temperature=temperature,
             )
             content = completion.choices[0].message.content or ""
         else:
             completion = client.ChatCompletion.create(
                 model=model,
                 messages=messages,
-                temperature=0.25,
+                temperature=temperature,
             )
             content = completion["choices"][0]["message"]["content"] or ""
 
@@ -457,6 +504,61 @@ class AIService:
             ),
         }
         return {s: guidance[s] for s in sections if s in guidance}
+
+    def _build_subtask_guidance(
+        self,
+        subtasks: List[Dict[str, Any]],
+        contract_excerpt: Optional[str],
+    ) -> Dict[str, str]:
+        if not subtasks:
+            return {}
+        guidance: Dict[str, str] = {}
+        excerpt = self._trim_text(contract_excerpt, 1800)
+        highlights = self._extract_contract_highlights(excerpt) if excerpt else []
+        highlight_text = "; ".join(highlights)
+
+        for subtask in subtasks:
+            module_id = str(subtask.get("module_id") or "").strip()
+            module_name = str(subtask.get("module_name") or "").strip()
+            focus_area = str(subtask.get("focus_area") or "").strip()
+            template = self._load_subtask_prompt_template(module_id, focus_area)
+            if not template:
+                continue
+            tasks = subtask.get("tasks") or []
+            task_titles = [t.get("title") for t in tasks if t.get("title")]
+            context = {
+                "MODULE_NAME": module_name,
+                "MODULE_ID": module_id,
+                "FOCUS_AREA": focus_area,
+                "FOCUS_LABEL": subtask.get("focus_label") or "",
+                "TASK_TITLES": ", ".join(task_titles),
+                "CONTRACT_HIGHLIGHTS": highlight_text,
+            }
+            key = module_id or module_name or f"module_{len(guidance) + 1}"
+            guidance[key] = self._render_prompt_template(template, context)
+        return guidance
+
+    def _load_subtask_prompt_template(self, module_id: str, focus_area: str) -> Optional[str]:
+        candidates: List[str] = []
+        if module_id:
+            candidates.extend([
+                f"{module_id}.txt",
+                f"subtask_{module_id}.txt",
+            ])
+        if focus_area:
+            candidates.extend([
+                f"{focus_area}.txt",
+                f"subtask_{focus_area}.txt",
+            ])
+        for name in candidates:
+            path = SUBTASK_PROMPTS_DIR / name
+            if not path.exists():
+                continue
+            try:
+                return path.read_text(encoding="utf-8")
+            except Exception:
+                continue
+        return None
 
     def _render_prompt_template(self, template: str, context: Dict[str, Any]) -> str:
         rendered = template or ""
