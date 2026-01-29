@@ -1491,7 +1491,7 @@ def contract_stats(current_user: str = Depends(get_current_user)):
 
 
 @app.post("/api/v1/subtasks/preview")
-def preview_subtasks(req: ReportRequest, tone: str = "professional", current_user: str = Depends(get_current_user)):
+def preview_subtasks(req: ReportRequest, tone: str = "professional", debug: bool = True, current_user: str = Depends(get_current_user)):
     """
     Build module subtasks with optional AI enrichment for preview in the UI.
     """
@@ -1532,12 +1532,14 @@ def preview_subtasks(req: ReportRequest, tone: str = "professional", current_use
         warranty_cost=req.warranty_cost or 0.0,
     )
 
-    module_subtasks = calculation_service.build_module_subtasks(
+    deterministic_subtasks = calculation_service.build_module_subtasks(
         est_input, contract_excerpt=req.contract_excerpt
     )
+    module_subtasks = deterministic_subtasks
     status = "deterministic"
     error: Optional[str] = None
     ai_raw: Optional[str] = None
+    debug_payload: Optional[Dict[str, Any]] = None
     if req.use_ai_subtasks:
         try:
             from .services.ai_service import AIService  # type: ignore
@@ -1545,7 +1547,7 @@ def preview_subtasks(req: ReportRequest, tone: str = "professional", current_use
             ai = AIService()
             if ai.is_configured():
                 module_subtasks, ai_raw = ai.generate_subtasks(
-                    module_subtasks,
+                    deterministic_subtasks,
                     contract_excerpt=req.contract_excerpt,
                     tone=tone,
                 )
@@ -1555,13 +1557,31 @@ def preview_subtasks(req: ReportRequest, tone: str = "professional", current_use
         except Exception as e:
             status = "ai_failed"
             error = str(e)
+    if debug:
+        try:
+            from .services.ai_service import AIService  # type: ignore
 
-    return {
+            ai = AIService()
+            guidance, sources = ai.build_subtask_guidance_debug(
+                deterministic_subtasks,
+                req.contract_excerpt,
+            )
+            debug_payload = {
+                "module_guidance": guidance,
+                "prompt_sources": sources,
+            }
+        except Exception as e:
+            debug_payload = {"error": str(e)}
+
+    response = {
         "module_subtasks": module_subtasks,
         "status": status,
         "error": error,
         "raw_ai_response": ai_raw,
     }
+    if debug:
+        response["debug"] = debug_payload
+    return response
 
 
 class ProposalCreate(BaseModel):

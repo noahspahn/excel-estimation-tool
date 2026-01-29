@@ -505,14 +505,37 @@ class AIService:
         }
         return {s: guidance[s] for s in sections if s in guidance}
 
+    def build_subtask_guidance(
+        self,
+        subtasks: List[Dict[str, Any]],
+        contract_excerpt: Optional[str],
+    ) -> Dict[str, str]:
+        return self._build_subtask_guidance(subtasks, contract_excerpt)
+
+    def build_subtask_guidance_debug(
+        self,
+        subtasks: List[Dict[str, Any]],
+        contract_excerpt: Optional[str],
+    ) -> Tuple[Dict[str, str], Dict[str, str]]:
+        return self._build_subtask_guidance_with_sources(subtasks, contract_excerpt)
+
     def _build_subtask_guidance(
         self,
         subtasks: List[Dict[str, Any]],
         contract_excerpt: Optional[str],
     ) -> Dict[str, str]:
+        guidance, _sources = self._build_subtask_guidance_with_sources(subtasks, contract_excerpt)
+        return guidance
+
+    def _build_subtask_guidance_with_sources(
+        self,
+        subtasks: List[Dict[str, Any]],
+        contract_excerpt: Optional[str],
+    ) -> Tuple[Dict[str, str], Dict[str, str]]:
         if not subtasks:
-            return {}
+            return {}, {}
         guidance: Dict[str, str] = {}
+        sources: Dict[str, str] = {}
         excerpt = self._trim_text(contract_excerpt, 1800)
         highlights = self._extract_contract_highlights(excerpt) if excerpt else []
         highlight_text = "; ".join(highlights)
@@ -521,7 +544,7 @@ class AIService:
             module_id = str(subtask.get("module_id") or "").strip()
             module_name = str(subtask.get("module_name") or "").strip()
             focus_area = str(subtask.get("focus_area") or "").strip()
-            template = self._load_subtask_prompt_template(module_id, focus_area)
+            template, template_name = self._load_subtask_prompt_template(module_id, focus_area)
             if not template:
                 continue
             tasks = subtask.get("tasks") or []
@@ -536,9 +559,11 @@ class AIService:
             }
             key = module_id or module_name or f"module_{len(guidance) + 1}"
             guidance[key] = self._render_prompt_template(template, context)
-        return guidance
+            if template_name:
+                sources[key] = template_name
+        return guidance, sources
 
-    def _load_subtask_prompt_template(self, module_id: str, focus_area: str) -> Optional[str]:
+    def _load_subtask_prompt_template(self, module_id: str, focus_area: str) -> Tuple[Optional[str], Optional[str]]:
         candidates: List[str] = []
         if module_id:
             candidates.extend([
@@ -555,10 +580,10 @@ class AIService:
             if not path.exists():
                 continue
             try:
-                return path.read_text(encoding="utf-8")
+                return path.read_text(encoding="utf-8"), name
             except Exception:
                 continue
-        return None
+        return None, None
 
     def _render_prompt_template(self, template: str, context: Dict[str, Any]) -> str:
         rendered = template or ""
