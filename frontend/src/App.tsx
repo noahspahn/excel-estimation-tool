@@ -906,6 +906,9 @@ function App() {
       a.click()
       a.remove()
       window.URL.revokeObjectURL(url)
+      if (proposalId) {
+        await loadReportDocs()
+      }
     } catch (err) {
       console.error(err)
       alert('Report generation failed')
@@ -1331,6 +1334,14 @@ function App() {
         }))
       : []
   )
+  const formatBytes = (bytes?: number) => {
+    if (bytes == null || !Number.isFinite(bytes)) return '-'
+    if (bytes === 0) return '0 B'
+    const units = ['B', 'KB', 'MB', 'GB']
+    const idx = Math.min(units.length - 1, Math.floor(Math.log(bytes) / Math.log(1024)))
+    const value = bytes / Math.pow(1024, idx)
+    return `${value.toFixed(value >= 10 || idx === 0 ? 0 : 1)} ${units[idx]}`
+  }
 
   // Draft helpers
   const buildDraft = () => ({
@@ -1575,6 +1586,9 @@ function App() {
   // Editor: versions list + restore
   const [versions, setVersions] = useState<{ id: string; version: number; title?: string; created_at?: string }[]>([])
   const [versionsLoaded, setVersionsLoaded] = useState(false)
+  const [reportDocs, setReportDocs] = useState<any[]>([])
+  const [reportsLoaded, setReportsLoaded] = useState(false)
+  const [reportsError, setReportsError] = useState<string | null>(null)
 
   const loadVersions = async () => {
     if (!proposalId) { setVersions([]); setVersionsLoaded(true); return }
@@ -1589,9 +1603,33 @@ function App() {
     }
   }
 
+  const loadReportDocs = async () => {
+    if (!proposalId) { setReportDocs([]); setReportsLoaded(true); return }
+    try {
+      setReportsLoaded(false)
+      setReportsError(null)
+      const headers: Record<string, string> = !AUTH_DISABLED && authToken ? { 'Authorization': `Bearer ${authToken}` } : {}
+      const res = await fetch(`${API}/api/v1/proposals/${proposalId}/documents?presign=true`, { headers })
+      if (!res.ok) throw new Error('Failed to load documents')
+      const rows = await res.json()
+      const reports = Array.isArray(rows) ? rows.filter((d: any) => d.kind === 'report') : []
+      setReportDocs(reports)
+      setReportsLoaded(true)
+    } catch (e: any) {
+      setReportsLoaded(true)
+      setReportsError(e?.message || 'Failed to load reports')
+    }
+  }
+
   useEffect(() => {
     if (proposalId) {
       loadVersions()
+    }
+  }, [proposalId, authToken])
+
+  useEffect(() => {
+    if (proposalId) {
+      loadReportDocs()
     }
   }, [proposalId, authToken])
 
@@ -2946,6 +2984,64 @@ function App() {
                         <td style={{ padding: 6 }}>{v.created_at || '-'}</td>
                         <td style={{ padding: 6 }}>
                           <button className="btn" onClick={() => restoreVersion(v.version)}>Restore</button>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              )}
+            </div>
+          )}
+          {proposalId && (AUTH_DISABLED || authToken) && (
+            <div style={{ marginTop: 24 }}>
+              <h4>Reports</h4>
+              <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 8, flexWrap: 'wrap' }}>
+                <button className="btn" onClick={loadReportDocs}>Refresh</button>
+                <span style={{ fontSize: 12, color: '#666' }}>{reportDocs.length} report(s)</span>
+                {reportsError && <span style={{ fontSize: 12, color: 'crimson' }}>{reportsError}</span>}
+              </div>
+              {reportDocs.length === 0 ? (
+                <div style={{ fontSize: 12, color: '#777' }}>{reportsLoaded ? 'No reports saved yet.' : 'Loading...'}</div>
+              ) : (
+                <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+                  <thead>
+                    <tr>
+                      <th style={{ textAlign: 'left', borderBottom: '1px solid #ccc', padding: 6 }}>Created</th>
+                      <th style={{ textAlign: 'left', borderBottom: '1px solid #ccc', padding: 6 }}>Created By</th>
+                      <th style={{ textAlign: 'left', borderBottom: '1px solid #ccc', padding: 6 }}>Tool Version</th>
+                      <th style={{ textAlign: 'left', borderBottom: '1px solid #ccc', padding: 6 }}>Proposal Version</th>
+                      <th style={{ textAlign: 'right', borderBottom: '1px solid #ccc', padding: 6 }}>Total Cost</th>
+                      <th style={{ textAlign: 'right', borderBottom: '1px solid #ccc', padding: 6 }}>Total Hours</th>
+                      <th style={{ textAlign: 'left', borderBottom: '1px solid #ccc', padding: 6 }}>AI</th>
+                      <th style={{ textAlign: 'left', borderBottom: '1px solid #ccc', padding: 6 }}>PDF</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {reportDocs.map((doc: any) => (
+                      <tr key={doc.id}>
+                        <td style={{ padding: 6 }}>{doc.created_at || '-'}</td>
+                        <td style={{ padding: 6 }}>{doc.created_by || '-'}</td>
+                        <td style={{ padding: 6 }}>{doc.tool_version || '-'}</td>
+                        <td style={{ padding: 6 }}>{doc.proposal_version != null ? `v${doc.proposal_version}` : '-'}</td>
+                        <td style={{ padding: 6, textAlign: 'right' }}>
+                          {doc.total_cost != null ? `$${Number(doc.total_cost).toLocaleString(undefined, { maximumFractionDigits: 2 })}` : '-'}
+                        </td>
+                        <td style={{ padding: 6, textAlign: 'right' }}>
+                          {doc.total_hours != null ? Number(doc.total_hours).toLocaleString(undefined, { maximumFractionDigits: 1 }) : '-'}
+                        </td>
+                        <td style={{ padding: 6 }}>{doc.include_ai ? 'Yes' : 'No'}</td>
+                        <td style={{ padding: 6 }}>
+                          {doc.url ? (
+                            <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+                              <a href={doc.url} target="_blank" rel="noreferrer">Open PDF</a>
+                              <a className="btn" href={doc.url} download>Download</a>
+                            </div>
+                          ) : (
+                            <span style={{ fontSize: 12, color: '#777' }}>No link</span>
+                          )}
+                          <div style={{ fontSize: 11, color: '#777' }}>
+                            {doc.filename || 'report.pdf'} · {formatBytes(doc.size_bytes)}
+                          </div>
                         </td>
                       </tr>
                     ))}

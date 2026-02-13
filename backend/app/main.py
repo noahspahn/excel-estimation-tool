@@ -1408,7 +1408,19 @@ def generate_report(req: ReportRequest, include_ai: bool = False, tone: str = "p
                 bucket=upload["bucket"],
                 key=upload["key"],
                 size_bytes=len(pdf_bytes),
-                meta={"tone": tone, "include_ai": include_ai},
+                meta={
+                    "tone": tone,
+                    "include_ai": include_ai,
+                    "tool_version": req.tool_version,
+                    "created_by": current_user,
+                    "proposal_version": req.proposal_version,
+                    "module_count": len(req.modules),
+                    "complexity": req.complexity,
+                    "total_cost": float(result.total_cost or 0),
+                    "total_hours": float(result.total_labor_hours or 0),
+                    "period_of_performance": req.period_of_performance,
+                    "estimating_method": req.estimating_method,
+                },
             )
             session.add(doc)
             # Commit happens via context manager in get_session
@@ -1990,6 +2002,7 @@ def list_documents(
 
     docs = []
     for r in rows:
+        meta = r.meta or {}
         doc = {
             "id": r.id,
             "kind": r.kind,
@@ -2000,7 +2013,15 @@ def list_documents(
             "size_bytes": r.size_bytes,
             "version": r.version,
             "created_at": str(r.created_at) if r.created_at else None,
-            "meta": r.meta or {},
+            "meta": meta,
+            "created_by": meta.get("created_by"),
+            "tool_version": meta.get("tool_version"),
+            "proposal_version": meta.get("proposal_version"),
+            "total_cost": meta.get("total_cost"),
+            "total_hours": meta.get("total_hours"),
+            "module_count": meta.get("module_count"),
+            "tone": meta.get("tone"),
+            "include_ai": meta.get("include_ai"),
         }
         if presign and storage_service.is_configured():
             doc["url"] = storage_service.presign_get(r.key)
