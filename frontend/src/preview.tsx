@@ -462,6 +462,9 @@ export default function Preview() {
         <label>Sites
           <input type="number" min={1} value={ei.sites || 1} onChange={(e) => updateEstimationInput('sites', Number(e.target.value || 1))} disabled={!editMode} />
         </label>
+        <label>Period of Performance
+          <input value={ei.period_of_performance || ''} onChange={(e) => updateEstimationInput('period_of_performance', e.target.value)} disabled={!editMode} />
+        </label>
         <label>
           <input type="checkbox" checked={!!ei.overtime} onChange={(e) => updateEstimationInput('overtime', e.target.checked)} disabled={!editMode} style={{ marginRight: 8 }} />
           Overtime

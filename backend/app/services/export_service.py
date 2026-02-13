@@ -381,7 +381,7 @@ class ExportService:
                     [p('What is the work scope for this subtask?', 'SubtaskLabel'), p(subtask.get('work_scope', ''))],
                     [p('Estimating Method', 'SubtaskLabel'), p(subtask.get('estimating_method', 'Engineering Discrete'))],
                     [p('What is the estimate of this subtask based on?', 'SubtaskLabel'), p(subtask.get('estimate_basis', ''))],
-                    [p('How is the estimate of this subtask derived?', 'SubtaskLabel'), p(subtask.get('period_of_performance', ''))],
+                    [p('Period of Performance', 'SubtaskLabel'), p(subtask.get('period_of_performance', ''))],
                 ]
                 if subtask.get('reasonableness'):
                     detail_rows.append([p('What makes the estimate reasonable?', 'SubtaskLabel'), p(subtask.get('reasonableness', ''))])

@@ -97,6 +97,7 @@ function App() {
   const [additionalAssumptions, setAdditionalAssumptions] = useState('')
   const [sites, setSites] = useState<number>(1)
   const [overtime, setOvertime] = useState<boolean>(false)
+  const [periodOfPerformance, setPeriodOfPerformance] = useState('')
   const [odcItems, setOdcItems] = useState<{ description: string; price: number }[]>([])
   const [fixedPriceItems, setFixedPriceItems] = useState<{ description: string; price: number }[]>([])
   const [hardwareSubtotal, setHardwareSubtotal] = useState<number>(0)
@@ -159,6 +160,7 @@ function App() {
           setAdditionalAssumptions(ei.additional_assumptions || '')
           setSites(ei.sites || 1)
           setOvertime(!!ei.overtime)
+          setPeriodOfPerformance(ei.period_of_performance || '')
           setOdcItems(ei.odc_items || [])
           setFixedPriceItems(ei.fixed_price_items || [])
           setHardwareSubtotal(ei.hardware_subtotal || 0)
@@ -795,6 +797,7 @@ function App() {
           additional_assumptions: additionalAssumptions,
           sites,
           overtime,
+          period_of_performance: periodOfPerformance,
           odc_items: odcItems,
           fixed_price_items: fixedPriceItems,
           hardware_subtotal: hardwareSubtotal,
@@ -870,6 +873,7 @@ function App() {
           additional_assumptions: additionalAssumptions || undefined,
           sites,
           overtime,
+          period_of_performance: periodOfPerformance || undefined,
           odc_items: odcItems,
           fixed_price_items: fixedPriceItems,
           hardware_subtotal: hardwareSubtotal,
@@ -941,6 +945,7 @@ function App() {
             additional_assumptions: additionalAssumptions,
             sites,
             overtime,
+            period_of_performance: periodOfPerformance,
             odc_items: odcItems,
             fixed_price_items: fixedPriceItems,
             hardware_subtotal: hardwareSubtotal,
@@ -981,6 +986,7 @@ function App() {
         additional_assumptions: additionalAssumptions,
         sites,
         overtime,
+        period_of_performance: periodOfPerformance,
         odc_items: odcItems,
         fixed_price_items: fixedPriceItems,
         hardware_subtotal: hardwareSubtotal,
@@ -1093,6 +1099,7 @@ function App() {
           additional_assumptions: additionalAssumptions || undefined,
           sites,
           overtime,
+          period_of_performance: periodOfPerformance || undefined,
           odc_items: odcItems,
           fixed_price_items: fixedPriceItems,
           hardware_subtotal: hardwareSubtotal,
@@ -1149,6 +1156,7 @@ function App() {
       additional_assumptions: additionalAssumptions,
       sites,
       overtime,
+      period_of_performance: periodOfPerformance,
       odc_items: odcItems,
       fixed_price_items: fixedPriceItems,
       hardware_subtotal: hardwareSubtotal,
@@ -1192,6 +1200,7 @@ function App() {
       setAdditionalAssumptions(ei.additional_assumptions || '')
       setSites(ei.sites || 1)
       setOvertime(!!ei.overtime)
+      setPeriodOfPerformance(ei.period_of_performance || '')
       setOdcItems(ei.odc_items || [])
       setFixedPriceItems(ei.fixed_price_items || [])
       setHardwareSubtotal(ei.hardware_subtotal || 0)
@@ -1247,6 +1256,7 @@ function App() {
         setAdditionalAssumptions(ei.additional_assumptions || '')
         setSites(ei.sites || 1)
         setOvertime(!!ei.overtime)
+        setPeriodOfPerformance(ei.period_of_performance || '')
         setOdcItems(ei.odc_items || [])
         setFixedPriceItems(ei.fixed_price_items || [])
         setHardwareSubtotal(ei.hardware_subtotal || 0)
@@ -1364,6 +1374,7 @@ function App() {
     setAdditionalAssumptions(ei.additional_assumptions || '')
     setSites(ei.sites || 1)
     setOvertime(!!ei.overtime)
+    setPeriodOfPerformance(ei.period_of_performance || '')
     setOdcItems(ei.odc_items || [])
     setFixedPriceItems(ei.fixed_price_items || [])
     setHardwareSubtotal(ei.hardware_subtotal || 0)
@@ -1429,6 +1440,7 @@ function App() {
           additional_assumptions: additionalAssumptions,
           sites,
           overtime,
+          period_of_performance: periodOfPerformance,
           odc_items: odcItems,
           fixed_price_items: fixedPriceItems,
           hardware_subtotal: hardwareSubtotal,
@@ -1472,6 +1484,7 @@ function App() {
             additional_assumptions: additionalAssumptions,
             sites,
             overtime,
+            period_of_performance: periodOfPerformance,
             odc_items: odcItems,
             fixed_price_items: fixedPriceItems,
             hardware_subtotal: hardwareSubtotal,
@@ -1542,6 +1555,7 @@ function App() {
     setAdditionalAssumptions('')
     setSites(1)
     setOvertime(false)
+    setPeriodOfPerformance('')
     setOdcItems([])
     setFixedPriceItems([])
     setHardwareSubtotal(0)
@@ -1906,6 +1920,9 @@ function App() {
       <div className="form-grid">
         <label>Number of Sites
           <input type="number" min={1} value={sites} onChange={(e) => setSites(Math.max(1, parseInt(e.target.value || '1')))} style={{ width: 100, marginLeft: 8 }} disabled={readOnly} />
+        </label>
+        <label>Period of Performance
+          <input value={periodOfPerformance} onChange={(e) => setPeriodOfPerformance(e.target.value)} style={{ width: '100%' }} disabled={readOnly} placeholder="e.g., 12 months from award" />
         </label>
         <label>
           <input type="checkbox" checked={overtime} onChange={(e) => setOvertime(e.target.checked)} style={{ marginRight: 8 }} disabled={readOnly} />

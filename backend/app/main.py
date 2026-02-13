@@ -219,6 +219,7 @@ class EstimationRequest(BaseModel):
     # Site and schedule
     sites: int = 1
     overtime: bool = False
+    period_of_performance: Optional[str] = None
     # Other costs
     odc_items: List[Dict[str, Any]] = []
     fixed_price_items: List[Dict[str, Any]] = []
@@ -668,6 +669,7 @@ def estimate(req: EstimationRequest):
         additional_assumptions=req.additional_assumptions,
         sites=req.sites,
         overtime=req.overtime,
+        period_of_performance=req.period_of_performance,
         odc_items=req.odc_items or [],
         fixed_price_items=req.fixed_price_items or [],
         hardware_subtotal=req.hardware_subtotal or 0.0,
@@ -744,6 +746,7 @@ def generate_narrative(req: NarrativeRequest):
         additional_assumptions=req.additional_assumptions,
         sites=req.sites,
         overtime=req.overtime,
+        period_of_performance=req.period_of_performance,
         odc_items=req.odc_items or [],
         fixed_price_items=req.fixed_price_items or [],
         hardware_subtotal=req.hardware_subtotal or 0.0,
@@ -884,6 +887,7 @@ def rewrite_narrative_section(req: NarrativeSectionPrompt):
                 additional_assumptions=est_input.get("additional_assumptions"),
                 sites=est_input.get("sites") or 1,
                 overtime=bool(est_input.get("overtime")),
+                period_of_performance=est_input.get("period_of_performance"),
                 odc_items=est_input.get("odc_items") or [],
                 fixed_price_items=est_input.get("fixed_price_items") or [],
                 hardware_subtotal=est_input.get("hardware_subtotal") or 0.0,
@@ -1117,6 +1121,7 @@ def generate_report(req: ReportRequest, include_ai: bool = False, tone: str = "p
         additional_assumptions=req.additional_assumptions,
         sites=req.sites,
         overtime=req.overtime,
+        period_of_performance=req.period_of_performance,
         odc_items=req.odc_items or [],
         fixed_price_items=req.fixed_price_items or [],
         hardware_subtotal=req.hardware_subtotal or 0.0,
@@ -1525,6 +1530,7 @@ def preview_subtasks(req: ReportRequest, tone: str = "professional", debug: bool
         additional_assumptions=req.additional_assumptions,
         sites=req.sites,
         overtime=req.overtime,
+        period_of_performance=req.period_of_performance,
         odc_items=req.odc_items or [],
         fixed_price_items=req.fixed_price_items or [],
         hardware_subtotal=req.hardware_subtotal or 0.0,

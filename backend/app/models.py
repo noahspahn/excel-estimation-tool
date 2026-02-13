@@ -101,6 +101,7 @@ class EstimationInput:
     additional_assumptions: Optional[str] = None
     sites: int = 1
     overtime: bool = False
+    period_of_performance: Optional[str] = None
     # Other costs and fixed-price items (simple shape: {description, price})
     odc_items: List[Dict[str, Any]] = field(default_factory=list)
     fixed_price_items: List[Dict[str, Any]] = field(default_factory=list)

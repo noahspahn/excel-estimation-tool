@@ -8,6 +8,8 @@ const NAV_ITEMS = [
 ]
 
 export default function TopNav() {
+  const appVersion =
+    typeof __APP_VERSION__ !== 'undefined' && __APP_VERSION__ ? __APP_VERSION__ : ''
   const rawEnv = String((import.meta as any).env?.VITE_APP_ENV ?? '').trim().toLowerCase()
   const modeEnv = String((import.meta as any).env?.MODE ?? '').trim().toLowerCase()
   const normalizedEnv = (() => {
@@ -34,11 +36,18 @@ export default function TopNav() {
           </NavLink>
         ))}
       </div>
-      {showBadge && (
-        <span className={`env-badge env-badge--${normalizedEnv}`}>
-          {badgeLabel}
-        </span>
-      )}
+      <div className="top-nav__meta">
+        {showBadge && (
+          <span className={`env-badge env-badge--${normalizedEnv}`}>
+            {badgeLabel}
+          </span>
+        )}
+        {appVersion && (
+          <span className="app-version">
+            {appVersion}
+          </span>
+        )}
+      </div>
     </nav>
   )
 }

@@ -127,6 +127,62 @@ class CalculationService:
             f"sites={max(1, int(input_data.sites or 1))}"
         )
 
+        def _role_intro(tasks_list: List[Dict[str, Any]]) -> str:
+            role_names: List[str] = []
+            for task in tasks_list:
+                title = str(task.get("title") or "").strip()
+                if title.lower().endswith(" delivery"):
+                    title = title[: -len(" delivery")].strip()
+                if title and title not in role_names:
+                    role_names.append(title)
+            if not role_names:
+                return "Delivery team"
+            if len(role_names) <= 3:
+                return f"Delivery team ({', '.join(role_names)})"
+            return f"Delivery team ({', '.join(role_names[:3])}, and others)"
+
+        def _customer_context(focus_area: str, role_intro: str) -> str:
+            if focus_area == "ITM":
+                return (
+                    f"{role_intro} conducts an onsite survey and full assessment of existing infrastructure. "
+                    "The team travels to site, walks the facility, and documents HVAC capacity and loads, "
+                    "electrical panels and available breakers at the TPP, conduit runs for power and telecommunications, "
+                    "rack elevations, and inside plant cabling types (copper, single-mode, or multi-mode fiber) with "
+                    "termination details. The solution architect uses the survey results to define like-for-like "
+                    "replacements for the current network and to identify any facility upgrades needed for cooling, "
+                    "power, or ISP runs from the POE to the core switches, including any additional fiber or copper "
+                    "drops required to add seats."
+                )
+            if focus_area == "CM":
+                return (
+                    f"{role_intro} inventories workloads and dependencies, validates network paths and bandwidth, "
+                    "and documents security and compliance constraints that affect cloud readiness. Findings drive "
+                    "landing zone design, migration sequencing, and any required upgrades to connectivity or "
+                    "network segmentation to support cloud operations."
+                )
+            if focus_area == "SA":
+                return (
+                    f"{role_intro} performs security assessments, validates control implementation, and maps gaps "
+                    "to required compliance frameworks. The team defines remediation actions, evidence collection, "
+                    "and audit-ready documentation to support authorization and continuous monitoring."
+                )
+            if focus_area == "DA":
+                return (
+                    f"{role_intro} inventories data sources and current pipelines, assesses data quality and governance, "
+                    "and defines target analytics use cases. The team designs ingestion and transformation workflows, "
+                    "confirms storage and access patterns, and establishes validation criteria for analytics readiness."
+                )
+            if focus_area == "DT":
+                return (
+                    f"{role_intro} leads stakeholder workshops and current-state mapping to document processes, "
+                    "systems, and constraints. The team defines target-state capabilities, integration touchpoints, "
+                    "and a phased transformation roadmap with change management and training requirements."
+                )
+            return (
+                f"{role_intro} executes the scoped work for this module, coordinating assessment, design, and "
+                "delivery activities aligned to the approved estimate."
+            )
+
         subtasks: List[Dict[str, Any]] = []
 
         for idx, module in enumerate(modules, start=1):
@@ -152,6 +208,14 @@ class CalculationService:
             total_hours = round(sum(t["hours"] for t in tasks), 1)
             focus_label = module.focus_area.name.replace("_", " ").title()
 
+            role_intro = _role_intro(tasks)
+            period_of_performance = (input_data.period_of_performance or "").strip()
+            if not period_of_performance:
+                period_of_performance = (
+                    "Proposed Period of Performance: adjust to the customer schedule; "
+                    f"default assumes a 12-month window across {max(1, int(input_data.sites or 1))} site(s)."
+                )
+
             subtask = {
                 "sequence": idx,
                 "module_id": module.id,
@@ -167,16 +231,14 @@ class CalculationService:
                     "Discrete engineering estimate using cataloged role hours; no isolated historicals. "
                     "SME judgment applied for similar classified programs where direct actuals are unavailable."
                 ),
-                "period_of_performance": (
-                    "Proposed Period of Performance: adjust to the customer schedule; "
-                    f"default assumes a 12-month window across {max(1, int(input_data.sites or 1))} site(s)."
-                ),
+                "period_of_performance": period_of_performance,
                 "tasks": tasks,
                 "total_hours": total_hours,
                 "reasonableness": (
                     "Uses the same module catalog and multiplier logic as the cost "
                     "estimate to keep assumptions traceable and auditable."
                 ),
+                "customer_context": _customer_context(module.focus_area.value, role_intro),
             }
 
             if module.focus_area.value == "SA":
@@ -185,15 +247,11 @@ class CalculationService:
                 if input_data.compliance_frameworks:
                     subtask["compliance_frameworks"] = input_data.compliance_frameworks
 
-            if contract_excerpt:
-                subtask["customer_context"] = contract_excerpt.strip()[:1200]
-
             subtasks.append(subtask)
 
         # Light-weight tailoring: extract requirement hints from contract excerpt
         if contract_excerpt:
             lowered = contract_excerpt.lower()
-            keywords = []
             compliance_map = {
                 "rmf": "RMF",
                 "dfars": "DFARS",
@@ -208,19 +266,10 @@ class CalculationService:
                 "nist 800-53": "NIST 800-53",
                 "nist 800-171": "NIST 800-171",
             }
-            for k in ["migration", "cloud", "server", "network", "audit", "compliance", "vmware", "aws", "azure", "tight timeline", "documentation"]:
-                if k in lowered:
-                    keywords.append(k)
             detected_compliance = []
             for key, label in compliance_map.items():
                 if key in lowered:
                     detected_compliance.append(label)
-            if detected_compliance:
-                keywords.extend(detected_compliance)
-            if keywords:
-                for st in subtasks:
-                    ctx = st.get("customer_context", "")
-                    st["customer_context"] = (ctx + "\n\nDetected requirements: " + ", ".join(sorted(set(keywords)))).strip()
             if detected_compliance and not input_data.compliance_frameworks:
                 frameworks = ", ".join(sorted(set(detected_compliance)))
                 for st in subtasks:

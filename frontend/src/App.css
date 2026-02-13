@@ -439,6 +439,13 @@
   align-items: center;
 }
 
+.top-nav__meta {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
 .top-nav__link {
   display: inline-flex;
   align-items: center;
@@ -486,6 +493,17 @@
   background: #e0f2fe;
   border-color: #38bdf8;
   color: #0c4a6e;
+}
+
+.app-version {
+  display: inline-flex;
+  align-items: center;
+  padding: 4px 10px;
+  border-radius: 999px;
+  font-size: 0.75rem;
+  color: #555;
+  background: #fff;
+  border: 1px solid #eee;
 }
 
 .stat-grid {
