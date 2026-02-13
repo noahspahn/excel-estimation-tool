@@ -2029,6 +2029,54 @@ def list_documents(
     return docs
 
 
+@app.get("/api/v1/reports")
+def list_reports(
+    proposal_id: Optional[str] = None,
+    presign: bool = True,
+    current_user: str = Depends(get_current_user),
+):
+    with get_session() as session:
+        query = (
+            session.query(ProposalDocument, Proposal)
+            .join(Proposal, Proposal.id == ProposalDocument.proposal_id)
+            .filter(Proposal.owner_email == current_user, ProposalDocument.kind == "report")
+        )
+        if proposal_id:
+            query = query.filter(ProposalDocument.proposal_id == proposal_id)
+        rows = query.order_by(ProposalDocument.created_at.desc()).all()
+
+    docs = []
+    for doc, prop in rows:
+        meta = doc.meta or {}
+        row = {
+            "id": doc.id,
+            "kind": doc.kind,
+            "filename": doc.filename,
+            "content_type": doc.content_type,
+            "bucket": doc.bucket,
+            "key": doc.key,
+            "size_bytes": doc.size_bytes,
+            "version": doc.version,
+            "created_at": str(doc.created_at) if doc.created_at else None,
+            "meta": meta,
+            "created_by": meta.get("created_by"),
+            "tool_version": meta.get("tool_version"),
+            "proposal_version": meta.get("proposal_version"),
+            "total_cost": meta.get("total_cost"),
+            "total_hours": meta.get("total_hours"),
+            "module_count": meta.get("module_count"),
+            "tone": meta.get("tone"),
+            "include_ai": meta.get("include_ai"),
+            "proposal_id": prop.id,
+            "proposal_title": prop.title,
+            "proposal_public_id": prop.public_id,
+        }
+        if presign and storage_service.is_configured():
+            row["url"] = storage_service.presign_get(doc.key)
+        docs.append(row)
+    return docs
+
+
 @app.post("/api/v1/proposals/{proposal_id}/documents")
 async def upload_document(
     proposal_id: str,

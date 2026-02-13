@@ -1600,6 +1600,7 @@ function App() {
   const [reportDocs, setReportDocs] = useState<any[]>([])
   const [reportsLoaded, setReportsLoaded] = useState(false)
   const [reportsError, setReportsError] = useState<string | null>(null)
+  const [reportScope, setReportScope] = useState<'all' | 'proposal'>('all')
   const [initBusy, setInitBusy] = useState(false)
 
   const loadVersions = async () => {
@@ -1659,15 +1660,18 @@ function App() {
   }
 
   const loadReportDocs = async () => {
-    if (!proposalId) { setReportDocs([]); setReportsLoaded(true); return }
     try {
       setReportsLoaded(false)
       setReportsError(null)
       const headers: Record<string, string> = !AUTH_DISABLED && authToken ? { 'Authorization': `Bearer ${authToken}` } : {}
-      const res = await fetch(`${API}/api/v1/proposals/${proposalId}/documents?presign=true`, { headers })
-      if (!res.ok) throw new Error('Failed to load documents')
+      const params = new URLSearchParams({ presign: 'true' })
+      if (reportScope === 'proposal' && proposalId) {
+        params.set('proposal_id', proposalId)
+      }
+      const res = await fetch(`${API}/api/v1/reports?${params.toString()}`, { headers })
+      if (!res.ok) throw new Error('Failed to load reports')
       const rows = await res.json()
-      const reports = Array.isArray(rows) ? rows.filter((d: any) => d.kind === 'report') : []
+      const reports = Array.isArray(rows) ? rows : []
       setReportDocs(reports)
       setReportsLoaded(true)
     } catch (e: any) {
@@ -1676,13 +1680,17 @@ function App() {
     }
   }
 
-  const deleteReport = async (docId: string) => {
-    if (!proposalId) return
+  const deleteReport = async (doc: any) => {
+    const targetProposalId = doc?.proposal_id || proposalId
+    if (!targetProposalId) {
+      setReportsError('No proposal associated with this report.')
+      return
+    }
     if (!confirm('Delete this report? This removes the PDF and its database entry.')) return
     try {
       setReportsError(null)
       const headers: Record<string, string> = !AUTH_DISABLED && authToken ? { 'Authorization': `Bearer ${authToken}` } : {}
-      const res = await fetch(`${API}/api/v1/proposals/${proposalId}/documents/${docId}`, {
+      const res = await fetch(`${API}/api/v1/proposals/${targetProposalId}/documents/${doc.id}`, {
         method: 'DELETE',
         headers,
       })
@@ -1700,10 +1708,14 @@ function App() {
   }, [proposalId, authToken])
 
   useEffect(() => {
-    if (proposalId) {
+    if (AUTH_DISABLED || authToken) {
+      if (reportScope === 'proposal' && !proposalId) {
+        setReportScope('all')
+        return
+      }
       loadReportDocs()
     }
-  }, [proposalId, authToken])
+  }, [proposalId, authToken, reportScope])
 
   const applyPayloadToEditor = (payload: any) => {
     const ei = payload?.estimation_input || {}
@@ -3038,7 +3050,7 @@ function App() {
       )}
       {!proposalId && (
         <div style={{ marginTop: 24, fontSize: 12, color: '#666' }}>
-          Create a share link or enter a Proposal ID to enable saved versions and report history.
+          Create a share link or enter a Proposal ID to save new versions and reports.
         </div>
       )}
       {proposalId && (AUTH_DISABLED || authToken) && (
@@ -3076,12 +3088,23 @@ function App() {
           )}
         </div>
       )}
-      {proposalId && (AUTH_DISABLED || authToken) && (
+      {(AUTH_DISABLED || authToken) && (
         <div style={{ marginTop: 24 }}>
           <h4>Reports</h4>
           <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 8, flexWrap: 'wrap' }}>
             <button className="btn" onClick={loadReportDocs}>Refresh</button>
             <span style={{ fontSize: 12, color: '#666' }}>{reportDocs.length} report(s)</span>
+            <label style={{ fontSize: 12, color: '#666' }}>
+              Scope:
+              <select
+                value={reportScope}
+                onChange={(e) => setReportScope(e.target.value as 'all' | 'proposal')}
+                style={{ marginLeft: 6, padding: '4px 6px' }}
+              >
+                <option value="all">All proposals</option>
+                <option value="proposal" disabled={!proposalId}>Current proposal</option>
+              </select>
+            </label>
             {reportsError && <span style={{ fontSize: 12, color: 'crimson' }}>{reportsError}</span>}
           </div>
           {reportDocs.length === 0 ? (
@@ -3090,6 +3113,7 @@ function App() {
             <table style={{ width: '100%', borderCollapse: 'collapse' }}>
               <thead>
                 <tr>
+                  <th style={{ textAlign: 'left', borderBottom: '1px solid #ccc', padding: 6 }}>Proposal</th>
                   <th style={{ textAlign: 'left', borderBottom: '1px solid #ccc', padding: 6 }}>Created</th>
                   <th style={{ textAlign: 'left', borderBottom: '1px solid #ccc', padding: 6 }}>Created By</th>
                   <th style={{ textAlign: 'left', borderBottom: '1px solid #ccc', padding: 6 }}>Tool Version</th>
@@ -3104,6 +3128,18 @@ function App() {
               <tbody>
                 {reportDocs.map((doc: any) => (
                   <tr key={doc.id}>
+                    <td style={{ padding: 6 }}>
+                      <div style={{ fontWeight: 600 }}>{doc.proposal_title || 'Untitled Proposal'}</div>
+                      <div style={{ fontSize: 11, color: '#777' }}>
+                        {doc.proposal_public_id ? (
+                          <a href={`/preview/${doc.proposal_public_id}`} target="_blank" rel="noreferrer">/preview/{doc.proposal_public_id}</a>
+                        ) : doc.proposal_id ? (
+                          <span>ID: {doc.proposal_id}</span>
+                        ) : (
+                          <span>-</span>
+                        )}
+                      </div>
+                    </td>
                     <td style={{ padding: 6 }}>{doc.created_at || '-'}</td>
                     <td style={{ padding: 6 }}>{doc.created_by || '-'}</td>
                     <td style={{ padding: 6 }}>{doc.tool_version || '-'}</td>
@@ -3129,7 +3165,7 @@ function App() {
                       </div>
                     </td>
                     <td style={{ padding: 6 }}>
-                      <button className="btn" onClick={() => deleteReport(doc.id)}>Delete</button>
+                      <button className="btn" onClick={() => deleteReport(doc)}>Delete</button>
                     </td>
                   </tr>
                 ))}
