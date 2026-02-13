@@ -53,7 +53,7 @@ function App() {
   const [selectedModules, setSelectedModules] = useState<string[]>([])
   const [complexity, setComplexity] = useState<'S' | 'M' | 'L' | 'XL'>('M')
   const [downloading, setDownloading] = useState(false)
-  const [includeAI, setIncludeAI] = useState(false)
+  const [includeAI, setIncludeAI] = useState(true)
   const [tone, setTone] = useState('professional')
   const [styleGuide, setStyleGuide] = useState('')
   const [loadingNarrative, setLoadingNarrative] = useState(false)
@@ -76,6 +76,8 @@ function App() {
   const [authToken, setAuthToken] = useState<string | null>(null)
   // const [authRequestToken, setAuthRequestToken] = useState<string | null>(null)
   const [authChecked, setAuthChecked] = useState(false)
+  const [hasShareParam, setHasShareParam] = useState(false)
+  const [autoScraped, setAutoScraped] = useState(false)
   const [authMode, setAuthMode] = useState<'signin' | 'signup'>('signin')
   const [loginEmail, setLoginEmail] = useState('')
   const [loginPassword, setLoginPassword] = useState('')
@@ -173,6 +175,7 @@ function App() {
     const sp = new URLSearchParams(window.location.search)
     const share = sp.get('share')
     if (share) {
+      setHasShareParam(true)
       fetch(`${API}/api/v1/proposals/public/${share}`)
         .then(res => {
           if (!res.ok) throw new Error('Share link not found')
@@ -271,6 +274,14 @@ function App() {
     if (e) setAuthEmail(e)
     setAuthChecked(true)
   }, [])
+
+  useEffect(() => {
+    if (autoScraped || hasShareParam || readOnly) return
+    if (!authChecked) return
+    if (!AUTH_DISABLED && !authToken && !IS_LOCALHOST) return
+    setAutoScraped(true)
+    runScrapeTest()
+  }, [autoScraped, hasShareParam, readOnly, authChecked, authToken])
 
   const toggleModule = (id: string) => {
     if (readOnly) return
@@ -1621,6 +1632,23 @@ function App() {
     }
   }
 
+  const deleteReport = async (docId: string) => {
+    if (!proposalId) return
+    if (!confirm('Delete this report? This removes the PDF and its database entry.')) return
+    try {
+      setReportsError(null)
+      const headers: Record<string, string> = !AUTH_DISABLED && authToken ? { 'Authorization': `Bearer ${authToken}` } : {}
+      const res = await fetch(`${API}/api/v1/proposals/${proposalId}/documents/${docId}`, {
+        method: 'DELETE',
+        headers,
+      })
+      if (!res.ok) throw new Error('Failed to delete report')
+      await loadReportDocs()
+    } catch (e: any) {
+      setReportsError(e?.message || 'Failed to delete report')
+    }
+  }
+
   useEffect(() => {
     if (proposalId) {
       loadVersions()
@@ -1847,7 +1875,7 @@ function App() {
   const clearAll = () => {
     setSelectedModules([])
     setComplexity('M')
-    setIncludeAI(false)
+    setIncludeAI(true)
     setTone('professional')
     setStyleGuide('')
     setNarrative(null)
@@ -3014,6 +3042,7 @@ function App() {
                       <th style={{ textAlign: 'right', borderBottom: '1px solid #ccc', padding: 6 }}>Total Hours</th>
                       <th style={{ textAlign: 'left', borderBottom: '1px solid #ccc', padding: 6 }}>AI</th>
                       <th style={{ textAlign: 'left', borderBottom: '1px solid #ccc', padding: 6 }}>PDF</th>
+                      <th style={{ textAlign: 'left', borderBottom: '1px solid #ccc', padding: 6 }}>Actions</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -3042,6 +3071,9 @@ function App() {
                           <div style={{ fontSize: 11, color: '#777' }}>
                             {doc.filename || 'report.pdf'} · {formatBytes(doc.size_bytes)}
                           </div>
+                        </td>
+                        <td style={{ padding: 6 }}>
+                          <button className="btn" onClick={() => deleteReport(doc.id)}>Delete</button>
                         </td>
                       </tr>
                     ))}

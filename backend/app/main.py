@@ -2082,6 +2082,35 @@ async def upload_document(
     }
 
 
+@app.delete("/api/v1/proposals/{proposal_id}/documents/{document_id}")
+def delete_document(
+    proposal_id: str,
+    document_id: str,
+    current_user: str = Depends(get_current_user),
+):
+    with get_session() as session:
+        prop = _get_owned_proposal(session, proposal_id, current_user)
+        if not prop:
+            raise HTTPException(status_code=404, detail="Proposal not found")
+        doc = (
+            session.query(ProposalDocument)
+            .filter(
+                ProposalDocument.id == document_id,
+                ProposalDocument.proposal_id == proposal_id,
+            )
+            .one_or_none()
+        )
+        if not doc:
+            raise HTTPException(status_code=404, detail="Document not found")
+        key = doc.key
+        session.delete(doc)
+
+    if storage_service.is_configured() and key:
+        storage_service.delete_object(key)
+
+    return {"deleted": True, "id": document_id}
+
+
 # -----------------------------
 # Simple auth (email magic link) + Cognito integration
 # -----------------------------

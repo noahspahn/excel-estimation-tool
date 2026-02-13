@@ -86,3 +86,12 @@ class StorageService:
             )
         except (BotoCoreError, ClientError):
             return None
+
+    def delete_object(self, key: str) -> bool:
+        if not self.is_configured() or not key:
+            return False
+        try:
+            self.s3.delete_object(Bucket=self.bucket, Key=key)
+            return True
+        except (BotoCoreError, ClientError):
+            return False
