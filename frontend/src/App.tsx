@@ -1570,7 +1570,7 @@ function App() {
       setSharePublicId(pub)
       setPreviewIdInput(pub)
       setProposalId(data.id)
-      setReadOnly(true)
+      setReadOnly(false)
       alert('Share link created. You can copy it from the banner.')
     } catch (e: any) {
       alert(e?.message || 'Failed to create share link')
@@ -1600,6 +1600,7 @@ function App() {
   const [reportDocs, setReportDocs] = useState<any[]>([])
   const [reportsLoaded, setReportsLoaded] = useState(false)
   const [reportsError, setReportsError] = useState<string | null>(null)
+  const [initBusy, setInitBusy] = useState(false)
 
   const loadVersions = async () => {
     if (!proposalId) { setVersions([]); setVersionsLoaded(true); return }
@@ -1611,6 +1612,49 @@ function App() {
       setVersionsLoaded(true)
     } catch (e) {
       setVersionsLoaded(true)
+    }
+  }
+
+  const initializeProposal = async () => {
+    if (proposalId) { alert('Proposal already initialized.'); return }
+    if (selectedModules.length === 0) { alert('Please select at least one module.'); return }
+    if (prereqWarnings.length > 0) { alert('Some prerequisites are missing.'); return }
+    try {
+      setInitBusy(true)
+      let estimationResult = estimate
+      if (!estimationResult) {
+        const estRes = await fetch(`${API}/api/v1/estimate`, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(buildDraft().estimation_input)
+        })
+        if (!estRes.ok) throw new Error('Failed to calculate estimate')
+        const estData = await estRes.json()
+        estimationResult = estData?.estimation_result || null
+        setEstimate(estimationResult)
+      }
+      const payload = buildDraft()
+      payload.estimation_result = estimationResult
+      if (!AUTH_DISABLED && (!authToken || !authEmail)) { alert('Please sign in to initialize a proposal.'); return }
+      const headers: Record<string, string> = { 'Content-Type': 'application/json' }
+      if (!AUTH_DISABLED && authToken) headers.Authorization = `Bearer ${authToken}`
+      const res = await fetch(`${API}/api/v1/proposals`, {
+        method: 'POST', headers,
+        body: JSON.stringify({ title: projectName || 'Proposal', payload })
+      })
+      if (!res.ok) throw new Error('Failed to create proposal')
+      const data = await res.json()
+      const pub = data.public_id
+      setProposalId(data.id)
+      setSharePublicId(pub)
+      setPreviewIdInput(pub)
+      setShareUrl(`${window.location.origin}/preview/${encodeURIComponent(pub)}`)
+      await loadVersions()
+      await loadReportDocs()
+      alert('Proposal initialized. You can now save versions and reports.')
+    } catch (e: any) {
+      alert(e?.message || 'Failed to initialize proposal')
+    } finally {
+      setInitBusy(false)
     }
   }
 
@@ -2744,6 +2788,11 @@ function App() {
             Create Share Link
           </button>
         )}
+        {!readOnly && (
+          <button className="btn" onClick={initializeProposal} disabled={initBusy || !!proposalId}>
+            {initBusy ? 'Initializing...' : (proposalId ? 'Proposal Initialized' : 'Initialize Proposal')}
+          </button>
+        )}
         <div style={{ display: 'inline-flex', gap: 6, alignItems: 'center' }}>
           <label>
             Public preview ID:
@@ -2760,7 +2809,7 @@ function App() {
           </button>
         </div>
         {!readOnly && (
-          <button className="btn" onClick={saveVersion} disabled={!proposalId}>
+          <button className="btn" onClick={saveVersion}>
             Save Version
           </button>
         )}
@@ -2985,102 +3034,107 @@ function App() {
               </div>
             ))}
           </div>
-          {proposalId && (AUTH_DISABLED || authToken) && (
-            <div style={{ marginTop: 24 }}>
-              <h4>Versions</h4>
-              <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 8 }}>
-                <button className="btn" onClick={loadVersions}>Refresh</button>
-                <span style={{ fontSize: 12, color: '#666' }}>{versions.length} version(s)</span>
-              </div>
-              {versions.length === 0 ? (
-                <div style={{ fontSize: 12, color: '#777' }}>{versionsLoaded ? 'No versions yet.' : 'Loading...'}</div>
-              ) : (
-                <table style={{ width: '100%', borderCollapse: 'collapse' }}>
-                  <thead>
-                    <tr>
-                      <th style={{ textAlign: 'left', borderBottom: '1px solid #ccc', padding: 6 }}>Version</th>
-                      <th style={{ textAlign: 'left', borderBottom: '1px solid #ccc', padding: 6 }}>Title</th>
-                      <th style={{ textAlign: 'left', borderBottom: '1px solid #ccc', padding: 6 }}>Created</th>
-                      <th style={{ textAlign: 'left', borderBottom: '1px solid #ccc', padding: 6 }}>Actions</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {versions.map(v => (
-                      <tr key={v.id}>
-                        <td style={{ padding: 6 }}>v{v.version}</td>
-                        <td style={{ padding: 6 }}>{v.title || '-'}</td>
-                        <td style={{ padding: 6 }}>{v.created_at || '-'}</td>
-                        <td style={{ padding: 6 }}>
-                          <button className="btn" onClick={() => restoreVersion(v.version)}>Restore</button>
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              )}
-            </div>
+        </div>
+      )}
+      {!proposalId && (
+        <div style={{ marginTop: 24, fontSize: 12, color: '#666' }}>
+          Create a share link or enter a Proposal ID to enable saved versions and report history.
+        </div>
+      )}
+      {proposalId && (AUTH_DISABLED || authToken) && (
+        <div style={{ marginTop: 24 }}>
+          <h4>Versions</h4>
+          <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 8 }}>
+            <button className="btn" onClick={loadVersions}>Refresh</button>
+            <span style={{ fontSize: 12, color: '#666' }}>{versions.length} version(s)</span>
+          </div>
+          {versions.length === 0 ? (
+            <div style={{ fontSize: 12, color: '#777' }}>{versionsLoaded ? 'No versions yet.' : 'Loading...'}</div>
+          ) : (
+            <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+              <thead>
+                <tr>
+                  <th style={{ textAlign: 'left', borderBottom: '1px solid #ccc', padding: 6 }}>Version</th>
+                  <th style={{ textAlign: 'left', borderBottom: '1px solid #ccc', padding: 6 }}>Title</th>
+                  <th style={{ textAlign: 'left', borderBottom: '1px solid #ccc', padding: 6 }}>Created</th>
+                  <th style={{ textAlign: 'left', borderBottom: '1px solid #ccc', padding: 6 }}>Actions</th>
+                </tr>
+              </thead>
+              <tbody>
+                {versions.map(v => (
+                  <tr key={v.id}>
+                    <td style={{ padding: 6 }}>v{v.version}</td>
+                    <td style={{ padding: 6 }}>{v.title || '-'}</td>
+                    <td style={{ padding: 6 }}>{v.created_at || '-'}</td>
+                    <td style={{ padding: 6 }}>
+                      <button className="btn" onClick={() => restoreVersion(v.version)}>Restore</button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
           )}
-          {proposalId && (AUTH_DISABLED || authToken) && (
-            <div style={{ marginTop: 24 }}>
-              <h4>Reports</h4>
-              <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 8, flexWrap: 'wrap' }}>
-                <button className="btn" onClick={loadReportDocs}>Refresh</button>
-                <span style={{ fontSize: 12, color: '#666' }}>{reportDocs.length} report(s)</span>
-                {reportsError && <span style={{ fontSize: 12, color: 'crimson' }}>{reportsError}</span>}
-              </div>
-              {reportDocs.length === 0 ? (
-                <div style={{ fontSize: 12, color: '#777' }}>{reportsLoaded ? 'No reports saved yet.' : 'Loading...'}</div>
-              ) : (
-                <table style={{ width: '100%', borderCollapse: 'collapse' }}>
-                  <thead>
-                    <tr>
-                      <th style={{ textAlign: 'left', borderBottom: '1px solid #ccc', padding: 6 }}>Created</th>
-                      <th style={{ textAlign: 'left', borderBottom: '1px solid #ccc', padding: 6 }}>Created By</th>
-                      <th style={{ textAlign: 'left', borderBottom: '1px solid #ccc', padding: 6 }}>Tool Version</th>
-                      <th style={{ textAlign: 'left', borderBottom: '1px solid #ccc', padding: 6 }}>Proposal Version</th>
-                      <th style={{ textAlign: 'right', borderBottom: '1px solid #ccc', padding: 6 }}>Total Cost</th>
-                      <th style={{ textAlign: 'right', borderBottom: '1px solid #ccc', padding: 6 }}>Total Hours</th>
-                      <th style={{ textAlign: 'left', borderBottom: '1px solid #ccc', padding: 6 }}>AI</th>
-                      <th style={{ textAlign: 'left', borderBottom: '1px solid #ccc', padding: 6 }}>PDF</th>
-                      <th style={{ textAlign: 'left', borderBottom: '1px solid #ccc', padding: 6 }}>Actions</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {reportDocs.map((doc: any) => (
-                      <tr key={doc.id}>
-                        <td style={{ padding: 6 }}>{doc.created_at || '-'}</td>
-                        <td style={{ padding: 6 }}>{doc.created_by || '-'}</td>
-                        <td style={{ padding: 6 }}>{doc.tool_version || '-'}</td>
-                        <td style={{ padding: 6 }}>{doc.proposal_version != null ? `v${doc.proposal_version}` : '-'}</td>
-                        <td style={{ padding: 6, textAlign: 'right' }}>
-                          {doc.total_cost != null ? `$${Number(doc.total_cost).toLocaleString(undefined, { maximumFractionDigits: 2 })}` : '-'}
-                        </td>
-                        <td style={{ padding: 6, textAlign: 'right' }}>
-                          {doc.total_hours != null ? Number(doc.total_hours).toLocaleString(undefined, { maximumFractionDigits: 1 }) : '-'}
-                        </td>
-                        <td style={{ padding: 6 }}>{doc.include_ai ? 'Yes' : 'No'}</td>
-                        <td style={{ padding: 6 }}>
-                          {doc.url ? (
-                            <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
-                              <a href={doc.url} target="_blank" rel="noreferrer">Open PDF</a>
-                              <a className="btn" href={doc.url} download>Download</a>
-                            </div>
-                          ) : (
-                            <span style={{ fontSize: 12, color: '#777' }}>No link</span>
-                          )}
-                          <div style={{ fontSize: 11, color: '#777' }}>
-                            {doc.filename || 'report.pdf'} · {formatBytes(doc.size_bytes)}
-                          </div>
-                        </td>
-                        <td style={{ padding: 6 }}>
-                          <button className="btn" onClick={() => deleteReport(doc.id)}>Delete</button>
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              )}
-            </div>
+        </div>
+      )}
+      {proposalId && (AUTH_DISABLED || authToken) && (
+        <div style={{ marginTop: 24 }}>
+          <h4>Reports</h4>
+          <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 8, flexWrap: 'wrap' }}>
+            <button className="btn" onClick={loadReportDocs}>Refresh</button>
+            <span style={{ fontSize: 12, color: '#666' }}>{reportDocs.length} report(s)</span>
+            {reportsError && <span style={{ fontSize: 12, color: 'crimson' }}>{reportsError}</span>}
+          </div>
+          {reportDocs.length === 0 ? (
+            <div style={{ fontSize: 12, color: '#777' }}>{reportsLoaded ? 'No reports saved yet.' : 'Loading...'}</div>
+          ) : (
+            <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+              <thead>
+                <tr>
+                  <th style={{ textAlign: 'left', borderBottom: '1px solid #ccc', padding: 6 }}>Created</th>
+                  <th style={{ textAlign: 'left', borderBottom: '1px solid #ccc', padding: 6 }}>Created By</th>
+                  <th style={{ textAlign: 'left', borderBottom: '1px solid #ccc', padding: 6 }}>Tool Version</th>
+                  <th style={{ textAlign: 'left', borderBottom: '1px solid #ccc', padding: 6 }}>Proposal Version</th>
+                  <th style={{ textAlign: 'right', borderBottom: '1px solid #ccc', padding: 6 }}>Total Cost</th>
+                  <th style={{ textAlign: 'right', borderBottom: '1px solid #ccc', padding: 6 }}>Total Hours</th>
+                  <th style={{ textAlign: 'left', borderBottom: '1px solid #ccc', padding: 6 }}>AI</th>
+                  <th style={{ textAlign: 'left', borderBottom: '1px solid #ccc', padding: 6 }}>PDF</th>
+                  <th style={{ textAlign: 'left', borderBottom: '1px solid #ccc', padding: 6 }}>Actions</th>
+                </tr>
+              </thead>
+              <tbody>
+                {reportDocs.map((doc: any) => (
+                  <tr key={doc.id}>
+                    <td style={{ padding: 6 }}>{doc.created_at || '-'}</td>
+                    <td style={{ padding: 6 }}>{doc.created_by || '-'}</td>
+                    <td style={{ padding: 6 }}>{doc.tool_version || '-'}</td>
+                    <td style={{ padding: 6 }}>{doc.proposal_version != null ? `v${doc.proposal_version}` : '-'}</td>
+                    <td style={{ padding: 6, textAlign: 'right' }}>
+                      {doc.total_cost != null ? `$${Number(doc.total_cost).toLocaleString(undefined, { maximumFractionDigits: 2 })}` : '-'}
+                    </td>
+                    <td style={{ padding: 6, textAlign: 'right' }}>
+                      {doc.total_hours != null ? Number(doc.total_hours).toLocaleString(undefined, { maximumFractionDigits: 1 }) : '-'}
+                    </td>
+                    <td style={{ padding: 6 }}>{doc.include_ai ? 'Yes' : 'No'}</td>
+                    <td style={{ padding: 6 }}>
+                      {doc.url ? (
+                        <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+                          <a href={doc.url} target="_blank" rel="noreferrer">Open PDF</a>
+                          <a className="btn" href={doc.url} download>Download</a>
+                        </div>
+                      ) : (
+                        <span style={{ fontSize: 12, color: '#777' }}>No link</span>
+                      )}
+                      <div style={{ fontSize: 11, color: '#777' }}>
+                        {doc.filename || 'report.pdf'} · {formatBytes(doc.size_bytes)}
+                      </div>
+                    </td>
+                    <td style={{ padding: 6 }}>
+                      <button className="btn" onClick={() => deleteReport(doc.id)}>Delete</button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
           )}
         </div>
       )}
