@@ -8,7 +8,34 @@ const API = (import.meta as any).env?.VITE_API_URL || 'http://localhost:8000'
 type VersionInfo = { id: string; version: number; title?: string; created_at?: string }
 type PromptMap = Record<string, string>
 
-const DEFAULT_SECTIONS = ['executive_summary', 'assumptions', 'risks', 'recommendations']
+const DEFAULT_SECTIONS = ['executive_summary', 'assumptions', 'risks']
+
+const DEFAULT_RACI_ROWS = [
+  { milestone: 'SIT sign-off', responsible: '', accountable: '', consulted: '', informed: '' },
+  { milestone: 'UAT data validation', responsible: '', accountable: '', consulted: '', informed: '' },
+  { milestone: 'Security policy review', responsible: '', accountable: '', consulted: '', informed: '' },
+]
+
+const DEFAULT_ROADMAP_PHASES = [
+  {
+    phase: 'Phase 1',
+    title: 'Core modernization and stabilization',
+    timeline: '0-18 months',
+    description: 'Deliver the current scope modules as the foundational platform for modernization.',
+  },
+  {
+    phase: 'Phase 2',
+    title: 'Potential scalability',
+    timeline: '18-36 months',
+    description: 'Add future capabilities such as AI-driven predictive maintenance or automated compliance reporting.',
+  },
+  {
+    phase: 'Phase 3',
+    title: 'Long-term vision',
+    timeline: '3-5 years',
+    description: 'Enable secure, citizen-facing services leveraging the Phase 1 API and modular architecture.',
+  },
+]
 
 const normalizeMap = (src: any): Record<string, any> => {
   if (Array.isArray(src)) {
@@ -175,6 +202,62 @@ export default function Preview() {
     const list = Array.isArray(payload?.estimation_input?.[key]) ? [...payload.estimation_input[key]] : []
     list[idx] = { ...(list[idx] || {}), ...patch }
     updateEstimationInput(key, list)
+  }
+
+  const updateRaciRow = (idx: number, patch: Record<string, string>) => {
+    const list = Array.isArray(payload?.estimation_input?.raci_matrix)
+      ? [...payload.estimation_input.raci_matrix]
+      : []
+    list[idx] = { ...(list[idx] || {}), ...patch }
+    updateEstimationInput('raci_matrix', list)
+  }
+
+  const addRaciRow = () => {
+    const list = Array.isArray(payload?.estimation_input?.raci_matrix)
+      ? [...payload.estimation_input.raci_matrix]
+      : []
+    list.push({ milestone: '', responsible: '', accountable: '', consulted: '', informed: '' })
+    updateEstimationInput('raci_matrix', list)
+  }
+
+  const removeRaciRow = (idx: number) => {
+    const list = Array.isArray(payload?.estimation_input?.raci_matrix)
+      ? [...payload.estimation_input.raci_matrix]
+      : []
+    list.splice(idx, 1)
+    updateEstimationInput('raci_matrix', list)
+  }
+
+  const updateRoadmapPhase = (idx: number, patch: Record<string, string>) => {
+    const list = Array.isArray(payload?.estimation_input?.roadmap_phases)
+      ? [...payload.estimation_input.roadmap_phases]
+      : []
+    list[idx] = { ...(list[idx] || {}), ...patch }
+    updateEstimationInput('roadmap_phases', list)
+  }
+
+  const updateHistoricalEstimate = (idx: number, patch: Record<string, any>) => {
+    const list = Array.isArray(payload?.estimation_input?.historical_estimates)
+      ? [...payload.estimation_input.historical_estimates]
+      : []
+    list[idx] = { ...(list[idx] || {}), ...patch }
+    updateEstimationInput('historical_estimates', list)
+  }
+
+  const addHistoricalEstimate = () => {
+    const list = Array.isArray(payload?.estimation_input?.historical_estimates)
+      ? [...payload.estimation_input.historical_estimates]
+      : []
+    list.push({ name: '', actual_hours: null, actual_total_cost: null, selected: true })
+    updateEstimationInput('historical_estimates', list)
+  }
+
+  const removeHistoricalEstimate = (idx: number) => {
+    const list = Array.isArray(payload?.estimation_input?.historical_estimates)
+      ? [...payload.estimation_input.historical_estimates]
+      : []
+    list.splice(idx, 1)
+    updateEstimationInput('historical_estimates', list)
   }
 
   const addListItem = (key: 'odc_items' | 'fixed_price_items') => {
@@ -378,6 +461,9 @@ export default function Preview() {
   const roles = normalizeMap(est.breakdown_by_role)
   const moduleSubtasks = Array.isArray(payload?.module_subtasks) ? payload.module_subtasks : []
   const narrativeKeys = Object.keys(narr).length > 0 ? Object.keys(narr) : DEFAULT_SECTIONS
+  const raciRows = Array.isArray(ei.raci_matrix) && ei.raci_matrix.length ? ei.raci_matrix : DEFAULT_RACI_ROWS
+  const roadmapRows = Array.isArray(ei.roadmap_phases) && ei.roadmap_phases.length ? ei.roadmap_phases : DEFAULT_ROADMAP_PHASES
+  const historicalRows = Array.isArray(ei.historical_estimates) ? ei.historical_estimates : []
 
   return (
     <div className="app preview-page">
@@ -442,6 +528,144 @@ export default function Preview() {
         </label>
       </div>
 
+      <h2 style={{ marginTop: 16 }}>Value & ROI Inputs</h2>
+      <div style={{ fontSize: 12, color: '#666', marginBottom: 6 }}>
+        Inputs that drive the 5-year net fiscal benefit summary.
+      </div>
+      <div className="form-grid">
+        <label>Emergency CapEx Event Cost (Low)
+          <input
+            type="number"
+            value={ei.roi_capex_event_cost_low ?? ''}
+            onChange={(e) => updateEstimationInput('roi_capex_event_cost_low', e.target.value === '' ? null : Number(e.target.value))}
+            disabled={!editMode}
+          />
+        </label>
+        <label>Emergency CapEx Event Cost (High)
+          <input
+            type="number"
+            value={ei.roi_capex_event_cost_high ?? ''}
+            onChange={(e) => updateEstimationInput('roi_capex_event_cost_high', e.target.value === '' ? null : Number(e.target.value))}
+            disabled={!editMode}
+          />
+        </label>
+        <label>CapEx Event Interval (Months)
+          <input
+            type="number"
+            value={ei.roi_capex_event_interval_months ?? ''}
+            onChange={(e) => updateEstimationInput('roi_capex_event_interval_months', e.target.value === '' ? null : Number(e.target.value))}
+            disabled={!editMode}
+          />
+        </label>
+        <label>Downtime Cost per Hour
+          <input
+            type="number"
+            value={ei.roi_downtime_cost_per_hour ?? ''}
+            onChange={(e) => updateEstimationInput('roi_downtime_cost_per_hour', e.target.value === '' ? null : Number(e.target.value))}
+            disabled={!editMode}
+          />
+        </label>
+        <label>Current Availability (%)
+          <input
+            type="number"
+            value={ei.roi_current_availability ?? ''}
+            onChange={(e) => updateEstimationInput('roi_current_availability', e.target.value === '' ? null : Number(e.target.value))}
+            disabled={!editMode}
+          />
+        </label>
+        <label>Target Availability (%)
+          <input
+            type="number"
+            value={ei.roi_target_availability ?? ''}
+            onChange={(e) => updateEstimationInput('roi_target_availability', e.target.value === '' ? null : Number(e.target.value))}
+            disabled={!editMode}
+          />
+        </label>
+        <label>Legacy Support Savings (Annual)
+          <input
+            type="number"
+            value={ei.roi_legacy_support_savings_annual ?? ''}
+            onChange={(e) => updateEstimationInput('roi_legacy_support_savings_annual', e.target.value === '' ? null : Number(e.target.value))}
+            disabled={!editMode}
+          />
+        </label>
+      </div>
+
+      <h2 style={{ marginTop: 16 }}>Roles & Responsibilities (RACI)</h2>
+      <div style={{ fontSize: 12, color: '#666', marginBottom: 6 }}>
+        This appendix will be included in the report and should be treated as a binding contract artifact.
+      </div>
+      <div style={{ overflowX: 'auto' }}>
+        <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+          <thead>
+            <tr>
+              <th style={{ textAlign: 'left', borderBottom: '1px solid #ccc', padding: 6 }}>Milestone</th>
+              <th style={{ textAlign: 'left', borderBottom: '1px solid #ccc', padding: 6 }}>Responsible</th>
+              <th style={{ textAlign: 'left', borderBottom: '1px solid #ccc', padding: 6 }}>Accountable</th>
+              <th style={{ textAlign: 'left', borderBottom: '1px solid #ccc', padding: 6 }}>Consulted</th>
+              <th style={{ textAlign: 'left', borderBottom: '1px solid #ccc', padding: 6 }}>Informed</th>
+              {editMode && <th style={{ width: 1 }} />}
+            </tr>
+          </thead>
+          <tbody>
+            {raciRows.map((row: any, idx: number) => (
+              <tr key={idx}>
+                <td style={{ padding: 6 }}>
+                  <input value={row.milestone || ''} onChange={(e) => updateRaciRow(idx, { milestone: e.target.value })} disabled={!editMode} />
+                </td>
+                <td style={{ padding: 6 }}>
+                  <input value={row.responsible || ''} onChange={(e) => updateRaciRow(idx, { responsible: e.target.value })} disabled={!editMode} />
+                </td>
+                <td style={{ padding: 6 }}>
+                  <input value={row.accountable || ''} onChange={(e) => updateRaciRow(idx, { accountable: e.target.value })} disabled={!editMode} />
+                </td>
+                <td style={{ padding: 6 }}>
+                  <input value={row.consulted || ''} onChange={(e) => updateRaciRow(idx, { consulted: e.target.value })} disabled={!editMode} />
+                </td>
+                <td style={{ padding: 6 }}>
+                  <input value={row.informed || ''} onChange={(e) => updateRaciRow(idx, { informed: e.target.value })} disabled={!editMode} />
+                </td>
+                {editMode && (
+                  <td style={{ padding: 6 }}>
+                    <button className="btn" onClick={() => removeRaciRow(idx)}>Remove</button>
+                  </td>
+                )}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      {editMode && (
+        <button className="btn" style={{ marginTop: 8 }} onClick={addRaciRow}>
+          Add RACI Row
+        </button>
+      )}
+
+      <h2 style={{ marginTop: 16 }}>Future-Proofing Roadmap</h2>
+      <div style={{ fontSize: 12, color: '#666', marginBottom: 6 }}>
+        Define phased implementation aligned to the 5-10 year strategy.
+      </div>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+        {roadmapRows.map((phase: any, idx: number) => (
+          <div key={idx} style={{ border: '1px solid #eee', borderRadius: 8, padding: 10, background: '#fafafa' }}>
+            <div style={{ display: 'grid', gap: 8, gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))' }}>
+              <label>Phase
+                <input value={phase.phase || ''} onChange={(e) => updateRoadmapPhase(idx, { phase: e.target.value })} disabled={!editMode} />
+              </label>
+              <label>Timeline
+                <input value={phase.timeline || ''} onChange={(e) => updateRoadmapPhase(idx, { timeline: e.target.value })} disabled={!editMode} />
+              </label>
+              <label>Title
+                <input value={phase.title || ''} onChange={(e) => updateRoadmapPhase(idx, { title: e.target.value })} disabled={!editMode} />
+              </label>
+            </div>
+            <label style={{ marginTop: 8, display: 'block' }}>Description
+              <textarea value={phase.description || ''} onChange={(e) => updateRoadmapPhase(idx, { description: e.target.value })} rows={2} style={{ width: '100%' }} disabled={!editMode} />
+            </label>
+          </div>
+        ))}
+      </div>
+
       <h2 style={{ marginTop: 16 }}>Scope Options</h2>
       <div className="form-grid">
         <label>Modules (comma separated)
@@ -465,6 +689,12 @@ export default function Preview() {
         <label>Period of Performance
           <input value={ei.period_of_performance || ''} onChange={(e) => updateEstimationInput('period_of_performance', e.target.value)} disabled={!editMode} />
         </label>
+        <label>Estimating Method
+          <select value={ei.estimating_method || 'engineering'} onChange={(e) => updateEstimationInput('estimating_method', e.target.value)} disabled={!editMode}>
+            <option value="engineering">Engineering Discrete</option>
+            <option value="historical">Historical Actuals</option>
+          </select>
+        </label>
         <label>
           <input type="checkbox" checked={!!ei.overtime} onChange={(e) => updateEstimationInput('overtime', e.target.checked)} disabled={!editMode} style={{ marginRight: 8 }} />
           Overtime
@@ -482,6 +712,55 @@ export default function Preview() {
           <input value={ei.clearance_level || ''} onChange={(e) => updateEstimationInput('clearance_level', e.target.value)} disabled={!editMode} />
         </label>
       </div>
+      {String(ei.estimating_method || 'engineering').toLowerCase() === 'historical' && (
+        <div style={{ marginTop: 8 }}>
+          <h4>Historical Actuals</h4>
+          {historicalRows.length > 0 ? (
+            historicalRows.map((item: any, idx: number) => (
+              <div key={idx} style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 6, flexWrap: 'wrap' }}>
+                <label style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+                  <input
+                    type="checkbox"
+                    checked={item?.selected !== false}
+                    onChange={(e) => updateHistoricalEstimate(idx, { selected: e.target.checked })}
+                    disabled={!editMode}
+                  />
+                  Use
+                </label>
+                <input
+                  placeholder="Historical win name"
+                  value={item?.name || ''}
+                  onChange={(e) => updateHistoricalEstimate(idx, { name: e.target.value })}
+                  disabled={!editMode}
+                  style={{ minWidth: 200, flex: 1 }}
+                />
+                <input
+                  type="number"
+                  placeholder="Actual Hours"
+                  value={item?.actual_hours ?? ''}
+                  onChange={(e) => updateHistoricalEstimate(idx, { actual_hours: e.target.value === '' ? null : Number(e.target.value) })}
+                  disabled={!editMode}
+                  style={{ width: 140 }}
+                />
+                <input
+                  type="number"
+                  placeholder="Actual Total Cost"
+                  value={item?.actual_total_cost ?? ''}
+                  onChange={(e) => updateHistoricalEstimate(idx, { actual_total_cost: e.target.value === '' ? null : Number(e.target.value) })}
+                  disabled={!editMode}
+                  style={{ width: 160 }}
+                />
+                {editMode && (
+                  <button className="btn" onClick={() => removeHistoricalEstimate(idx)}>Remove</button>
+                )}
+              </div>
+            ))
+          ) : (
+            <div style={{ fontSize: 12, color: '#666' }}>No historical wins added yet.</div>
+          )}
+          {editMode && <button className="btn" onClick={addHistoricalEstimate}>Add Historical Win</button>}
+        </div>
+      )}
 
       <h2 style={{ marginTop: 16 }}>Financial Summary (editable)</h2>
       <div className="form-grid">
@@ -491,7 +770,7 @@ export default function Preview() {
         <label>Total Labor Cost
           <input type="number" value={est.total_labor_cost ?? 0} onChange={(e) => updateResultField('total_labor_cost', Number(e.target.value || 0))} disabled={!editMode} />
         </label>
-        <label>Risk Reserve
+        <label>Management Reserve
           <input type="number" value={est.risk_reserve ?? 0} onChange={(e) => updateResultField('risk_reserve', Number(e.target.value || 0))} disabled={!editMode} />
         </label>
         <label>Overhead Cost

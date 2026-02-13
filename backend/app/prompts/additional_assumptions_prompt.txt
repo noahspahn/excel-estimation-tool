@@ -7,6 +7,7 @@ Task: Draft the "Additional Assumptions" section for the estimate based on the s
 Guidelines:
 - Output 6-10 bullet points (one sentence each).
 - Use estimator language: scope, dependencies, access, approvals, schedule, data quality, security/compliance, and government-furnished information.
+- Tailor assumptions to the selected modules (e.g., IT modernization site access, cloud tenant access, data source availability, security artifacts, stakeholder workshops).
 - Reference only facts implied by the RFP; if unknown, phrase as an assumption.
 - If security or compliance frameworks appear in the RFP, include them explicitly.
 - Avoid pricing or hours; focus on delivery conditions and constraints.

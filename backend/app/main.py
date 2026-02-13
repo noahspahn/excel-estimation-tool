@@ -219,7 +219,19 @@ class EstimationRequest(BaseModel):
     # Site and schedule
     sites: int = 1
     overtime: bool = False
+    tool_version: Optional[str] = None
     period_of_performance: Optional[str] = None
+    estimating_method: Optional[str] = "engineering"
+    historical_estimates: Optional[List[Dict[str, Any]]] = None
+    raci_matrix: Optional[List[Dict[str, str]]] = None
+    roadmap_phases: Optional[List[Dict[str, str]]] = None
+    roi_capex_event_cost_low: Optional[float] = None
+    roi_capex_event_cost_high: Optional[float] = None
+    roi_capex_event_interval_months: Optional[float] = None
+    roi_downtime_cost_per_hour: Optional[float] = None
+    roi_current_availability: Optional[float] = None
+    roi_target_availability: Optional[float] = None
+    roi_legacy_support_savings_annual: Optional[float] = None
     # Other costs
     odc_items: List[Dict[str, Any]] = []
     fixed_price_items: List[Dict[str, Any]] = []
@@ -307,6 +319,98 @@ def _build_scrape_prompt_context(req: AssumptionsPromptRequest, scraped_text: st
         "FY": req.fy or "",
         "SELECTED_MODULES": ", ".join(modules),
         "SCRAPED_TEXT": scraped_text,
+    }
+
+
+def _safe_float(value: Any) -> Optional[float]:
+    try:
+        if value is None or value == "":
+            return None
+        return float(value)
+    except Exception:
+        return None
+
+
+def _compute_roi_summary(
+    roi_inputs: Dict[str, Any],
+    horizon_years: int,
+    total_cost: float,
+) -> Optional[Dict[str, Any]]:
+    capex_low = _safe_float(roi_inputs.get("capex_event_cost_low"))
+    capex_high = _safe_float(roi_inputs.get("capex_event_cost_high"))
+    interval_months = _safe_float(roi_inputs.get("capex_event_interval_months"))
+    downtime_cost = _safe_float(roi_inputs.get("downtime_cost_per_hour"))
+    current_avail = _safe_float(roi_inputs.get("current_availability"))
+    target_avail = _safe_float(roi_inputs.get("target_availability"))
+    legacy_annual = _safe_float(roi_inputs.get("legacy_support_savings_annual"))
+
+    has_inputs = any(
+        v is not None
+        for v in [capex_low, capex_high, interval_months, downtime_cost, current_avail, target_avail, legacy_annual]
+    )
+    if not has_inputs:
+        return None
+
+    capex_events = None
+    if interval_months and interval_months > 0:
+        capex_events = (horizon_years * 12) / interval_months
+
+    capex_savings_low = capex_low * capex_events if capex_low is not None and capex_events else None
+    capex_savings_high = capex_high * capex_events if capex_high is not None and capex_events else None
+    if capex_savings_low is None and capex_savings_high is None and capex_events and capex_low is not None:
+        capex_savings_low = capex_low * capex_events
+
+    downtime_savings = None
+    if downtime_cost is not None and current_avail is not None and target_avail is not None:
+        hours_per_year = 24 * 365
+        current_down = hours_per_year * max(0.0, 1 - (current_avail / 100))
+        target_down = hours_per_year * max(0.0, 1 - (target_avail / 100))
+        delta = max(0.0, current_down - target_down)
+        downtime_savings = delta * downtime_cost * horizon_years
+
+    legacy_savings = legacy_annual * horizon_years if legacy_annual is not None else None
+
+    total_savings_low = 0.0
+    total_savings_high = 0.0
+    has_range = capex_savings_low is not None and capex_savings_high is not None
+
+    for val in [capex_savings_low, downtime_savings, legacy_savings]:
+        if val is not None:
+            total_savings_low += val
+    for val in [capex_savings_high or capex_savings_low, downtime_savings, legacy_savings]:
+        if val is not None:
+            total_savings_high += val
+
+    net_benefit_low = total_savings_low - total_cost
+    net_benefit_high = total_savings_high - total_cost
+
+    return {
+        "horizon_years": horizon_years,
+        "capex_events": capex_events,
+        "capex_savings_low": capex_savings_low,
+        "capex_savings_high": capex_savings_high if has_range else None,
+        "downtime_savings": downtime_savings,
+        "legacy_savings": legacy_savings,
+        "total_savings_low": total_savings_low,
+        "total_savings_high": total_savings_high if has_range else None,
+        "net_benefit_low": net_benefit_low,
+        "net_benefit_high": net_benefit_high if has_range else None,
+        "current_availability": current_avail,
+        "target_availability": target_avail,
+        "downtime_cost_per_hour": downtime_cost,
+        "capex_interval_months": interval_months,
+    }
+
+
+def _extract_roi_inputs_from_estimation_input(estimation_input: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "capex_event_cost_low": estimation_input.get("roi_capex_event_cost_low"),
+        "capex_event_cost_high": estimation_input.get("roi_capex_event_cost_high"),
+        "capex_event_interval_months": estimation_input.get("roi_capex_event_interval_months"),
+        "downtime_cost_per_hour": estimation_input.get("roi_downtime_cost_per_hour"),
+        "current_availability": estimation_input.get("roi_current_availability"),
+        "target_availability": estimation_input.get("roi_target_availability"),
+        "legacy_support_savings_annual": estimation_input.get("roi_legacy_support_savings_annual"),
     }
 
 
@@ -670,6 +774,8 @@ def estimate(req: EstimationRequest):
         sites=req.sites,
         overtime=req.overtime,
         period_of_performance=req.period_of_performance,
+        estimating_method=req.estimating_method or "engineering",
+        historical_estimates=req.historical_estimates or [],
         odc_items=req.odc_items or [],
         fixed_price_items=req.fixed_price_items or [],
         hardware_subtotal=req.hardware_subtotal or 0.0,
@@ -747,6 +853,8 @@ def generate_narrative(req: NarrativeRequest):
         sites=req.sites,
         overtime=req.overtime,
         period_of_performance=req.period_of_performance,
+        estimating_method=req.estimating_method or "engineering",
+        historical_estimates=req.historical_estimates or [],
         odc_items=req.odc_items or [],
         fixed_price_items=req.fixed_price_items or [],
         hardware_subtotal=req.hardware_subtotal or 0.0,
@@ -784,6 +892,21 @@ def generate_narrative(req: NarrativeRequest):
         estimation_data["warranty_months"] = req.warranty_months
     if req.warranty_cost:
         estimation_data["warranty_cost"] = req.warranty_cost
+    roi_inputs = {
+        "capex_event_cost_low": req.roi_capex_event_cost_low,
+        "capex_event_cost_high": req.roi_capex_event_cost_high,
+        "capex_event_interval_months": req.roi_capex_event_interval_months,
+        "downtime_cost_per_hour": req.roi_downtime_cost_per_hour,
+        "current_availability": req.roi_current_availability,
+        "target_availability": req.roi_target_availability,
+        "legacy_support_savings_annual": req.roi_legacy_support_savings_annual,
+    }
+    if any(v is not None for v in roi_inputs.values()):
+        estimation_data["roi_inputs"] = roi_inputs
+        estimation_data["roi_horizon_years"] = 5
+        roi_summary = _compute_roi_summary(roi_inputs, 5, float(result.total_cost or 0))
+        if roi_summary:
+            estimation_data["roi_summary"] = roi_summary
     if req.contract_url or req.contract_excerpt:
         estimation_data["contract_source"] = {
             "url": req.contract_url,
@@ -837,6 +960,19 @@ def rewrite_narrative_section(req: NarrativeSectionPrompt):
     if req.style_guide and not estimation_data.get("style_guide"):
         estimation_data["style_guide"] = req.style_guide
 
+    roi_inputs = estimation_data.get("roi_inputs")
+    if not roi_inputs:
+        roi_inputs = _extract_roi_inputs_from_estimation_input(estimation_data.get("estimation_input", {}) or {})
+    if roi_inputs and any(v is not None for v in roi_inputs.values()):
+        estimation_data["roi_inputs"] = roi_inputs
+        if not estimation_data.get("roi_horizon_years"):
+            estimation_data["roi_horizon_years"] = 5
+        if not estimation_data.get("roi_summary"):
+            total_cost = (estimation_data.get("estimation_result") or {}).get("total_cost") or 0
+            roi_summary = _compute_roi_summary(roi_inputs, int(estimation_data.get("roi_horizon_years") or 5), float(total_cost))
+            if roi_summary:
+                estimation_data["roi_summary"] = roi_summary
+
     # Derive a minimal input summary if the caller did not provide one
     input_summary = req.input_summary
     if input_summary is None:
@@ -888,6 +1024,8 @@ def rewrite_narrative_section(req: NarrativeSectionPrompt):
                 sites=est_input.get("sites") or 1,
                 overtime=bool(est_input.get("overtime")),
                 period_of_performance=est_input.get("period_of_performance"),
+                estimating_method=est_input.get("estimating_method") or "engineering",
+                historical_estimates=est_input.get("historical_estimates") or [],
                 odc_items=est_input.get("odc_items") or [],
                 fixed_price_items=est_input.get("fixed_price_items") or [],
                 hardware_subtotal=est_input.get("hardware_subtotal") or 0.0,
@@ -1122,6 +1260,8 @@ def generate_report(req: ReportRequest, include_ai: bool = False, tone: str = "p
         sites=req.sites,
         overtime=req.overtime,
         period_of_performance=req.period_of_performance,
+        estimating_method=req.estimating_method or "engineering",
+        historical_estimates=req.historical_estimates or [],
         odc_items=req.odc_items or [],
         fixed_price_items=req.fixed_price_items or [],
         hardware_subtotal=req.hardware_subtotal or 0.0,
@@ -1154,7 +1294,23 @@ def generate_report(req: ReportRequest, include_ai: bool = False, tone: str = "p
         "hardware_subtotal": req.hardware_subtotal or 0.0,
         "warranty_months": req.warranty_months or 0,
         "warranty_cost": req.warranty_cost or 0.0,
+        "raci_matrix": req.raci_matrix or [],
+        "roadmap_phases": req.roadmap_phases or [],
+        "roi_inputs": {
+            "capex_event_cost_low": req.roi_capex_event_cost_low,
+            "capex_event_cost_high": req.roi_capex_event_cost_high,
+            "capex_event_interval_months": req.roi_capex_event_interval_months,
+            "downtime_cost_per_hour": req.roi_downtime_cost_per_hour,
+            "current_availability": req.roi_current_availability,
+            "target_availability": req.roi_target_availability,
+            "legacy_support_savings_annual": req.roi_legacy_support_savings_annual,
+        },
+        "roi_horizon_years": 5,
+        "tool_version": req.tool_version,
     }
+    roi_summary = _compute_roi_summary(estimation_data.get("roi_inputs") or {}, 5, float(result.total_cost or 0))
+    if roi_summary:
+        estimation_data["roi_summary"] = roi_summary
     if req.contract_url or req.contract_excerpt:
         estimation_data["contract_source"] = {
             "url": req.contract_url,
@@ -1531,6 +1687,8 @@ def preview_subtasks(req: ReportRequest, tone: str = "professional", debug: bool
         sites=req.sites,
         overtime=req.overtime,
         period_of_performance=req.period_of_performance,
+        estimating_method=req.estimating_method or "engineering",
+        historical_estimates=req.historical_estimates or [],
         odc_items=req.odc_items or [],
         fixed_price_items=req.fixed_price_items or [],
         hardware_subtotal=req.hardware_subtotal or 0.0,

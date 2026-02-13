@@ -40,11 +40,31 @@ class CalculationService:
                 
                 total_labor_hours += role_hours
                 total_labor_cost += role_cost
+
+        base_effective_rate = total_labor_cost / total_labor_hours if total_labor_hours > 0 else 0
+        historical_adjustment = self._compute_historical_adjustment(
+            input_data,
+            base_total_hours=total_labor_hours,
+            base_effective_rate=base_effective_rate,
+        )
+        hours_multiplier = 1.0
+        rate_multiplier = 1.0
+        if historical_adjustment:
+            hours_multiplier = historical_adjustment.get("hours_multiplier", 1.0)
+            rate_multiplier = historical_adjustment.get("rate_multiplier", 1.0)
+            for role_id, data in role_breakdown.items():
+                scaled_hours = round(float(data.get("hours", 0) or 0) * hours_multiplier, 1)
+                scaled_rate = float(data.get("effective_rate", 0) or 0) * rate_multiplier
+                data["hours"] = scaled_hours
+                data["effective_rate"] = scaled_rate
+                data["cost"] = scaled_hours * scaled_rate
+            total_labor_hours = sum(float(r.get("hours", 0) or 0) for r in role_breakdown.values())
+            total_labor_cost = sum(float(r.get("cost", 0) or 0) for r in role_breakdown.values())
         
         # Calculate module breakdown
         module_breakdown = {}
         for module in modules:
-            module_hours = self._calculate_module_hours(module, input_data)
+            module_hours = self._calculate_module_hours(module, input_data) * hours_multiplier
             module_cost = sum(
                 role_breakdown.get(role_id, {}).get("cost", 0) 
                 for role_id in module.base_hours_by_role.keys()
@@ -59,7 +79,6 @@ class CalculationService:
             }
         
         # Apply business rules
-        risk_reserve = total_labor_cost * self.rules.risk_reserve_percentage
         overhead_cost = total_labor_cost * (self.rules.overhead_multiplier - 1)
 
         # Additional cost components
@@ -68,10 +87,28 @@ class CalculationService:
         hardware_subtotal = float(input_data.hardware_subtotal or 0)
         warranty_cost = float(input_data.warranty_cost or 0)
 
-        # Add prime contractor margin if applicable
-        subtotal = total_labor_cost + risk_reserve + overhead_cost + odc_total + fixed_price_total + hardware_subtotal + warranty_cost
+        # Management Reserve is targeted as a percentage of Total Contract Value (TCV).
+        subtotal_without_risk = (
+            total_labor_cost
+            + overhead_cost
+            + odc_total
+            + fixed_price_total
+            + hardware_subtotal
+            + warranty_cost
+        )
+        target_mr_pct = float(self.rules.risk_reserve_percentage or 0)
+        margin_rate = self.rules.prime_contractor_margin if input_data.is_prime_contractor else 0.0
+        risk_reserve = 0.0
+        if target_mr_pct > 0:
+            if margin_rate > 0:
+                denom = 1 - target_mr_pct * (1 + margin_rate)
+                risk_reserve = (target_mr_pct * (1 + margin_rate) * subtotal_without_risk) / denom if denom > 0 else 0.0
+            else:
+                risk_reserve = (target_mr_pct * subtotal_without_risk) / (1 - target_mr_pct)
+
+        subtotal = subtotal_without_risk + risk_reserve
         if input_data.is_prime_contractor:
-            margin = subtotal * self.rules.prime_contractor_margin
+            margin = subtotal * margin_rate
             total_cost = subtotal + margin
         else:
             total_cost = subtotal
@@ -126,6 +163,56 @@ class CalculationService:
             f"integration={input_data.integration_level}, "
             f"sites={max(1, int(input_data.sites or 1))}"
         )
+
+        baseline_total_hours = 0.0
+        baseline_total_cost = 0.0
+        for module in modules:
+            for role_id, base_hours in module.base_hours_by_role.items():
+                role = roles.get(role_id)
+                override = input_data.custom_role_overrides.get(role_id, 1.0)
+                role_hours = base_hours * multiplier * override
+                baseline_total_hours += role_hours
+                if role:
+                    baseline_total_cost += role_hours * self._calculate_effective_rate(role, input_data)
+
+        baseline_effective_rate = baseline_total_cost / baseline_total_hours if baseline_total_hours > 0 else 0
+        historical_adjustment = self._compute_historical_adjustment(
+            input_data,
+            base_total_hours=baseline_total_hours,
+            base_effective_rate=baseline_effective_rate,
+        )
+        hours_multiplier = historical_adjustment.get("hours_multiplier", 1.0) if historical_adjustment else 1.0
+
+        estimating_method = "Engineering Discrete"
+        estimate_basis = (
+            "Discrete engineering estimate using cataloged role hours; no isolated historicals. "
+            "SME judgment applied for similar classified programs where direct actuals are unavailable."
+        )
+        reasonableness = (
+            "Uses the same module catalog and multiplier logic as the cost "
+            "estimate to keep assumptions traceable and auditable."
+        )
+        if historical_adjustment:
+            count = historical_adjustment.get("count") or 0
+            names = historical_adjustment.get("names") or []
+            name_list = ", ".join(names[:3])
+            if len(names) > 3:
+                name_list = f"{name_list}, +{len(names) - 3} more"
+            avg_hours = historical_adjustment.get("avg_hours")
+            avg_rate = historical_adjustment.get("avg_rate")
+            estimating_method = f"Historical Actuals ({count} win{'s' if count != 1 else ''})"
+            estimate_bits = ["Historical actuals used to scale the engineering baseline"]
+            if avg_hours:
+                estimate_bits.append(f"avg {avg_hours:.0f} hours")
+            if avg_rate:
+                estimate_bits.append(f"avg rate ${avg_rate:,.2f}/hr")
+            if name_list:
+                estimate_bits.append(f"sources: {name_list}")
+            estimate_basis = "; ".join(estimate_bits) + "."
+            reasonableness = (
+                "Baseline scope comes from the module catalog; hours are scaled to match "
+                "documented historical actuals for comparable work."
+            )
 
         def _role_intro(tasks_list: List[Dict[str, Any]]) -> str:
             role_names: List[str] = []
@@ -197,11 +284,13 @@ class CalculationService:
                 ]
                 if override != 1.0:
                     calc_parts.append(f"x override {override:.2f}")
+                if abs(hours_multiplier - 1.0) > 0.01:
+                    calc_parts.append(f"x historical {hours_multiplier:.2f}")
                 tasks.append(
                     {
                         "title": f"{role.name if role else role_id} delivery",
                         "calculation": " ".join(calc_parts),
-                        "hours": round(role_hours, 1),
+                        "hours": round(role_hours * hours_multiplier, 1),
                     }
                 )
 
@@ -226,18 +315,12 @@ class CalculationService:
                     module.focus_area.value,
                     f"Delivery tasks for the {module.name} module.",
                 ),
-                "estimating_method": "Engineering Discrete",
-                "estimate_basis": (
-                    "Discrete engineering estimate using cataloged role hours; no isolated historicals. "
-                    "SME judgment applied for similar classified programs where direct actuals are unavailable."
-                ),
+                "estimating_method": estimating_method,
+                "estimate_basis": estimate_basis,
                 "period_of_performance": period_of_performance,
                 "tasks": tasks,
                 "total_hours": total_hours,
-                "reasonableness": (
-                    "Uses the same module catalog and multiplier logic as the cost "
-                    "estimate to keep assumptions traceable and auditable."
-                ),
+                "reasonableness": reasonableness,
                 "customer_context": _customer_context(module.focus_area.value, role_intro),
             }
 
@@ -282,6 +365,64 @@ class CalculationService:
 
         return subtasks
     
+    def _compute_historical_adjustment(
+        self,
+        input_data: EstimationInput,
+        base_total_hours: float,
+        base_effective_rate: float,
+    ) -> Optional[Dict[str, Any]]:
+        if (input_data.estimating_method or "").lower() != "historical":
+            return None
+        historicals = input_data.historical_estimates or []
+        selected = [h for h in historicals if h.get("selected", True)]
+        if not selected:
+            return None
+
+        def to_float(val: Any) -> Optional[float]:
+            try:
+                if val is None or val == "":
+                    return None
+                return float(val)
+            except Exception:
+                return None
+
+        hour_values: List[float] = []
+        rate_values: List[float] = []
+        names: List[str] = []
+
+        for idx, item in enumerate(selected, start=1):
+            name = str(item.get("name") or item.get("title") or item.get("id") or f"Historical Win {idx}")
+            hours = to_float(item.get("actual_hours") or item.get("total_hours"))
+            total_cost = to_float(item.get("actual_total_cost") or item.get("total_cost"))
+            effective_rate = to_float(item.get("effective_rate"))
+            if hours and hours > 0:
+                hour_values.append(hours)
+                if effective_rate and effective_rate > 0:
+                    rate_values.append(effective_rate)
+                elif total_cost and total_cost > 0:
+                    rate_values.append(total_cost / hours)
+                names.append(name)
+
+        if not hour_values or base_total_hours <= 0:
+            return None
+
+        avg_hours = sum(hour_values) / len(hour_values)
+        hours_multiplier = avg_hours / base_total_hours if base_total_hours > 0 else 1.0
+        rate_multiplier = 1.0
+        avg_rate = None
+        if rate_values and base_effective_rate > 0:
+            avg_rate = sum(rate_values) / len(rate_values)
+            rate_multiplier = avg_rate / base_effective_rate
+
+        return {
+            "hours_multiplier": hours_multiplier,
+            "rate_multiplier": rate_multiplier,
+            "avg_hours": avg_hours,
+            "avg_rate": avg_rate,
+            "count": len(hour_values),
+            "names": names,
+        }
+
     def _calculate_role_hours(self, role: Role, modules: List[Module], input_data: EstimationInput) -> float:
         """Calculate total hours for a specific role across all modules"""
         total_hours = 0

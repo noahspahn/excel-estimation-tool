@@ -70,7 +70,7 @@ class EstimationRules:
     min_project_hours: float = 40.0
     max_single_module_hours: float = 2000.0
     utilization_rate: float = 0.85
-    risk_reserve_percentage: float = 0.15
+    risk_reserve_percentage: float = 0.10
     overhead_multiplier: float = 1.2
     prime_contractor_margin: float = 0.15
 
@@ -102,6 +102,8 @@ class EstimationInput:
     sites: int = 1
     overtime: bool = False
     period_of_performance: Optional[str] = None
+    estimating_method: str = "engineering"
+    historical_estimates: List[Dict[str, Any]] = field(default_factory=list)
     # Other costs and fixed-price items (simple shape: {description, price})
     odc_items: List[Dict[str, Any]] = field(default_factory=list)
     fixed_price_items: List[Dict[str, Any]] = field(default_factory=list)

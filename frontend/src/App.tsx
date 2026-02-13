@@ -19,7 +19,35 @@ const IS_LOCALHOST =
 const DEV_STUB_EMAIL = (import.meta as any).env?.VITE_DEV_STUB_EMAIL || 'noahspahn@gmail.com'
 const AUTH_DISABLED = String((import.meta as any).env?.VITE_DISABLE_AUTH ?? 'true').toLowerCase() === 'true'
 
+const DEFAULT_RACI_ROWS = [
+  { milestone: 'SIT sign-off', responsible: '', accountable: '', consulted: '', informed: '' },
+  { milestone: 'UAT data validation', responsible: '', accountable: '', consulted: '', informed: '' },
+  { milestone: 'Security policy review', responsible: '', accountable: '', consulted: '', informed: '' },
+]
+
+const DEFAULT_ROADMAP_PHASES = [
+  {
+    phase: 'Phase 1',
+    title: 'Core modernization and stabilization',
+    timeline: '0-18 months',
+    description: 'Deliver the current scope modules as the foundational platform for modernization.',
+  },
+  {
+    phase: 'Phase 2',
+    title: 'Potential scalability',
+    timeline: '18-36 months',
+    description: 'Add future capabilities such as AI-driven predictive maintenance or automated compliance reporting.',
+  },
+  {
+    phase: 'Phase 3',
+    title: 'Long-term vision',
+    timeline: '3-5 years',
+    description: 'Enable secure, citizen-facing services leveraging the Phase 1 API and modular architecture.',
+  },
+]
+
 function App() {
+  const appVersion = typeof __APP_VERSION__ !== 'undefined' ? __APP_VERSION__ : ''
   const [backendStatus, setBackendStatus] = useState('Checking...')
   const [modules, setModules] = useState<any[]>([])
   const [selectedModules, setSelectedModules] = useState<string[]>([])
@@ -65,7 +93,7 @@ function App() {
   const shouldEnforceAuth = !AUTH_DISABLED && !IS_LOCALHOST
 
   // Simple scraping test state
-  const [scrapeUrl, setScrapeUrl] = useState('https://sam.gov/workspace/contract/opp/4cac3a6c4d3f4cb89fde31910c8fe414/view')
+  const [scrapeUrl, setScrapeUrl] = useState('https://docs.google.com/document/d/1uGMj74V3aCBx9IgOiVzWk6MzN713lkDDnFSrzjKFl0w/edit?tab=t.0#heading=h.345z0enrcnzu')
   const [scrapeLoading, setScrapeLoading] = useState(false)
   const [scrapeError, setScrapeError] = useState<string | null>(null)
   const [scrapeResult, setScrapeResult] = useState<{
@@ -98,6 +126,17 @@ function App() {
   const [sites, setSites] = useState<number>(1)
   const [overtime, setOvertime] = useState<boolean>(false)
   const [periodOfPerformance, setPeriodOfPerformance] = useState('')
+  const [estimatingMethod, setEstimatingMethod] = useState<'engineering' | 'historical'>('engineering')
+  const [historicalEstimates, setHistoricalEstimates] = useState<{ name: string; actual_hours: string; actual_total_cost: string; selected: boolean }[]>([])
+  const [raciMatrix, setRaciMatrix] = useState(() => DEFAULT_RACI_ROWS.map((row) => ({ ...row })))
+  const [roadmapPhases, setRoadmapPhases] = useState(() => DEFAULT_ROADMAP_PHASES.map((row) => ({ ...row })))
+  const [roiCapexLow, setRoiCapexLow] = useState('')
+  const [roiCapexHigh, setRoiCapexHigh] = useState('')
+  const [roiCapexIntervalMonths, setRoiCapexIntervalMonths] = useState('')
+  const [roiDowntimeCostPerHour, setRoiDowntimeCostPerHour] = useState('')
+  const [roiCurrentAvailability, setRoiCurrentAvailability] = useState('')
+  const [roiTargetAvailability, setRoiTargetAvailability] = useState('')
+  const [roiLegacySupportAnnual, setRoiLegacySupportAnnual] = useState('')
   const [odcItems, setOdcItems] = useState<{ description: string; price: number }[]>([])
   const [fixedPriceItems, setFixedPriceItems] = useState<{ description: string; price: number }[]>([])
   const [hardwareSubtotal, setHardwareSubtotal] = useState<number>(0)
@@ -161,6 +200,21 @@ function App() {
           setSites(ei.sites || 1)
           setOvertime(!!ei.overtime)
           setPeriodOfPerformance(ei.period_of_performance || '')
+          setEstimatingMethod((ei.estimating_method as any) || 'engineering')
+          setHistoricalEstimates(normalizeHistoricalEstimates(ei.historical_estimates))
+          setRaciMatrix(Array.isArray(ei.raci_matrix) && ei.raci_matrix.length
+            ? ei.raci_matrix
+            : DEFAULT_RACI_ROWS.map((row) => ({ ...row })))
+          setRoadmapPhases(Array.isArray(ei.roadmap_phases) && ei.roadmap_phases.length
+            ? ei.roadmap_phases
+            : DEFAULT_ROADMAP_PHASES.map((row) => ({ ...row })))
+          setRoiCapexLow(ei.roi_capex_event_cost_low != null ? String(ei.roi_capex_event_cost_low) : '')
+          setRoiCapexHigh(ei.roi_capex_event_cost_high != null ? String(ei.roi_capex_event_cost_high) : '')
+          setRoiCapexIntervalMonths(ei.roi_capex_event_interval_months != null ? String(ei.roi_capex_event_interval_months) : '')
+          setRoiDowntimeCostPerHour(ei.roi_downtime_cost_per_hour != null ? String(ei.roi_downtime_cost_per_hour) : '')
+          setRoiCurrentAvailability(ei.roi_current_availability != null ? String(ei.roi_current_availability) : '')
+          setRoiTargetAvailability(ei.roi_target_availability != null ? String(ei.roi_target_availability) : '')
+          setRoiLegacySupportAnnual(ei.roi_legacy_support_savings_annual != null ? String(ei.roi_legacy_support_savings_annual) : '')
           setOdcItems(ei.odc_items || [])
           setFixedPriceItems(ei.fixed_price_items || [])
           setHardwareSubtotal(ei.hardware_subtotal || 0)
@@ -423,6 +477,11 @@ function App() {
       extractByPatterns([
         /Request for Proposal\s*\(RFP\)\s*-\s*([^\n]+)/i,
         /RFP\s*-\s*([^\n]+)/i,
+        /Opportunity Title\s*[:\-]\s*([^\n]+)/i,
+        /Solicitation Title\s*[:\-]\s*([^\n]+)/i,
+        /Notice Title\s*[:\-]\s*([^\n]+)/i,
+        /Title\s*[:\-]\s*([^\n]+)/i,
+        /Subject\s*[:\-]\s*([^\n]+)/i,
       ]) ||
       extractAfterLabel(/^(title|solicitation title|notice title|opportunity title)\s*[:\-]/i) ||
       ''
@@ -435,6 +494,7 @@ function App() {
       extractByPatterns([
         /Site Location\s*[:\-]\s*([^\n]+)/i,
         /Place of Performance\s*[:\-]\s*([^\n]+)/i,
+        /Primary Place of Performance\s*[:\-]\s*([^\n]+)/i,
         /Location\s*[:\-]\s*([^\n]+)/i,
       ]) ||
       extractAfterLabel(/^(place of performance|location|site location|place of delivery)\s*[:\-]/i) ||
@@ -445,6 +505,10 @@ function App() {
         /Procurement Officer,?\s*([A-Za-z .'-]+)/i,
         /Point of Contact\s*[:\-]\s*([^\n]+)/i,
         /Contracting Officer\s*[:\-]\s*([^\n]+)/i,
+        /Primary POC\s*[:\-]\s*([^\n]+)/i,
+        /Primary Contact\s*[:\-]\s*([^\n]+)/i,
+        /Contract Specialist\s*[:\-]\s*([^\n]+)/i,
+        /\bCOR\b\s*[:\-]\s*([^\n]+)/i,
       ]) ||
       extractAfterLabel(/^(point of contact|poc|contracting officer|contact name)\s*[:\-]/i) ||
       ''
@@ -455,7 +519,14 @@ function App() {
     const serviceDeliveryExec =
       extractByPatterns([/Service Delivery Executive\s*[:\-]\s*([^\n]+)/i]) || ''
     const rapNumber =
-      extractByPatterns([/RAP\s*#?\s*[:\-]\s*([A-Za-z0-9-]+)/i]) || ''
+      extractByPatterns([
+        /RAP\s*#?\s*[:\-]\s*([A-Za-z0-9-]+)/i,
+        /Solicitation Number\s*[:\-]\s*([A-Za-z0-9-]+)/i,
+        /Solicitation\s*#\s*[:\-]?\s*([A-Za-z0-9-]+)/i,
+        /Solicitation ID\s*[:\-]\s*([A-Za-z0-9-]+)/i,
+        /Notice ID\s*[:\-]\s*([A-Za-z0-9-]+)/i,
+        /Opportunity ID\s*[:\-]\s*([A-Za-z0-9-]+)/i,
+      ]) || ''
     const psiCode =
       extractByPatterns([/PSI\s*Code\s*[:\-]\s*([A-Za-z0-9-]+)/i]) || ''
 
@@ -798,11 +869,23 @@ function App() {
           sites,
           overtime,
           period_of_performance: periodOfPerformance,
+          estimating_method: estimatingMethod,
+          historical_estimates: serializeHistoricalEstimates(),
+          raci_matrix: raciMatrix,
+          roadmap_phases: roadmapPhases,
           odc_items: odcItems,
           fixed_price_items: fixedPriceItems,
           hardware_subtotal: hardwareSubtotal,
           warranty_months: warrantyMonths,
           warranty_cost: warrantyCost,
+          roi_capex_event_cost_low: asNumber(roiCapexLow),
+          roi_capex_event_cost_high: asNumber(roiCapexHigh),
+          roi_capex_event_interval_months: asNumber(roiCapexIntervalMonths),
+          roi_downtime_cost_per_hour: asNumber(roiDowntimeCostPerHour),
+          roi_current_availability: asNumber(roiCurrentAvailability),
+          roi_target_availability: asNumber(roiTargetAvailability),
+          roi_legacy_support_savings_annual: asNumber(roiLegacySupportAnnual),
+          tool_version: appVersion || undefined,
           proposal_id: proposalId || undefined,
           proposal_version: versions?.length ? versions[versions.length - 1]?.version : undefined,
           use_ai_subtasks: includeAI,
@@ -874,16 +957,27 @@ function App() {
           sites,
           overtime,
           period_of_performance: periodOfPerformance || undefined,
+          estimating_method: estimatingMethod,
+          historical_estimates: serializeHistoricalEstimates(),
+          raci_matrix: raciMatrix,
+          roadmap_phases: roadmapPhases,
           odc_items: odcItems,
           fixed_price_items: fixedPriceItems,
           hardware_subtotal: hardwareSubtotal,
           warranty_months: warrantyMonths,
           warranty_cost: warrantyCost,
+          roi_capex_event_cost_low: asNumber(roiCapexLow),
+          roi_capex_event_cost_high: asNumber(roiCapexHigh),
+          roi_capex_event_interval_months: asNumber(roiCapexIntervalMonths),
+          roi_downtime_cost_per_hour: asNumber(roiDowntimeCostPerHour),
+          roi_current_availability: asNumber(roiCurrentAvailability),
+          roi_target_availability: asNumber(roiTargetAvailability),
+          roi_legacy_support_savings_annual: asNumber(roiLegacySupportAnnual),
           contract_url: contractUrl,
           contract_excerpt: contractExcerpt,
           style_guide: styleGuide || undefined,
           tone,
-          sections: ['executive_summary','assumptions','risks','recommendations']
+          sections: ['executive_summary','assumptions','risks']
         })
       })
       if (!res.ok) {
@@ -946,11 +1040,22 @@ function App() {
             sites,
             overtime,
             period_of_performance: periodOfPerformance,
+            estimating_method: estimatingMethod,
+            historical_estimates: serializeHistoricalEstimates(),
+            raci_matrix: raciMatrix,
+            roadmap_phases: roadmapPhases,
             odc_items: odcItems,
             fixed_price_items: fixedPriceItems,
             hardware_subtotal: hardwareSubtotal,
             warranty_months: warrantyMonths,
             warranty_cost: warrantyCost,
+            roi_capex_event_cost_low: asNumber(roiCapexLow),
+            roi_capex_event_cost_high: asNumber(roiCapexHigh),
+            roi_capex_event_interval_months: asNumber(roiCapexIntervalMonths),
+            roi_downtime_cost_per_hour: asNumber(roiDowntimeCostPerHour),
+            roi_current_availability: asNumber(roiCurrentAvailability),
+            roi_target_availability: asNumber(roiTargetAvailability),
+            roi_legacy_support_savings_annual: asNumber(roiLegacySupportAnnual),
           })
         })
         if (!estRes.ok) throw new Error('Failed to calculate estimate')
@@ -987,11 +1092,22 @@ function App() {
         sites,
         overtime,
         period_of_performance: periodOfPerformance,
+        estimating_method: estimatingMethod,
+        historical_estimates: serializeHistoricalEstimates(),
+        raci_matrix: raciMatrix,
+        roadmap_phases: roadmapPhases,
         odc_items: odcItems,
         fixed_price_items: fixedPriceItems,
         hardware_subtotal: hardwareSubtotal,
         warranty_months: warrantyMonths,
         warranty_cost: warrantyCost,
+        roi_capex_event_cost_low: asNumber(roiCapexLow),
+        roi_capex_event_cost_high: asNumber(roiCapexHigh),
+        roi_capex_event_interval_months: asNumber(roiCapexIntervalMonths),
+        roi_downtime_cost_per_hour: asNumber(roiDowntimeCostPerHour),
+        roi_current_availability: asNumber(roiCurrentAvailability),
+        roi_target_availability: asNumber(roiTargetAvailability),
+        roi_legacy_support_savings_annual: asNumber(roiLegacySupportAnnual),
       }
       const estimationData: any = {
         estimation_result: estimationResult || {},
@@ -1017,6 +1133,18 @@ function App() {
         hardware_subtotal: hardwareSubtotal,
         warranty_months: warrantyMonths,
         warranty_cost: warrantyCost,
+        roi_inputs: {
+          capex_event_cost_low: asNumber(roiCapexLow),
+          capex_event_cost_high: asNumber(roiCapexHigh),
+          capex_event_interval_months: asNumber(roiCapexIntervalMonths),
+          downtime_cost_per_hour: asNumber(roiDowntimeCostPerHour),
+          current_availability: asNumber(roiCurrentAvailability),
+          target_availability: asNumber(roiTargetAvailability),
+          legacy_support_savings_annual: asNumber(roiLegacySupportAnnual),
+        },
+        roi_horizon_years: 5,
+        raci_matrix: raciMatrix,
+        roadmap_phases: roadmapPhases,
         narrative_sections: editableNarrative,
       }
       if (contractUrl || contractExcerpt) {
@@ -1100,11 +1228,22 @@ function App() {
           sites,
           overtime,
           period_of_performance: periodOfPerformance || undefined,
+          estimating_method: estimatingMethod,
+          historical_estimates: serializeHistoricalEstimates(),
+          raci_matrix: raciMatrix,
+          roadmap_phases: roadmapPhases,
           odc_items: odcItems,
           fixed_price_items: fixedPriceItems,
           hardware_subtotal: hardwareSubtotal,
           warranty_months: warrantyMonths,
           warranty_cost: warrantyCost,
+          roi_capex_event_cost_low: asNumber(roiCapexLow),
+          roi_capex_event_cost_high: asNumber(roiCapexHigh),
+          roi_capex_event_interval_months: asNumber(roiCapexIntervalMonths),
+          roi_downtime_cost_per_hour: asNumber(roiDowntimeCostPerHour),
+          roi_current_availability: asNumber(roiCurrentAvailability),
+          roi_target_availability: asNumber(roiTargetAvailability),
+          roi_legacy_support_savings_annual: asNumber(roiLegacySupportAnnual),
           contract_url: contractUrl,
           contract_excerpt: contractExcerpt,
           use_ai_subtasks: includeAI,
@@ -1128,6 +1267,70 @@ function App() {
       setSubtaskLoading(false)
     }
   }
+
+  const updateRaciRow = (idx: number, patch: Record<string, string>) => {
+    setRaciMatrix((prev) => prev.map((row, i) => (i === idx ? { ...row, ...patch } : row)))
+  }
+
+  const addRaciRow = () => {
+    setRaciMatrix((prev) => [
+      ...prev,
+      { milestone: '', responsible: '', accountable: '', consulted: '', informed: '' },
+    ])
+  }
+
+  const removeRaciRow = (idx: number) => {
+    setRaciMatrix((prev) => prev.filter((_, i) => i !== idx))
+  }
+
+  const updateRoadmapPhase = (idx: number, patch: Record<string, string>) => {
+    setRoadmapPhases((prev) => prev.map((row, i) => (i === idx ? { ...row, ...patch } : row)))
+  }
+
+  const updateHistoricalEstimate = (idx: number, patch: Record<string, any>) => {
+    setHistoricalEstimates((prev) => prev.map((row, i) => (i === idx ? { ...row, ...patch } : row)))
+  }
+
+  const addHistoricalEstimate = () => {
+    setHistoricalEstimates((prev) => ([
+      ...prev,
+      { name: '', actual_hours: '', actual_total_cost: '', selected: true },
+    ]))
+  }
+
+  const removeHistoricalEstimate = (idx: number) => {
+    setHistoricalEstimates((prev) => prev.filter((_, i) => i !== idx))
+  }
+
+  const countWords = (s: string) => (s || '').trim().split(/\s+/).filter(Boolean).length
+  const asNumber = (value: string) => {
+    const trimmed = (value || '').trim()
+    if (!trimmed) return undefined
+    const num = Number(trimmed)
+    return Number.isFinite(num) ? num : undefined
+  }
+  const serializeHistoricalEstimates = (items = historicalEstimates) => (
+    items.map((item) => ({
+      name: item.name,
+      actual_hours: asNumber(item.actual_hours),
+      actual_total_cost: asNumber(item.actual_total_cost),
+      selected: item.selected,
+    }))
+  )
+  const normalizeHistoricalEstimates = (items: any) => (
+    Array.isArray(items)
+      ? items.map((item) => ({
+          name: item?.name || '',
+          actual_hours: item?.actual_hours != null
+            ? String(item.actual_hours)
+            : (item?.total_hours != null ? String(item.total_hours) : ''),
+          actual_total_cost: item?.actual_total_cost != null
+            ? String(item.actual_total_cost)
+            : (item?.total_cost != null ? String(item.total_cost) : ''),
+          selected: item?.selected !== false,
+        }))
+      : []
+  )
 
   // Draft helpers
   const buildDraft = () => ({
@@ -1157,11 +1360,22 @@ function App() {
       sites,
       overtime,
       period_of_performance: periodOfPerformance,
+      estimating_method: estimatingMethod,
+      historical_estimates: serializeHistoricalEstimates(),
+      raci_matrix: raciMatrix,
+      roadmap_phases: roadmapPhases,
       odc_items: odcItems,
       fixed_price_items: fixedPriceItems,
       hardware_subtotal: hardwareSubtotal,
       warranty_months: warrantyMonths,
       warranty_cost: warrantyCost,
+      roi_capex_event_cost_low: asNumber(roiCapexLow),
+      roi_capex_event_cost_high: asNumber(roiCapexHigh),
+      roi_capex_event_interval_months: asNumber(roiCapexIntervalMonths),
+      roi_downtime_cost_per_hour: asNumber(roiDowntimeCostPerHour),
+      roi_current_availability: asNumber(roiCurrentAvailability),
+      roi_target_availability: asNumber(roiTargetAvailability),
+      roi_legacy_support_savings_annual: asNumber(roiLegacySupportAnnual),
     },
     narrative_sections: editableNarrative,
     estimation_result: estimate,
@@ -1201,6 +1415,21 @@ function App() {
       setSites(ei.sites || 1)
       setOvertime(!!ei.overtime)
       setPeriodOfPerformance(ei.period_of_performance || '')
+      setEstimatingMethod((ei.estimating_method as any) || 'engineering')
+      setHistoricalEstimates(normalizeHistoricalEstimates(ei.historical_estimates))
+      setRaciMatrix(Array.isArray(ei.raci_matrix) && ei.raci_matrix.length
+        ? ei.raci_matrix
+        : DEFAULT_RACI_ROWS.map((row) => ({ ...row })))
+      setRoadmapPhases(Array.isArray(ei.roadmap_phases) && ei.roadmap_phases.length
+        ? ei.roadmap_phases
+        : DEFAULT_ROADMAP_PHASES.map((row) => ({ ...row })))
+      setRoiCapexLow(ei.roi_capex_event_cost_low != null ? String(ei.roi_capex_event_cost_low) : '')
+      setRoiCapexHigh(ei.roi_capex_event_cost_high != null ? String(ei.roi_capex_event_cost_high) : '')
+      setRoiCapexIntervalMonths(ei.roi_capex_event_interval_months != null ? String(ei.roi_capex_event_interval_months) : '')
+      setRoiDowntimeCostPerHour(ei.roi_downtime_cost_per_hour != null ? String(ei.roi_downtime_cost_per_hour) : '')
+      setRoiCurrentAvailability(ei.roi_current_availability != null ? String(ei.roi_current_availability) : '')
+      setRoiTargetAvailability(ei.roi_target_availability != null ? String(ei.roi_target_availability) : '')
+      setRoiLegacySupportAnnual(ei.roi_legacy_support_savings_annual != null ? String(ei.roi_legacy_support_savings_annual) : '')
       setOdcItems(ei.odc_items || [])
       setFixedPriceItems(ei.fixed_price_items || [])
       setHardwareSubtotal(ei.hardware_subtotal || 0)
@@ -1257,6 +1486,21 @@ function App() {
         setSites(ei.sites || 1)
         setOvertime(!!ei.overtime)
         setPeriodOfPerformance(ei.period_of_performance || '')
+        setEstimatingMethod((ei.estimating_method as any) || 'engineering')
+        setHistoricalEstimates(normalizeHistoricalEstimates(ei.historical_estimates))
+        setRaciMatrix(Array.isArray(ei.raci_matrix) && ei.raci_matrix.length
+          ? ei.raci_matrix
+          : DEFAULT_RACI_ROWS.map((row) => ({ ...row })))
+        setRoadmapPhases(Array.isArray(ei.roadmap_phases) && ei.roadmap_phases.length
+          ? ei.roadmap_phases
+          : DEFAULT_ROADMAP_PHASES.map((row) => ({ ...row })))
+        setRoiCapexLow(ei.roi_capex_event_cost_low != null ? String(ei.roi_capex_event_cost_low) : '')
+        setRoiCapexHigh(ei.roi_capex_event_cost_high != null ? String(ei.roi_capex_event_cost_high) : '')
+        setRoiCapexIntervalMonths(ei.roi_capex_event_interval_months != null ? String(ei.roi_capex_event_interval_months) : '')
+        setRoiDowntimeCostPerHour(ei.roi_downtime_cost_per_hour != null ? String(ei.roi_downtime_cost_per_hour) : '')
+        setRoiCurrentAvailability(ei.roi_current_availability != null ? String(ei.roi_current_availability) : '')
+        setRoiTargetAvailability(ei.roi_target_availability != null ? String(ei.roi_target_availability) : '')
+        setRoiLegacySupportAnnual(ei.roi_legacy_support_savings_annual != null ? String(ei.roi_legacy_support_savings_annual) : '')
         setOdcItems(ei.odc_items || [])
         setFixedPriceItems(ei.fixed_price_items || [])
         setHardwareSubtotal(ei.hardware_subtotal || 0)
@@ -1310,9 +1554,6 @@ function App() {
       alert(e?.message || 'Failed to create share link')
     }
   }
-
-  // Helpers
-  const countWords = (s: string) => (s || '').trim().split(/\s+/).filter(Boolean).length
 
   const saveVersion = async () => {
     if (!proposalId) { alert('Create a share link first to initialize the proposal.'); return }
@@ -1375,6 +1616,21 @@ function App() {
     setSites(ei.sites || 1)
     setOvertime(!!ei.overtime)
     setPeriodOfPerformance(ei.period_of_performance || '')
+    setEstimatingMethod((ei.estimating_method as any) || 'engineering')
+    setHistoricalEstimates(normalizeHistoricalEstimates(ei.historical_estimates))
+    setRaciMatrix(Array.isArray(ei.raci_matrix) && ei.raci_matrix.length
+      ? ei.raci_matrix
+      : DEFAULT_RACI_ROWS.map((row) => ({ ...row })))
+    setRoadmapPhases(Array.isArray(ei.roadmap_phases) && ei.roadmap_phases.length
+      ? ei.roadmap_phases
+      : DEFAULT_ROADMAP_PHASES.map((row) => ({ ...row })))
+    setRoiCapexLow(ei.roi_capex_event_cost_low != null ? String(ei.roi_capex_event_cost_low) : '')
+    setRoiCapexHigh(ei.roi_capex_event_cost_high != null ? String(ei.roi_capex_event_cost_high) : '')
+    setRoiCapexIntervalMonths(ei.roi_capex_event_interval_months != null ? String(ei.roi_capex_event_interval_months) : '')
+    setRoiDowntimeCostPerHour(ei.roi_downtime_cost_per_hour != null ? String(ei.roi_downtime_cost_per_hour) : '')
+    setRoiCurrentAvailability(ei.roi_current_availability != null ? String(ei.roi_current_availability) : '')
+    setRoiTargetAvailability(ei.roi_target_availability != null ? String(ei.roi_target_availability) : '')
+    setRoiLegacySupportAnnual(ei.roi_legacy_support_savings_annual != null ? String(ei.roi_legacy_support_savings_annual) : '')
     setOdcItems(ei.odc_items || [])
     setFixedPriceItems(ei.fixed_price_items || [])
     setHardwareSubtotal(ei.hardware_subtotal || 0)
@@ -1441,11 +1697,22 @@ function App() {
           sites,
           overtime,
           period_of_performance: periodOfPerformance,
+          estimating_method: estimatingMethod,
+          historical_estimates: serializeHistoricalEstimates(),
+          raci_matrix: raciMatrix,
+          roadmap_phases: roadmapPhases,
           odc_items: odcItems,
           fixed_price_items: fixedPriceItems,
           hardware_subtotal: hardwareSubtotal,
           warranty_months: warrantyMonths,
           warranty_cost: warrantyCost,
+          roi_capex_event_cost_low: asNumber(roiCapexLow),
+          roi_capex_event_cost_high: asNumber(roiCapexHigh),
+          roi_capex_event_interval_months: asNumber(roiCapexIntervalMonths),
+          roi_downtime_cost_per_hour: asNumber(roiDowntimeCostPerHour),
+          roi_current_availability: asNumber(roiCurrentAvailability),
+          roi_target_availability: asNumber(roiTargetAvailability),
+          roi_legacy_support_savings_annual: asNumber(roiLegacySupportAnnual),
         })
       })
       if (!estRes.ok) throw new Error('Failed to calculate estimate')
@@ -1485,16 +1752,27 @@ function App() {
             sites,
             overtime,
             period_of_performance: periodOfPerformance,
+            estimating_method: estimatingMethod,
+            historical_estimates: serializeHistoricalEstimates(),
+            raci_matrix: raciMatrix,
+            roadmap_phases: roadmapPhases,
             odc_items: odcItems,
             fixed_price_items: fixedPriceItems,
             hardware_subtotal: hardwareSubtotal,
             warranty_months: warrantyMonths,
             warranty_cost: warrantyCost,
+            roi_capex_event_cost_low: asNumber(roiCapexLow),
+            roi_capex_event_cost_high: asNumber(roiCapexHigh),
+            roi_capex_event_interval_months: asNumber(roiCapexIntervalMonths),
+            roi_downtime_cost_per_hour: asNumber(roiDowntimeCostPerHour),
+            roi_current_availability: asNumber(roiCurrentAvailability),
+            roi_target_availability: asNumber(roiTargetAvailability),
+            roi_legacy_support_savings_annual: asNumber(roiLegacySupportAnnual),
             contract_url: contractUrl,
             contract_excerpt: contractExcerpt,
             style_guide: styleGuide || undefined,
             tone,
-            sections: ['executive_summary','assumptions','risks','recommendations']
+            sections: ['executive_summary','assumptions','risks']
           })
         })
         const payload = nRes.ok ? await nRes.json() : { narrative: {} }
@@ -1506,8 +1784,7 @@ function App() {
         const base: Record<string, string> = {
           executive_summary: '',
           assumptions: '',
-          risks: '',
-          recommendations: ''
+          risks: ''
         }
         setNarrative(base)
         setEditableNarrative(base)
@@ -1556,6 +1833,17 @@ function App() {
     setSites(1)
     setOvertime(false)
     setPeriodOfPerformance('')
+    setEstimatingMethod('engineering')
+    setHistoricalEstimates([])
+    setRaciMatrix(DEFAULT_RACI_ROWS.map((row) => ({ ...row })))
+    setRoadmapPhases(DEFAULT_ROADMAP_PHASES.map((row) => ({ ...row })))
+    setRoiCapexLow('')
+    setRoiCapexHigh('')
+    setRoiCapexIntervalMonths('')
+    setRoiDowntimeCostPerHour('')
+    setRoiCurrentAvailability('')
+    setRoiTargetAvailability('')
+    setRoiLegacySupportAnnual('')
     setOdcItems([])
     setFixedPriceItems([])
     setHardwareSubtotal(0)
@@ -1916,6 +2204,152 @@ function App() {
         </div>
       </div>
 
+      <h2 style={{ marginTop: 24 }}>Value & ROI Inputs</h2>
+      <div style={{ fontSize: 12, color: '#666', marginBottom: 6 }}>
+        Used to calculate the 5-year net fiscal benefit summary in the report.
+      </div>
+      <div className="form-grid">
+        <label>Emergency CapEx Event Cost (Low)
+          <input type="number" value={roiCapexLow} onChange={(e) => setRoiCapexLow(e.target.value)} style={{ width: '100%' }} disabled={readOnly} placeholder="150000" />
+        </label>
+        <label>Emergency CapEx Event Cost (High)
+          <input type="number" value={roiCapexHigh} onChange={(e) => setRoiCapexHigh(e.target.value)} style={{ width: '100%' }} disabled={readOnly} placeholder="250000" />
+        </label>
+        <label>CapEx Event Interval (Months)
+          <input type="number" value={roiCapexIntervalMonths} onChange={(e) => setRoiCapexIntervalMonths(e.target.value)} style={{ width: '100%' }} disabled={readOnly} placeholder="18" />
+        </label>
+        <label>Downtime Cost per Hour
+          <input type="number" value={roiDowntimeCostPerHour} onChange={(e) => setRoiDowntimeCostPerHour(e.target.value)} style={{ width: '100%' }} disabled={readOnly} placeholder="5000" />
+        </label>
+        <label>Current Availability (%)
+          <input type="number" value={roiCurrentAvailability} onChange={(e) => setRoiCurrentAvailability(e.target.value)} style={{ width: '100%' }} disabled={readOnly} placeholder="99.5" />
+        </label>
+        <label>Target Availability (%)
+          <input type="number" value={roiTargetAvailability} onChange={(e) => setRoiTargetAvailability(e.target.value)} style={{ width: '100%' }} disabled={readOnly} placeholder="99.99" />
+        </label>
+        <label>Legacy Support Savings (Annual)
+          <input type="number" value={roiLegacySupportAnnual} onChange={(e) => setRoiLegacySupportAnnual(e.target.value)} style={{ width: '100%' }} disabled={readOnly} placeholder="75000" />
+        </label>
+      </div>
+
+      <h2 style={{ marginTop: 24 }}>Roles & Responsibilities (RACI)</h2>
+      <div style={{ fontSize: 12, color: '#666', marginBottom: 6 }}>
+        This appendix will be included in the report and should be treated as a binding contract artifact.
+      </div>
+      <div style={{ overflowX: 'auto' }}>
+        <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+          <thead>
+            <tr>
+              <th style={{ textAlign: 'left', borderBottom: '1px solid #ccc', padding: 6 }}>Milestone</th>
+              <th style={{ textAlign: 'left', borderBottom: '1px solid #ccc', padding: 6 }}>Responsible</th>
+              <th style={{ textAlign: 'left', borderBottom: '1px solid #ccc', padding: 6 }}>Accountable</th>
+              <th style={{ textAlign: 'left', borderBottom: '1px solid #ccc', padding: 6 }}>Consulted</th>
+              <th style={{ textAlign: 'left', borderBottom: '1px solid #ccc', padding: 6 }}>Informed</th>
+              {!readOnly && <th style={{ width: 1 }} />}
+            </tr>
+          </thead>
+          <tbody>
+            {raciMatrix.map((row, idx) => (
+              <tr key={idx}>
+                <td style={{ padding: 6 }}>
+                  <input
+                    value={row.milestone || ''}
+                    onChange={(e) => updateRaciRow(idx, { milestone: e.target.value })}
+                    disabled={readOnly}
+                    style={{ width: '100%' }}
+                  />
+                </td>
+                <td style={{ padding: 6 }}>
+                  <input
+                    value={row.responsible || ''}
+                    onChange={(e) => updateRaciRow(idx, { responsible: e.target.value })}
+                    disabled={readOnly}
+                    style={{ width: '100%' }}
+                  />
+                </td>
+                <td style={{ padding: 6 }}>
+                  <input
+                    value={row.accountable || ''}
+                    onChange={(e) => updateRaciRow(idx, { accountable: e.target.value })}
+                    disabled={readOnly}
+                    style={{ width: '100%' }}
+                  />
+                </td>
+                <td style={{ padding: 6 }}>
+                  <input
+                    value={row.consulted || ''}
+                    onChange={(e) => updateRaciRow(idx, { consulted: e.target.value })}
+                    disabled={readOnly}
+                    style={{ width: '100%' }}
+                  />
+                </td>
+                <td style={{ padding: 6 }}>
+                  <input
+                    value={row.informed || ''}
+                    onChange={(e) => updateRaciRow(idx, { informed: e.target.value })}
+                    disabled={readOnly}
+                    style={{ width: '100%' }}
+                  />
+                </td>
+                {!readOnly && (
+                  <td style={{ padding: 6 }}>
+                    <button className="btn" onClick={() => removeRaciRow(idx)}>Remove</button>
+                  </td>
+                )}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      {!readOnly && (
+        <button className="btn" style={{ marginTop: 8 }} onClick={addRaciRow}>
+          Add RACI Row
+        </button>
+      )}
+
+      <h2 style={{ marginTop: 24 }}>Future-Proofing Roadmap</h2>
+      <div style={{ fontSize: 12, color: '#666', marginBottom: 6 }}>
+        Define phased implementation aligned to the 5-10 year strategy.
+      </div>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+        {roadmapPhases.map((phase, idx) => (
+          <div key={idx} style={{ border: '1px solid #eee', borderRadius: 8, padding: 10, background: '#fafafa' }}>
+            <div style={{ display: 'grid', gap: 8, gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))' }}>
+              <label>Phase
+                <input
+                  value={phase.phase || ''}
+                  onChange={(e) => updateRoadmapPhase(idx, { phase: e.target.value })}
+                  disabled={readOnly}
+                />
+              </label>
+              <label>Timeline
+                <input
+                  value={phase.timeline || ''}
+                  onChange={(e) => updateRoadmapPhase(idx, { timeline: e.target.value })}
+                  disabled={readOnly}
+                />
+              </label>
+              <label>Title
+                <input
+                  value={phase.title || ''}
+                  onChange={(e) => updateRoadmapPhase(idx, { title: e.target.value })}
+                  disabled={readOnly}
+                />
+              </label>
+            </div>
+            <label style={{ marginTop: 8, display: 'block' }}>Description
+              <textarea
+                value={phase.description || ''}
+                onChange={(e) => updateRoadmapPhase(idx, { description: e.target.value })}
+                disabled={readOnly}
+                rows={2}
+                style={{ width: '100%' }}
+              />
+            </label>
+          </div>
+        ))}
+      </div>
+
       <h2 style={{ marginTop: 24 }}>Scope Options</h2>
       <div className="form-grid">
         <label>Number of Sites
@@ -1929,6 +2363,85 @@ function App() {
           Overtime Required
         </label>
       </div>
+
+      <h2 style={{ marginTop: 24 }}>Subtask Estimating Method</h2>
+      <div style={{ display: 'flex', gap: 16, alignItems: 'center', flexWrap: 'wrap' }}>
+        <label style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+          <input
+            type="radio"
+            name="estimating-method"
+            checked={estimatingMethod === 'engineering'}
+            onChange={() => setEstimatingMethod('engineering')}
+            disabled={readOnly}
+          />
+          Engineering Discrete
+        </label>
+        <label style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+          <input
+            type="radio"
+            name="estimating-method"
+            checked={estimatingMethod === 'historical'}
+            onChange={() => setEstimatingMethod('historical')}
+            disabled={readOnly}
+          />
+          Historical Actuals
+        </label>
+      </div>
+      {estimatingMethod === 'historical' && (
+        <div style={{ marginTop: 12 }}>
+          <div style={{ fontSize: 12, color: '#666', marginBottom: 6 }}>
+            Select past wins to scale hours and rates for module subtasks.
+          </div>
+          {historicalEstimates.length > 0 ? (
+            historicalEstimates.map((item, idx) => (
+              <div key={idx} style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 6, flexWrap: 'wrap' }}>
+                <label style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+                  <input
+                    type="checkbox"
+                    checked={item.selected}
+                    onChange={(e) => updateHistoricalEstimate(idx, { selected: e.target.checked })}
+                    disabled={readOnly}
+                  />
+                  Use
+                </label>
+                <input
+                  placeholder="Historical win name"
+                  value={item.name}
+                  onChange={(e) => updateHistoricalEstimate(idx, { name: e.target.value })}
+                  style={{ minWidth: 200, flex: 1 }}
+                  disabled={readOnly}
+                />
+                <input
+                  type="number"
+                  placeholder="Actual Hours"
+                  value={item.actual_hours}
+                  onChange={(e) => updateHistoricalEstimate(idx, { actual_hours: e.target.value })}
+                  style={{ width: 140 }}
+                  disabled={readOnly}
+                />
+                <input
+                  type="number"
+                  placeholder="Actual Total Cost"
+                  value={item.actual_total_cost}
+                  onChange={(e) => updateHistoricalEstimate(idx, { actual_total_cost: e.target.value })}
+                  style={{ width: 160 }}
+                  disabled={readOnly}
+                />
+                {!readOnly && (
+                  <button className="btn" onClick={() => removeHistoricalEstimate(idx)}>Remove</button>
+                )}
+              </div>
+            ))
+          ) : (
+            <div style={{ fontSize: 12, color: '#666' }}>No historical wins added yet.</div>
+          )}
+          {!readOnly && (
+            <button className="btn" onClick={addHistoricalEstimate} style={{ marginTop: 6 }}>
+              Add Historical Win
+            </button>
+          )}
+        </div>
+      )}
 
       <h2 style={{ marginTop: 24 }}>Other Costs</h2>
       <div className="form-grid">
@@ -2382,7 +2895,7 @@ function App() {
                 {narrativeSectionError}
               </div>
             )}
-            {['executive_summary','assumptions','risks','recommendations'].map((k) => (
+            {['executive_summary','assumptions','risks'].map((k) => (
               <div key={k} style={{ marginBottom: 12 }}>
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8 }}>
                   <label style={{ display: 'block', fontWeight: 600 }}>{k.replace('_',' ').toUpperCase()}</label>

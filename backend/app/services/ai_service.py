@@ -72,7 +72,7 @@ class AIService:
                 raise RuntimeError("; ".join(details))
 
         if sections is None:
-            sections = ["executive_summary", "assumptions", "risks", "recommendations"]
+            sections = ["executive_summary", "assumptions", "risks"]
 
         context = self._build_narrative_context(estimation_data, input_summary)
 
@@ -434,6 +434,12 @@ class AIService:
             context["warranty_months"] = estimation_data["warranty_months"]
         if estimation_data.get("warranty_cost") is not None:
             context["warranty_cost"] = estimation_data["warranty_cost"]
+        if estimation_data.get("roi_inputs") is not None:
+            context["roi_inputs"] = estimation_data["roi_inputs"]
+        if estimation_data.get("roi_summary") is not None:
+            context["roi_summary"] = estimation_data["roi_summary"]
+        if estimation_data.get("roi_horizon_years") is not None:
+            context["roi_horizon_years"] = estimation_data["roi_horizon_years"]
         if input_summary:
             context["input_summary"] = input_summary
         return context
@@ -482,10 +488,14 @@ class AIService:
                 "Include key project_info fields when present (project name, FY, POC, location), "
                 "1-2 key figures (hours or cost), and a brief services summary based on the selected modules. "
                 "If provided, mention security_protocols and compliance_frameworks. "
-                "Weave in contract_highlights or scope_outline when relevant."
+                "Weave in contract_highlights or scope_outline when relevant. "
+                "If roi_summary is provided, highlight the 5-year net fiscal benefit and cost-avoidance framing."
             ),
             "assumptions": (
-                "State delivery assumptions tied to the scope and contract context. "
+                "State delivery assumptions tied to the module mix and contract context. "
+                "Use scope_outline or module_subtasks when available to anchor assumptions "
+                "(e.g., site access for IT modernization, data access/quality for analytics, "
+                "cloud tenant access for migrations, security artifacts for assurance, stakeholder workshops for transformation). "
                 "Incorporate any additional_assumptions or project_info notes when provided. "
                 "Address access to stakeholders or data, dependencies, approvals, schedule, and "
                 "security/compliance where applicable. Avoid restating raw numbers."
@@ -493,11 +503,6 @@ class AIService:
             "risks": (
                 "Describe 2-3 key risks linked to the scope or contract context and "
                 "their potential impact. Avoid generic risks that could apply to any project."
-            ),
-            "recommendations": (
-                "Provide action-oriented next steps aligned to scope and governance. "
-                "Examples include validating assumptions, confirming interfaces, or "
-                "sequencing work to reduce delivery risk."
             ),
             "next_steps": (
                 "Provide concise, action-oriented next steps aligned to scope and governance."
@@ -783,7 +788,6 @@ class AIService:
         prefix = {
             "assumptions": "Assume",
             "risks": "Key risk",
-            "recommendations": "Recommendation",
             "next_steps": "Next step",
         }.get(section)
         items: List[str] = []
@@ -838,7 +842,7 @@ class AIService:
         if labor_cost is not None:
             cost_parts.append(f"labor ${labor_cost:,.2f}")
         if risk_reserve is not None:
-            cost_parts.append(f"risk reserve ${risk_reserve:,.2f}")
+            cost_parts.append(f"management reserve ${risk_reserve:,.2f}")
         if overhead_cost is not None:
             cost_parts.append(f"overhead ${overhead_cost:,.2f}")
         if cost_parts:
@@ -1059,11 +1063,12 @@ class AIService:
         sections: List[str],
         tone: str,
     ) -> Dict[str, str]:
-        secs = sections or ["executive_summary", "assumptions", "risks", "recommendations"]
+        secs = sections or ["executive_summary", "assumptions", "risks"]
         summary = context.get("summary", {})
         modules = context.get("modules", [])
         roles = context.get("roles", [])
         project_info = context.get("project_info", {}) or {}
+        roi_summary = context.get("roi_summary") or {}
 
         total_hours = summary.get("total_labor_hours") or 0
         total_cost = summary.get("total_cost") or 0
@@ -1098,7 +1103,7 @@ class AIService:
             sentences.append(
                 f"This estimate covers {mod_count} {('module' if mod_count==1 else 'modules')} "
                 f"with a {complexity} complexity profile and approximately {total_hours:.0f} labor hours, "
-                f"totaling ${total_cost:,.2f} (risk reserve ${risk_reserve:,.2f}, overhead ${overhead_cost:,.2f})."
+                f"totaling ${total_cost:,.2f} (management reserve ${risk_reserve:,.2f}, overhead ${overhead_cost:,.2f})."
             )
             sentences.append(f"Services include {module_names} aligned to the RFP scope.")
             if security_protocols or compliance_frameworks:
@@ -1108,6 +1113,15 @@ class AIService:
                 if compliance_frameworks:
                     sec_bits.append(f"compliance frameworks: {compliance_frameworks}")
                 sentences.append("Security posture highlights " + "; ".join(sec_bits) + ".")
+            if roi_summary.get("net_benefit_low") is not None:
+                net_low = roi_summary.get("net_benefit_low")
+                net_high = roi_summary.get("net_benefit_high")
+                if net_high is not None:
+                    sentences.append(
+                        f"Projected 5-year net fiscal benefit ranges from ${net_low:,.2f} to ${net_high:,.2f}."
+                    )
+                else:
+                    sentences.append(f"Projected 5-year net fiscal benefit is ${net_low:,.2f}.")
             sentences.append(f"The effective blended rate is about ${eff_rate:,.2f} per hour.")
             text["executive_summary"] = " ".join(sentences[:5])
 
@@ -1117,23 +1131,32 @@ class AIService:
                 "Module sequencing accounts for prerequisites, dependency alignment, and access to required data and stakeholders.",
                 "Security reviews, compliance checkpoints, and approvals are aligned with the proposed schedule.",
             ]
+            focus_areas = {str(m.get("focus_area") or "").upper() for m in modules if isinstance(m, dict)}
+            focus_map = {
+                "ITM": "Assumes onsite access for infrastructure surveys, rack elevations, and coordinated change windows.",
+                "CM": "Assumes cloud tenant access, network connectivity approvals, and agreed migration waves.",
+                "SA": "Assumes timely access to security artifacts, audit evidence, and authorization stakeholders.",
+                "DA": "Assumes data owners provide source access and agree to data quality validation thresholds.",
+                "DT": "Assumes stakeholder workshops and process owners are available for discovery and change management.",
+            }
+            for key in ("ITM", "CM", "SA", "DA", "DT"):
+                if key in focus_areas:
+                    assumption_sentences.append(focus_map[key])
+            additional_sentence = None
             if additional_assumptions:
                 trimmed = self._trim_text(additional_assumptions, 240)
-                assumption_sentences.append(f"Additional assumptions provided: {trimmed}.")
-            text["assumptions"] = " ".join(assumption_sentences[:4])
+                additional_sentence = f"Additional assumptions provided: {trimmed}."
+                assumption_sentences.append(additional_sentence)
+            final_assumptions = assumption_sentences[:4]
+            if additional_sentence and all(additional_sentence not in s for s in final_assumptions):
+                final_assumptions[-1] = additional_sentence
+            text["assumptions"] = " ".join(final_assumptions)
 
         if "risks" in secs:
             text["risks"] = (
                 f"Primary risks include scope growth and integration unknowns that could extend effort beyond the baseline {total_hours:.0f} hours. "
                 f"Multi-module dependencies ({module_names}) may impact sequencing and throughput. "
-                f"The allocated risk reserve of ${risk_reserve:,.2f} is intended to buffer typical variance."
-            )
-
-        if "recommendations" in secs:
-            text["recommendations"] = (
-                "Begin with a short planning sprint to refine scope and confirm interfaces. "
-                "Sequence delivery to realize early value while de-risking complex integrations. "
-                "Review staffing against milestones and adjust to maintain schedule confidence."
+                f"The allocated management reserve of ${risk_reserve:,.2f} is intended to buffer typical variance."
             )
 
         return text
