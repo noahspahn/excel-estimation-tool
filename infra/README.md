@@ -4,6 +4,7 @@ This CDK app provisions:
 
 - **Backend**: ECR repo + App Runner service (HTTPS endpoint).
 - **Cognito**: User pool + app client for auth.
+- **Database**: RDS Postgres + VPC + App Runner VPC connector + security groups.
 - **Frontend (optional)**: S3 + CloudFront distribution for HTTPS hosting.
 
 ## Prereqs
@@ -45,6 +46,19 @@ docker push <ACCOUNT_ID>.dkr.ecr.<REGION>.amazonaws.com/estimation-backend:lates
 ```
 
 App Runner will auto-deploy when the image tag updates.
+
+## RDS + VPC outputs
+
+When `createDatabase` is enabled (default), the stack outputs:
+
+- `DatabaseEndpoint`
+- `DatabaseName`
+- `DatabaseSecretArn`
+- `VpcConnectorArn`
+- `VpcId`
+
+The App Runner service is configured with a `DATABASE_URL` that points at
+the RDS instance and uses `sslmode=require`.
 
 ## Cognito outputs
 
@@ -100,6 +114,12 @@ Create a new repo:
 
 ```
 npx cdk deploy EstimationBackendStack -c backend='{"ecrRepoName":"estimation-backend","createRepo":true}'
+```
+
+Disable database provisioning:
+
+```
+npx cdk deploy EstimationBackendStack -c backend='{"createDatabase":false}'
 ```
 
 Optional frontend asset deployment via CDK:

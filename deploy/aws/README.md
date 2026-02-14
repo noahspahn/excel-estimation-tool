@@ -4,7 +4,7 @@
 
 The recommended deployment path is now the CDK app in `infra/`:
 
-- **Backend**: App Runner + ECR + Cognito (auth enabled)
+- **Backend**: App Runner + ECR + Cognito + RDS (auth enabled, DB prewired)
 - **Frontend**: S3 + CloudFront (HTTPS)
 
 Start here:
