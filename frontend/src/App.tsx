@@ -2,7 +2,7 @@ import { useState, useEffect } from 'react'
 import TopNav from './TopNav'
 import './App.css'
 
-const rawApi = (import.meta as any).env?.VITE_API_URL || 'http://localhost:8000'
+const rawApi = (import.meta as any).env?.VITE_API_URL || (typeof window !== 'undefined' ? window.location.origin : 'http://localhost:8000')
 const API = rawApi.replace(/\/+$/, '')
 
 const COGNITO_CLIENT_ID = (import.meta as any).env?.VITE_COGNITO_CLIENT_ID
@@ -17,7 +17,7 @@ const IS_LOCALHOST =
     window.location.hostname === '127.0.0.1')
 
 const DEV_STUB_EMAIL = (import.meta as any).env?.VITE_DEV_STUB_EMAIL || 'noahspahn@gmail.com'
-const AUTH_DISABLED = String((import.meta as any).env?.VITE_DISABLE_AUTH ?? 'true').toLowerCase() === 'true'
+const AUTH_DISABLED = String((import.meta as any).env?.VITE_DISABLE_AUTH ?? 'false').toLowerCase() === 'true'
 
 const DEFAULT_RACI_ROWS = [
   { milestone: 'SIT sign-off', responsible: '', accountable: '', consulted: '', informed: '' },
@@ -92,7 +92,7 @@ function App() {
   const [awaitingVerification, setAwaitingVerification] = useState(false)
   const [devLoginBusy, setDevLoginBusy] = useState(false)
   const isAuthenticated = AUTH_DISABLED || (!!authToken && !!authEmail)
-  const shouldEnforceAuth = !AUTH_DISABLED && !IS_LOCALHOST
+  const shouldEnforceAuth = !AUTH_DISABLED
 
   // Simple scraping test state
   const [scrapeUrl, setScrapeUrl] = useState('https://docs.google.com/document/d/1uGMj74V3aCBx9IgOiVzWk6MzN713lkDDnFSrzjKFl0w/edit?tab=t.0#heading=h.345z0enrcnzu')
@@ -278,7 +278,7 @@ function App() {
   useEffect(() => {
     if (autoScraped || hasShareParam || readOnly) return
     if (!authChecked) return
-    if (!AUTH_DISABLED && !authToken && !IS_LOCALHOST) return
+    if (!AUTH_DISABLED && !authToken) return
     setAutoScraped(true)
     runScrapeTest()
   }, [autoScraped, hasShareParam, readOnly, authChecked, authToken])
@@ -646,7 +646,7 @@ function App() {
       setError(`Scrape the contract first to generate ${label}.`)
       return
     }
-    if (!AUTH_DISABLED && !authToken && !IS_LOCALHOST) {
+    if (!AUTH_DISABLED && !authToken) {
       setError(`Sign in to generate ${label}.`)
       return
     }
@@ -725,7 +725,7 @@ function App() {
       setScrapeError('Enter a URL to scrape')
       return
     }
-    if (!AUTH_DISABLED && !authToken && !IS_LOCALHOST) {
+    if (!AUTH_DISABLED && !authToken) {
       setScrapeError('Sign in to run scraping tests')
       return
     }
@@ -843,16 +843,30 @@ function App() {
     if (prereqWarnings.length > 0) {
       if (!confirm('Some prerequisites are missing. Continue anyway?')) return
     }
+    if (!AUTH_DISABLED && !authToken) {
+      alert('Please sign in to generate a saved report.')
+      return
+    }
     setDownloading(true)
     try {
+      let reportProposalId = proposalId
+      if (!reportProposalId) {
+        reportProposalId = await initializeProposal()
+      }
+      if (!reportProposalId) {
+        alert('Unable to initialize a proposal. Report was not generated.')
+        return
+      }
       // If the user has edited narrative, pass it through and skip server-side AI
       const hasCustomNarrative = Object.keys(editableNarrative || {}).length > 0
       const qs = `?include_ai=${includeAI && !hasCustomNarrative}&tone=${encodeURIComponent(tone)}`
       const contractUrl = scrapeResult?.success ? (scrapeResult.final_url || scrapeResult.url) : undefined
       const contractExcerpt = scrapeResult?.success ? (scrapeResult.text_excerpt || '') : undefined
+      const headers: Record<string, string> = { 'Content-Type': 'application/json' }
+      if (!AUTH_DISABLED && authToken) headers.Authorization = `Bearer ${authToken}`
       const res = await fetch(`${API}/api/v1/report${qs}`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers,
         body: JSON.stringify({
           modules: selectedModules,
           complexity,
@@ -897,7 +911,7 @@ function App() {
           roi_target_availability: asNumber(roiTargetAvailability),
           roi_legacy_support_savings_annual: asNumber(roiLegacySupportAnnual),
           tool_version: appVersion || undefined,
-          proposal_id: proposalId || undefined,
+          proposal_id: reportProposalId || undefined,
           proposal_version: versions?.length ? versions[versions.length - 1]?.version : undefined,
           use_ai_subtasks: includeAI,
           narrative_sections: hasCustomNarrative ? editableNarrative : undefined,
@@ -917,8 +931,11 @@ function App() {
       a.click()
       a.remove()
       window.URL.revokeObjectURL(url)
-      if (proposalId) {
+      const reportDocId = res.headers.get('X-Report-Document-Id')
+      if (reportDocId) {
         await loadReportDocs()
+      } else if (reportProposalId) {
+        setReportsError('Report generated but not saved. Check storage configuration.')
       }
     } catch (err) {
       console.error(err)
@@ -1207,6 +1224,10 @@ function App() {
       alert('Please select at least one module.')
       return
     }
+    if (!AUTH_DISABLED && !authToken) {
+      alert('Please sign in to generate subtasks.')
+      return
+    }
     setSubtaskLoading(true)
     setSubtaskError(null)
     setSubtaskPreview(null)
@@ -1215,7 +1236,10 @@ function App() {
       const contractExcerpt = scrapeResult?.success ? (scrapeResult.text_excerpt || '') : undefined
       const res = await fetch(`${API}/api/v1/subtasks/preview`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          ...(!AUTH_DISABLED && authToken ? { Authorization: `Bearer ${authToken}` } : {}),
+        },
         body: JSON.stringify({
           modules: selectedModules,
           complexity,
@@ -1616,10 +1640,10 @@ function App() {
     }
   }
 
-  const initializeProposal = async () => {
-    if (proposalId) { alert('Proposal already initialized.'); return }
-    if (selectedModules.length === 0) { alert('Please select at least one module.'); return }
-    if (prereqWarnings.length > 0) { alert('Some prerequisites are missing.'); return }
+  const initializeProposal = async (): Promise<string | null> => {
+    if (proposalId) { alert('Proposal already initialized.'); return proposalId }
+    if (selectedModules.length === 0) { alert('Please select at least one module.'); return null }
+    if (prereqWarnings.length > 0) { alert('Some prerequisites are missing.'); return null }
     try {
       setInitBusy(true)
       let estimationResult = estimate
@@ -1635,7 +1659,7 @@ function App() {
       }
       const payload = buildDraft()
       payload.estimation_result = estimationResult
-      if (!AUTH_DISABLED && (!authToken || !authEmail)) { alert('Please sign in to initialize a proposal.'); return }
+      if (!AUTH_DISABLED && (!authToken || !authEmail)) { alert('Please sign in to initialize a proposal.'); return null }
       const headers: Record<string, string> = { 'Content-Type': 'application/json' }
       if (!AUTH_DISABLED && authToken) headers.Authorization = `Bearer ${authToken}`
       const res = await fetch(`${API}/api/v1/proposals`, {
@@ -1652,8 +1676,10 @@ function App() {
       await loadVersions()
       await loadReportDocs()
       alert('Proposal initialized. You can now save versions and reports.')
+      return data.id
     } catch (e: any) {
       alert(e?.message || 'Failed to initialize proposal')
+      return null
     } finally {
       setInitBusy(false)
     }
@@ -2665,7 +2691,7 @@ function App() {
             {scrapeLoading ? 'Scraping...' : 'Scrape URL'}
           </button>
         </div>
-        {!isAuthenticated && !IS_LOCALHOST && (
+        {!isAuthenticated && (
           <div style={{ fontSize: 12, color: '#b26a00' }}>
             Sign in to run authenticated scraping calls.
           </div>

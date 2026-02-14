@@ -4,3 +4,4 @@ backend/venv_311/*
 backend/.env
 deploy/aws/environments.json
 TODO.md
+infra/node_modules/*

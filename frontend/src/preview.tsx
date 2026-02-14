@@ -3,7 +3,9 @@ import { useParams } from 'react-router-dom'
 import './App.css'
 import TopNav from './TopNav'
 
-const API = (import.meta as any).env?.VITE_API_URL || 'http://localhost:8000'
+const rawApi = (import.meta as any).env?.VITE_API_URL || (typeof window !== 'undefined' ? window.location.origin : 'http://localhost:8000')
+const API = rawApi.replace(/\/+$/, '')
+const AUTH_DISABLED = String((import.meta as any).env?.VITE_DISABLE_AUTH ?? 'false').toLowerCase() === 'true'
 
 type VersionInfo = { id: string; version: number; title?: string; created_at?: string }
 type PromptMap = Record<string, string>
@@ -75,6 +77,12 @@ export default function Preview() {
   const [sectionPrompts, setSectionPrompts] = useState<PromptMap>({})
   const [newSectionName, setNewSectionName] = useState('')
   const [newSectionPrompt, setNewSectionPrompt] = useState('')
+  const [authToken, setAuthToken] = useState<string | null>(null)
+
+  useEffect(() => {
+    const token = localStorage.getItem('auth_token')
+    if (token) setAuthToken(token)
+  }, [])
 
   useEffect(() => {
     if (!id) return
@@ -102,7 +110,10 @@ export default function Preview() {
 
   useEffect(() => {
     if (!proposalId) return
-    fetch(`${API}/api/v1/proposals/${proposalId}/versions`)
+    if (!AUTH_DISABLED && !authToken) return
+    fetch(`${API}/api/v1/proposals/${proposalId}/versions`, {
+      headers: !AUTH_DISABLED && authToken ? { Authorization: `Bearer ${authToken}` } : {},
+    })
       .then((res) => res.json())
       .then((rows: VersionInfo[]) => {
         setVersions(rows || [])
@@ -115,7 +126,7 @@ export default function Preview() {
         }
       })
       .catch(() => {})
-  }, [proposalId])
+  }, [proposalId, authToken])
 
   useEffect(() => {
     setRawPayload(JSON.stringify(payload || {}, null, 2))
@@ -124,7 +135,10 @@ export default function Preview() {
 
   const runDiff = async () => {
     if (!proposalId || fromVer == null || toVer == null) return
-    const res = await fetch(`${API}/api/v1/proposals/${proposalId}/diff?from_version=${fromVer}&to_version=${toVer}`)
+    if (!AUTH_DISABLED && !authToken) return
+    const res = await fetch(`${API}/api/v1/proposals/${proposalId}/diff?from_version=${fromVer}&to_version=${toVer}`, {
+      headers: !AUTH_DISABLED && authToken ? { Authorization: `Bearer ${authToken}` } : {},
+    })
     if (!res.ok) { setDiffs([]); return }
     const data = await res.json()
     setDiffs(data?.diffs || [])

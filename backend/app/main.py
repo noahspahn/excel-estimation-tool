@@ -87,27 +87,30 @@ SAM_SYNC_STARTED = False
 # -----------------------------
 # Simple auth / identity helper (must be defined before endpoints use it)
 # -----------------------------
+AUTH_REQUIRED = os.getenv("AUTH_REQUIRED", "true").lower() in ("1", "true", "yes")
+
+
 def get_current_user(authorization: str | None = Header(default=None)) -> str:
     """
     Resolve the current user from an Authorization header if present.
 
-    For now, API access does not require a token. If no valid bearer
-    token is supplied, fall back to a default dev user identity so
-    that endpoints can still operate without authentication.
+    If AUTH_REQUIRED is enabled, a valid bearer token is mandatory.
+    Otherwise, fall back to a default dev user identity when no token
+    (or an invalid token) is supplied.
     """
     default_user = os.getenv("DEV_DEFAULT_USER_EMAIL", "anonymous@example.com")
 
-    # No auth required for now: if there is no bearer token, just return the
-    # default dev user identity.
     if not authorization or not authorization.lower().startswith("bearer "):
+        if AUTH_REQUIRED:
+            raise HTTPException(status_code=401, detail="Authorization required")
         return default_user
 
     token = authorization.split(" ", 1)[1].strip()
     try:
         return _verify_cognito_token(token)
     except Exception:
-        # For any verification error (network, config, invalid token, etc.),
-        # fall back to the default user instead of failing the request.
+        if AUTH_REQUIRED:
+            raise HTTPException(status_code=401, detail="Invalid or expired token")
         return default_user
 
 

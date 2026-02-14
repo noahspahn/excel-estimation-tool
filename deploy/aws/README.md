@@ -1,10 +1,45 @@
-# AWS deployment (static frontend + container backend)
+# AWS deployment (CDK + App Runner primary)
+
+## Primary path (CDK)
+
+The recommended deployment path is now the CDK app in `infra/`:
+
+- **Backend**: App Runner + ECR + Cognito (auth enabled)
+- **Frontend**: S3 + CloudFront (HTTPS)
+
+Start here:
+
+```
+cd infra
+npm install
+npx cdk bootstrap
+npx cdk deploy EstimationBackendStack
+npx cdk deploy EstimationFrontendStack
+```
+
+Use the stack outputs to set:
+
+- Backend env: `COGNITO_REGION`, `COGNITO_USER_POOL_ID`, `COGNITO_CLIENT_ID`
+- Frontend build env: `VITE_API_URL`, `VITE_COGNITO_REGION`, `VITE_COGNITO_CLIENT_ID`, `VITE_DISABLE_AUTH=false`
+
+See `infra/README.md` for full details.
+
+If you're at the App Runner service limit, reuse an existing service and
+deploy only Cognito + ECR with:
+
+```
+npx cdk deploy EstimationBackendStack -c backend='{"existingRepoName":"estimation-backend","createService":false}'
+```
+
+---
+
+## Legacy scripts (still supported)
 
 ## Overview
 
 - **Backend**: FastAPI app (`backend/app/main.py`) deployed as a Docker container on **AWS App Runner**, pulling from ECR.
 - **Frontend**: Vite/React app (`frontend/`) built to static assets and served from an **S3 static website endpoint**.
-- **Auth**: Temporarily disabled via `VITE_DISABLE_AUTH=true`. Cognito setup can be postponed until auth is re-enabled.
+- **Auth**: CDK path provisions Cognito by default. Legacy scripts can still use `VITE_DISABLE_AUTH=true`, but auth is now intended to be enabled.
 - Goal: simple, low-ops deployment you can drive from your dev machine with minimal manual AWS configuration.
 
 ## Prerequisites
@@ -143,7 +178,7 @@ If you prefer to run the steps yourself:
      ```powershell
      $env:VITE_API_URL = "https://<your-apprunner-url>/"
      $env:VITE_EXCEL_API_ENABLED = "true"
-     $env:VITE_DISABLE_AUTH = "true"
+     $env:VITE_DISABLE_AUTH = "false"
      $env:VITE_APP_ENV = "dev"
      # Cognito vars only needed when auth is enabled
      $env:VITE_COGNITO_REGION = "us-east-1"

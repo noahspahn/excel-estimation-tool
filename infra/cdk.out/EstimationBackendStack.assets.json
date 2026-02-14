@@ -1,0 +1,21 @@
+{
+  "version": "48.0.0",
+  "files": {
+    "af266b0374eac033279612122e4fb620509faee2b466f36e0435cc39464f3d27": {
+      "displayName": "EstimationBackendStack Template",
+      "source": {
+        "path": "EstimationBackendStack.template.json",
+        "packaging": "file"
+      },
+      "destinations": {
+        "091613706415-us-east-1-aa47ff2f": {
+          "bucketName": "cdk-hnb659fds-assets-091613706415-us-east-1",
+          "objectKey": "af266b0374eac033279612122e4fb620509faee2b466f36e0435cc39464f3d27.json",
+          "region": "us-east-1",
+          "assumeRoleArn": "arn:${AWS::Partition}:iam::091613706415:role/cdk-hnb659fds-file-publishing-role-091613706415-us-east-1"
+        }
+      }
+    }
+  },
+  "dockerImages": {}
+}
