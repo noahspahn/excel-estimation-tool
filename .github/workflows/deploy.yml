@@ -71,7 +71,7 @@ jobs:
           docker push "${ECR_URI}:${IMAGE_TAG}"
           docker push "${ECR_URI}:latest"
 
-      - name: Trigger App Runner deployment
+      - name: Resolve App Runner URL
         run: |
           set -euo pipefail
           SERVICE_ARN=$(aws apprunner list-services --region "${AWS_REGION}" \
@@ -83,29 +83,6 @@ jobs:
             exit 1
           fi
 
-          # Wait for RUNNING state before starting a deployment.
-          for i in $(seq 1 30); do
-            STATUS=$(aws apprunner describe-service --service-arn "${SERVICE_ARN}" --region "${AWS_REGION}" \
-              --query "Service.Status" --output text)
-            if [ "${STATUS}" = "RUNNING" ]; then
-              break
-            fi
-            if [ "${STATUS}" = "FAILED" ] || [ "${STATUS}" = "DELETED" ] || [ "${STATUS}" = "PAUSED" ]; then
-              echo "App Runner service not in a deployable state: ${STATUS}"
-              exit 1
-            fi
-            echo "Waiting for App Runner service to be RUNNING (status=${STATUS})..."
-            sleep 10
-          done
-
-          STATUS=$(aws apprunner describe-service --service-arn "${SERVICE_ARN}" --region "${AWS_REGION}" \
-            --query "Service.Status" --output text)
-          if [ "${STATUS}" != "RUNNING" ]; then
-            echo "App Runner service not RUNNING after wait (status=${STATUS})."
-            exit 1
-          fi
-
-          aws apprunner start-deployment --service-arn "${SERVICE_ARN}" --region "${AWS_REGION}" >/dev/null
           BACKEND_URL=$(aws apprunner describe-service --service-arn "${SERVICE_ARN}" --region "${AWS_REGION}" \
             --query "Service.ServiceUrl" --output text)
 
