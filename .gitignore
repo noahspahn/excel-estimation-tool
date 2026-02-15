@@ -5,3 +5,4 @@ backend/.env
 deploy/aws/environments.json
 TODO.md
 infra/node_modules/*
+infra/cdk.out/*

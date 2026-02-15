@@ -125,7 +125,7 @@ export class BackendStack extends Stack {
         (ec2.InstanceSize as Record<string, ec2.InstanceSize>)[sizeKey] ?? ec2.InstanceSize.MICRO
 
       dbInstance = new rds.DatabaseInstance(this, 'Postgres', {
-        engine: rds.DatabaseInstanceEngine.postgres({ version: rds.PostgresEngineVersion.V15_5 }),
+        engine: rds.DatabaseInstanceEngine.postgres({ version: rds.PostgresEngineVersion.VER_15_15 }),
         vpc,
         vpcSubnets: privateSubnets.subnetIds.length
           ? { subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS }
