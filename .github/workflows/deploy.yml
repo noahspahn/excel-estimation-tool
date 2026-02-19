@@ -9,6 +9,8 @@ on:
 
 jobs:
   deploy:
+    permissions:
+      contents: write
     runs-on: ubuntu-latest
     environment: ${{ github.ref_name == 'main' && 'prod' || github.ref_name == 'stage' && 'stage' || 'dev' }}
     env:
@@ -47,8 +49,7 @@ jobs:
             exit 1
           fi
           if [ -z "${S3_BUCKET}" ]; then
-            echo "S3_BUCKET not set (use GitHub Environment vars)."
-            exit 1
+            echo "S3_BUCKET not set (will use Frontend stack output)."
           fi
 
       - name: Login to ECR
@@ -111,6 +112,21 @@ jobs:
           npm ci
           npx cdk bootstrap
           npx cdk deploy EstimationFrontendStack --require-approval never -c frontend="${FRONTEND_CONTEXT}"
+          FRONTEND_BUCKET=$(aws cloudformation describe-stacks --stack-name EstimationFrontendStack --region "${AWS_REGION}" \
+            --query "Stacks[0].Outputs[?OutputKey=='FrontendBucketName'].OutputValue" --output text)
+          FRONTEND_DISTRIBUTION_ID=$(aws cloudformation describe-stacks --stack-name EstimationFrontendStack --region "${AWS_REGION}" \
+            --query "Stacks[0].Outputs[?OutputKey=='FrontendDistributionId'].OutputValue" --output text)
+          FRONTEND_URL=$(aws cloudformation describe-stacks --stack-name EstimationFrontendStack --region "${AWS_REGION}" \
+            --query "Stacks[0].Outputs[?OutputKey=='FrontendUrl'].OutputValue" --output text)
+          if [ -n "${FRONTEND_BUCKET}" ] && [ "${FRONTEND_BUCKET}" != "None" ]; then
+            echo "FRONTEND_BUCKET=${FRONTEND_BUCKET}" >> $GITHUB_ENV
+          fi
+          if [ -n "${FRONTEND_DISTRIBUTION_ID}" ] && [ "${FRONTEND_DISTRIBUTION_ID}" != "None" ]; then
+            echo "FRONTEND_DISTRIBUTION_ID=${FRONTEND_DISTRIBUTION_ID}" >> $GITHUB_ENV
+          fi
+          if [ -n "${FRONTEND_URL}" ] && [ "${FRONTEND_URL}" != "None" ]; then
+            echo "FRONTEND_URL=${FRONTEND_URL}" >> $GITHUB_ENV
+          fi
 
       - name: Build frontend
         run: |
@@ -128,15 +144,42 @@ jobs:
       - name: Deploy frontend to S3
         run: |
           set -euo pipefail
-          aws s3 sync frontend/dist "s3://${S3_BUCKET}/" --delete --region "${AWS_REGION}"
+          TARGET_BUCKET="${FRONTEND_BUCKET:-${S3_BUCKET}}"
+          if [ -z "${TARGET_BUCKET}" ] || [ "${TARGET_BUCKET}" = "None" ]; then
+            echo "No target S3 bucket resolved (set S3_BUCKET or use Frontend stack output)."
+            exit 1
+          fi
+          aws s3 sync frontend/dist "s3://${TARGET_BUCKET}/" --delete --region "${AWS_REGION}"
 
       - name: Invalidate CloudFront cache
         run: |
           set -euo pipefail
-          DISTRIBUTION_ID=$(aws cloudformation describe-stacks --stack-name EstimationFrontendStack --region "${AWS_REGION}" \
-            --query "Stacks[0].Outputs[?OutputKey=='FrontendDistributionId'].OutputValue" --output text)
+          DISTRIBUTION_ID="${FRONTEND_DISTRIBUTION_ID:-}"
+          if [ -z "${DISTRIBUTION_ID}" ] || [ "${DISTRIBUTION_ID}" = "None" ]; then
+            DISTRIBUTION_ID=$(aws cloudformation describe-stacks --stack-name EstimationFrontendStack --region "${AWS_REGION}" \
+              --query "Stacks[0].Outputs[?OutputKey=='FrontendDistributionId'].OutputValue" --output text)
+          fi
           if [ -n "${DISTRIBUTION_ID}" ] && [ "${DISTRIBUTION_ID}" != "None" ]; then
             aws cloudfront create-invalidation --distribution-id "${DISTRIBUTION_ID}" --paths "/*" >/dev/null
           else
             echo "CloudFront distribution id not found; skipping invalidation."
           fi
+
+      - name: Report frontend URL
+        run: |
+          if [ -n "${FRONTEND_URL}" ] && [ "${FRONTEND_URL}" != "None" ]; then
+            echo "Frontend URL: ${FRONTEND_URL}"
+          fi
+
+      - name: Comment CloudFront URL on commit
+        if: env.FRONTEND_URL != ''
+        run: |
+          set -euo pipefail
+          BODY=$(printf "CloudFront URL: %s" "${FRONTEND_URL}")
+          curl -sS -X POST \
+            -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+            -H "Content-Type: application/json" \
+            -d "{\"body\":\"${BODY}\"}" \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/commits/${GITHUB_SHA}/comments" >/dev/null
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
