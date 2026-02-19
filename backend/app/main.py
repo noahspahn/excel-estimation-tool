@@ -132,13 +132,22 @@ except Exception:
 def read_root():
     return {"message": "Estimation Tool API v2.0 is running", "status": "ready"}
 
-@app.get("/health")
-def health_check():
+def _health_payload():
     return {
         "status": "healthy",
         "version": "2.0.0",
         "ai_configured": bool(os.getenv("OPENAI_API_KEY")),
     }
+
+
+@app.get("/health")
+def health_check():
+    return _health_payload()
+
+
+@app.get("/api/health")
+def api_health_check():
+    return _health_payload()
 
 @app.get("/api/v1/modules")
 def get_modules():

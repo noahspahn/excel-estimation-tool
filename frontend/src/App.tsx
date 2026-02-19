@@ -160,7 +160,7 @@ function App() {
 
   useEffect(() => {
     // Test backend connection
-    fetch(`${API}/health`)
+    fetch(`${API}/api/health`)
       .then(res => res.json())
       .then(data => setBackendStatus(data.status || 'Connected'))
       .catch(() => setBackendStatus('Backend not connected'))
