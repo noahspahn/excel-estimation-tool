@@ -4,11 +4,15 @@ import * as cloudfront from 'aws-cdk-lib/aws-cloudfront'
 import * as origins from 'aws-cdk-lib/aws-cloudfront-origins'
 import * as s3 from 'aws-cdk-lib/aws-s3'
 import * as s3deploy from 'aws-cdk-lib/aws-s3-deployment'
+import { URL } from 'url'
 
 type FrontendContext = {
   bucketName?: string
   deployAssets?: boolean
   assetPath?: string
+  apiDomain?: string
+  apiUrl?: string
+  apiProtocol?: 'http' | 'https'
 }
 
 export class FrontendStack extends Stack {
@@ -33,12 +37,46 @@ export class FrontendStack extends Stack {
       removalPolicy: cdk.RemovalPolicy.RETAIN,
     })
 
+    const apiDomain = (() => {
+      if (cfg.apiDomain) {
+        return cfg.apiDomain
+      }
+      if (!cfg.apiUrl) {
+        return undefined
+      }
+      try {
+        return new URL(cfg.apiUrl).hostname
+      } catch {
+        return cfg.apiUrl
+      }
+    })()
+    const apiProtocol =
+      cfg.apiProtocol ?? (cfg.apiUrl && cfg.apiUrl.startsWith('http://') ? 'http' : 'https')
+
+    const apiBehavior = apiDomain
+      ? {
+          'api/*': {
+            origin: new origins.HttpOrigin(apiDomain, {
+              protocolPolicy:
+                apiProtocol === 'http'
+                  ? cloudfront.OriginProtocolPolicy.HTTP_ONLY
+                  : cloudfront.OriginProtocolPolicy.HTTPS_ONLY,
+            }),
+            allowedMethods: cloudfront.AllowedMethods.ALLOW_ALL,
+            cachePolicy: cloudfront.CachePolicy.CACHING_DISABLED,
+            originRequestPolicy: cloudfront.OriginRequestPolicy.ALL_VIEWER,
+            viewerProtocolPolicy: cloudfront.ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
+          },
+        }
+      : undefined
+
     const distribution = new cloudfront.Distribution(this, 'FrontendDistribution', {
       defaultRootObject: 'index.html',
       defaultBehavior: {
         origin: origins.S3BucketOrigin.withOriginAccessControl(bucket),
         viewerProtocolPolicy: cloudfront.ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
       },
+      additionalBehaviors: apiBehavior,
       errorResponses: [
         {
           httpStatus: 403,

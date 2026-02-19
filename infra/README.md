@@ -75,17 +75,18 @@ Use these values to set:
 
 ## Deploy frontend (S3 + CloudFront)
 
-Deploy the frontend stack:
+Deploy the frontend stack. If you want CloudFront to proxy `/api/*` to App Runner
+(recommended to eliminate CORS), pass the App Runner domain via context:
 
 ```
-npx cdk deploy EstimationFrontendStack
+npx cdk deploy EstimationFrontendStack -c frontend='{"apiDomain":"<your-apprunner-domain>"}'
 ```
 
 Build the frontend and sync:
 
 ```
 cd ../frontend
-$env:VITE_API_URL = "https://<your-apprunner-url>/"
+$env:VITE_API_URL = "/"
 $env:VITE_DISABLE_AUTH = "false"
 $env:VITE_APP_ENV = "prod"
 npm ci
@@ -126,6 +127,18 @@ Optional frontend asset deployment via CDK:
 
 ```
 npx cdk deploy EstimationFrontendStack -c frontend='{"deployAssets":true,"assetPath":"../frontend/dist"}'
+```
+
+To enable the `/api/*` proxy and asset deploy together:
+
+```
+npx cdk deploy EstimationFrontendStack -c frontend='{"apiDomain":"<your-apprunner-domain>","deployAssets":true,"assetPath":"../frontend/dist"}'
+```
+
+You can also pass a full URL instead of a domain:
+
+```
+npx cdk deploy EstimationFrontendStack -c frontend='{"apiUrl":"https://<your-apprunner-domain>"}'
 ```
 
 Disable frontend stack entirely:

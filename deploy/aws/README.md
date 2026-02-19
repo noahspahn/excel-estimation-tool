@@ -20,7 +20,7 @@ npx cdk deploy EstimationFrontendStack
 Use the stack outputs to set:
 
 - Backend env: `COGNITO_REGION`, `COGNITO_USER_POOL_ID`, `COGNITO_CLIENT_ID`
-- Frontend build env: `VITE_API_URL`, `VITE_COGNITO_REGION`, `VITE_COGNITO_CLIENT_ID`, `VITE_DISABLE_AUTH=false`
+- Frontend build env: `VITE_API_URL=/`, `VITE_COGNITO_REGION`, `VITE_COGNITO_CLIENT_ID`, `VITE_DISABLE_AUTH=false`
 
 See `infra/README.md` for full details.
 
@@ -29,6 +29,13 @@ deploy only Cognito + ECR with:
 
 ```
 npx cdk deploy EstimationBackendStack -c backend='{"existingRepoName":"estimation-backend","createService":false}'
+```
+
+To eliminate CORS permanently, deploy the frontend stack with an App Runner
+origin so CloudFront proxies `/api/*`:
+
+```
+npx cdk deploy EstimationFrontendStack -c frontend='{"apiDomain":"<your-apprunner-domain>"}'
 ```
 
 ---
@@ -73,10 +80,10 @@ The “live” setup looks like this:
 - **Frontend app**
 
   - Built with Vite from `frontend/` into `frontend/dist`.
-  - Synced to an S3 bucket (e.g. `meshai-estimation-frontend-1`) using `aws s3 sync` and served via the S3 website endpoint:  
-    `http://meshai-estimation-frontend-1.s3-website-us-east-1.amazonaws.com/`.
+  - Synced to an S3 bucket (e.g. `meshai-estimation-frontend-1`) using `aws s3 sync` and served via CloudFront.
+  - With the CloudFront `/api/*` proxy enabled, the frontend can call `/api/...` on the same origin (no CORS).
   - At build time, the frontend reads these Vite env vars:
-    - `VITE_API_URL` → points at the App Runner backend (e.g. `https://cqdcypvz3e.us-east-1.awsapprunner.com/`).
+    - `VITE_API_URL` -> set to `/` for same-origin API calls via CloudFront.
     - `VITE_EXCEL_API_ENABLED` → enables Excel-related UI.
     - `VITE_APP_ENV` -> `dev` or `stage` shows a badge in the top nav (prod stays hidden).
     - `VITE_COGNITO_REGION` / `VITE_COGNITO_CLIENT_ID` → used to call Cognito’s JSON APIs.
@@ -110,7 +117,7 @@ What it does (when run from repo root):
    - Looks up the existing App Runner service by name (default: `estimation-backend-AR`) and prints its Service URL (it does **not** create or modify the App Runner service; that is assumed already configured).
 
 2. **Frontend**
-   - Builds the React app from `frontend/` with `VITE_API_URL` set to the App Runner URL and `VITE_EXCEL_API_ENABLED=true`.
+   - Builds the React app from `frontend/` with `VITE_API_URL` set to `/` (CloudFront same-origin) and `VITE_EXCEL_API_ENABLED=true`.
    - Uses `npm ci` if `package-lock.json` is present, otherwise `npm install`.
    - Runs `npm run build` to produce `frontend/dist`.
    - Syncs `frontend/dist` to the S3 bucket you specify (default: `meshai-estimation-frontend-1`) via `aws s3 sync ... --delete`.
@@ -176,7 +183,7 @@ If you prefer to run the steps yourself:
    - From `frontend/`:
 
      ```powershell
-     $env:VITE_API_URL = "https://<your-apprunner-url>/"
+     $env:VITE_API_URL = "/"
      $env:VITE_EXCEL_API_ENABLED = "true"
      $env:VITE_DISABLE_AUTH = "false"
      $env:VITE_APP_ENV = "dev"

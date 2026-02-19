@@ -96,13 +96,27 @@ jobs:
         with:
           node-version: 18
           cache: npm
-          cache-dependency-path: frontend/package-lock.json
+          cache-dependency-path: |
+            frontend/package-lock.json
+            infra/package-lock.json
+
+      - name: Deploy frontend infrastructure (CloudFront /api proxy)
+        run: |
+          set -euo pipefail
+          API_DOMAIN="${BACKEND_URL#https://}"
+          API_DOMAIN="${API_DOMAIN#http://}"
+          API_DOMAIN="${API_DOMAIN%%/*}"
+          FRONTEND_CONTEXT=$(printf '{"apiDomain":"%s"}' "${API_DOMAIN}")
+          cd infra
+          npm ci
+          npx cdk bootstrap
+          npx cdk deploy EstimationFrontendStack --require-approval never -c frontend="${FRONTEND_CONTEXT}"
 
       - name: Build frontend
         run: |
           set -euo pipefail
           cd frontend
-          export VITE_API_URL="${BACKEND_URL}/"
+          export VITE_API_URL="/"
           if [ -n "${VITE_EXCEL_API_ENABLED}" ]; then export VITE_EXCEL_API_ENABLED; fi
           if [ -n "${VITE_DISABLE_AUTH}" ]; then export VITE_DISABLE_AUTH; fi
           if [ -n "${VITE_APP_ENV}" ]; then export VITE_APP_ENV; fi
