@@ -129,3 +129,14 @@ jobs:
         run: |
           set -euo pipefail
           aws s3 sync frontend/dist "s3://${S3_BUCKET}/" --delete --region "${AWS_REGION}"
+
+      - name: Invalidate CloudFront cache
+        run: |
+          set -euo pipefail
+          DISTRIBUTION_ID=$(aws cloudformation describe-stacks --stack-name EstimationFrontendStack --region "${AWS_REGION}" \
+            --query "Stacks[0].Outputs[?OutputKey=='FrontendDistributionId'].OutputValue" --output text)
+          if [ -n "${DISTRIBUTION_ID}" ] && [ "${DISTRIBUTION_ID}" != "None" ]; then
+            aws cloudfront create-invalidation --distribution-id "${DISTRIBUTION_ID}" --paths "/*" >/dev/null
+          else
+            echo "CloudFront distribution id not found; skipping invalidation."
+          fi
