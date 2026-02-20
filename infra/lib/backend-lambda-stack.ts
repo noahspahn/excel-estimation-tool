@@ -11,6 +11,7 @@ type BackendLambdaContext = {
   mode?: 'fastapi' | 'router'
   legacyBackendUrl?: string
   timeoutSeconds?: number | string
+  apiTimeoutSeconds?: number | string
   memorySize?: number | string
   env?: Record<string, string>
 }
@@ -34,7 +35,15 @@ export class BackendLambdaStack extends Stack {
     const apiName = cfg.apiName ?? 'estimation-backend-next'
     const stageName = cfg.stageName ?? 'prod'
     const mode = cfg.mode === 'router' ? 'router' : 'fastapi'
-    const timeoutSeconds = Number(cfg.timeoutSeconds ?? 60)
+    const lambdaTimeoutSeconds = Number(cfg.timeoutSeconds ?? 60)
+    const apiTimeoutSeconds = Number(cfg.apiTimeoutSeconds ?? 29)
+    const normalizedLambdaTimeoutSeconds =
+      Number.isFinite(lambdaTimeoutSeconds) && lambdaTimeoutSeconds > 0
+        ? Math.floor(lambdaTimeoutSeconds)
+        : 60
+    const normalizedApiTimeoutSeconds =
+      Number.isFinite(apiTimeoutSeconds) && apiTimeoutSeconds > 0 ? Math.floor(apiTimeoutSeconds) : 29
+    const effectiveApiTimeoutSeconds = Math.min(normalizedApiTimeoutSeconds, normalizedLambdaTimeoutSeconds)
     const memorySize = Number(cfg.memorySize ?? 512)
     const legacyBackendUrl = String(cfg.legacyBackendUrl ?? '').trim().replace(/\/+$/, '')
     const envVars = {
@@ -55,7 +64,7 @@ export class BackendLambdaStack extends Stack {
         runtime: lambda.Runtime.PYTHON_3_11,
         handler: 'index.handler',
         code: lambda.Code.fromAsset(path.join(__dirname, '..', 'lambda', 'backend-next')),
-        timeout: cdk.Duration.seconds(timeoutSeconds),
+        timeout: cdk.Duration.seconds(normalizedLambdaTimeoutSeconds),
         memorySize,
         environment: {
           LEGACY_BASE_URL: legacyBackendUrl,
@@ -68,7 +77,7 @@ export class BackendLambdaStack extends Stack {
         code: lambda.DockerImageCode.fromImageAsset(path.join(__dirname, '..', '..', 'backend'), {
           file: 'Dockerfile.lambda',
         }),
-        timeout: cdk.Duration.seconds(timeoutSeconds),
+        timeout: cdk.Duration.seconds(normalizedLambdaTimeoutSeconds),
         memorySize,
         environment: envVars,
       })
@@ -83,6 +92,9 @@ export class BackendLambdaStack extends Stack {
       restApiName: apiName,
       handler,
       proxy: true,
+      integrationOptions: {
+        timeout: cdk.Duration.seconds(effectiveApiTimeoutSeconds),
+      },
       binaryMediaTypes: ['application/pdf', 'application/octet-stream'],
       defaultCorsPreflightOptions: {
         allowOrigins: apigateway.Cors.ALL_ORIGINS,
@@ -124,6 +136,9 @@ export class BackendLambdaStack extends Stack {
     })
     new CfnOutput(this, 'BackendLambdaMode', {
       value: mode,
+    })
+    new CfnOutput(this, 'BackendLambdaApiTimeoutSeconds', {
+      value: String(effectiveApiTimeoutSeconds),
     })
   }
 }

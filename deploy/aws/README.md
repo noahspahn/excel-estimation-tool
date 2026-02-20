@@ -25,6 +25,12 @@ Use the stack outputs to set:
 - Backend env: `COGNITO_REGION`, `COGNITO_USER_POOL_ID`, `COGNITO_CLIENT_ID`
 - Frontend build env: `VITE_API_URL=/`, `VITE_COGNITO_REGION`, `VITE_COGNITO_CLIENT_ID`, `VITE_DISABLE_AUTH=false`, `VITE_BACKEND_TARGET=legacy|next`
 
+If you are using GitHub Actions for CDK deploys, these optional GitHub
+Environment variables control API Next timeout behavior:
+
+- `BACKEND_LAMBDA_TIMEOUT_SECONDS` (Lambda timeout, default `60`)
+- `BACKEND_LAMBDA_API_TIMEOUT_SECONDS` (API Gateway integration timeout, default `29`)
+
 See `infra/README.md` for full details.
 
 If you're at the App Runner service limit, reuse an existing service and

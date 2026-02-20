@@ -25,6 +25,8 @@ jobs:
       VITE_APP_ENV: ${{ github.ref_name == 'main' && 'prod' || github.ref_name == 'stage' && 'stage' || 'dev' }}
       VITE_COGNITO_REGION: ${{ vars.VITE_COGNITO_REGION || '' }}
       VITE_COGNITO_CLIENT_ID: ${{ vars.VITE_COGNITO_CLIENT_ID || '' }}
+      BACKEND_LAMBDA_TIMEOUT_SECONDS: ${{ vars.BACKEND_LAMBDA_TIMEOUT_SECONDS || '60' }}
+      BACKEND_LAMBDA_API_TIMEOUT_SECONDS: ${{ vars.BACKEND_LAMBDA_API_TIMEOUT_SECONDS || '29' }}
 
     steps:
       - name: Checkout
@@ -124,8 +126,10 @@ jobs:
             --arg mode "fastapi" \
             --arg legacy "${BACKEND_URL}" \
             --arg region "${AWS_REGION}" \
+            --arg timeout "${BACKEND_LAMBDA_TIMEOUT_SECONDS}" \
+            --arg apiTimeout "${BACKEND_LAMBDA_API_TIMEOUT_SECONDS}" \
             --argjson env "${APP_RUNNER_ENV}" \
-            '{mode:$mode,legacyBackendUrl:$legacy,env:($env + {"AWS_REGION":$region})}')
+            '{mode:$mode,legacyBackendUrl:$legacy,timeoutSeconds:($timeout|tonumber),apiTimeoutSeconds:($apiTimeout|tonumber),env:($env + {"AWS_REGION":$region})}')
           npx cdk deploy EstimationBackendLambdaStack --require-approval never -c backendLambda="${BACKEND_LAMBDA_CONTEXT}"
           NEXT_API_URL=$(aws cloudformation describe-stacks --stack-name EstimationBackendLambdaStack --region "${AWS_REGION}" \
             --query "Stacks[0].Outputs[?OutputKey=='BackendLambdaApiUrl'].OutputValue" --output text)

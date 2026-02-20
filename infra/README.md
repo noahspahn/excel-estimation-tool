@@ -55,7 +55,7 @@ This stack is intended for migration testing while the App Runner backend remain
 the primary path.
 
 ```
-npx cdk deploy EstimationBackendLambdaStack -c backendLambda='{"mode":"fastapi","env":{"AWS_REGION":"us-east-1"}}'
+npx cdk deploy EstimationBackendLambdaStack -c backendLambda='{"mode":"fastapi","timeoutSeconds":60,"apiTimeoutSeconds":29,"env":{"AWS_REGION":"us-east-1"}}'
 ```
 
 `mode` options:
@@ -63,6 +63,10 @@ npx cdk deploy EstimationBackendLambdaStack -c backendLambda='{"mode":"fastapi",
 - `fastapi` (default): run the full backend app in Lambda via Mangum.
 - `router`: use the lightweight router Lambda and proxy unknown routes to
   `legacyBackendUrl`.
+- `timeoutSeconds`: Lambda timeout in seconds (default `60`).
+- `apiTimeoutSeconds`: API Gateway integration timeout in seconds (default `29`).
+  API Gateway defaults to a 29-second max unless your AWS account has an
+  approved quota increase for regional/private REST APIs.
 
 Outputs include:
 
