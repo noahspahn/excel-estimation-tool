@@ -37,6 +37,7 @@ from .services.calculation_service import CalculationService
 from .services.data_service import DataService
 from .services.web_scraper_service import WebScraperService, ScrapeRequest
 from .services.storage_service import StorageService
+from .services.report_registry_service import ReportRegistryService
 from .models import ComplexityLevel, EstimationInput
 from .db import engine, get_session
 from .db_models import Base, Proposal, ProposalVersion, ProposalDocument, ContractOpportunity, ContractSyncState
@@ -59,6 +60,12 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=[
+        "X-Report-Location",
+        "X-Report-Document-Id",
+        "X-Report-Id",
+        "X-Report-Status",
+    ],
 )
 
 # Initialize services
@@ -66,6 +73,7 @@ calculation_service = CalculationService()
 data_service = DataService()
 web_scraper_service = WebScraperService()
 storage_service = StorageService()
+report_registry_service = ReportRegistryService()
 # Note: ExportService (and ReportLab) are imported lazily in the report endpoint
 
 CONTRACT_STATUSES = {"new", "in_progress", "submitted", "awarded", "lost"}
@@ -285,6 +293,9 @@ class ReportRequest(EstimationRequest):
     # Optional persistence hooks
     proposal_id: Optional[str] = None
     proposal_version: Optional[int] = None
+    save_report: bool = True
+    overwrite_report_id: Optional[str] = None
+    report_label: Optional[str] = None
     # AI subtasks toggle
     use_ai_subtasks: bool = True
 
@@ -1395,53 +1406,122 @@ def generate_report(req: ReportRequest, include_ai: bool = False, tone: str = "p
     filename = f"estimation_report_{ts}.pdf"
 
     storage_record: Optional[Dict[str, Any]] = None
-    if storage_service.is_configured() and req.proposal_id:
-        # Validate proposal ownership before persisting the report
-        with get_session() as session:
-            prop = (
-                session.query(Proposal)
-                .filter(Proposal.id == req.proposal_id, Proposal.owner_email == current_user)
-                .one_or_none()
-            )
-            if not prop:
-                raise HTTPException(status_code=404, detail="Proposal not found for current user")
+    report_status = "not_saved"
+    if req.save_report:
+        if not storage_service.is_configured() or not report_registry_service.is_configured():
+            report_status = "storage_not_configured"
+        else:
+            proposal_meta: Dict[str, Optional[str]] = {
+                "proposal_id": None,
+                "proposal_title": None,
+                "proposal_public_id": None,
+            }
+            if req.proposal_id:
+                with get_session() as session:
+                    prop = (
+                        session.query(Proposal)
+                        .filter(Proposal.id == req.proposal_id, Proposal.owner_email == current_user)
+                        .one_or_none()
+                    )
+                    if not prop:
+                        raise HTTPException(status_code=404, detail="Proposal not found for current user")
+                    proposal_meta = {
+                        "proposal_id": prop.id,
+                        "proposal_title": prop.title,
+                        "proposal_public_id": prop.public_id,
+                    }
+
+            existing_item = None
+            if req.overwrite_report_id:
+                existing_item = report_registry_service.get_report(current_user, req.overwrite_report_id)
+                if not existing_item:
+                    raise HTTPException(status_code=404, detail="Report to overwrite was not found")
+                if not proposal_meta["proposal_id"] and existing_item.get("proposal_id"):
+                    proposal_meta = {
+                        "proposal_id": existing_item.get("proposal_id"),
+                        "proposal_title": existing_item.get("proposal_title"),
+                        "proposal_public_id": existing_item.get("proposal_public_id"),
+                    }
+
+            key_prefix = f"reports/{current_user}"
+            if proposal_meta["proposal_id"]:
+                key_prefix = f"proposals/{proposal_meta['proposal_id']}/reports"
             upload = storage_service.upload_bytes(
                 pdf_bytes,
-                key_prefix=f"proposals/{req.proposal_id}/reports",
+                key_prefix=key_prefix,
                 filename=filename,
                 content_type="application/pdf",
             )
-            doc = ProposalDocument(
-                proposal_id=req.proposal_id,
-                version=req.proposal_version,
-                kind="report",
+
+            payload_input = req.model_dump(
+                exclude={
+                    "narrative_sections",
+                    "style_guide",
+                    "contract_url",
+                    "contract_excerpt",
+                    "proposal_id",
+                    "proposal_version",
+                    "save_report",
+                    "overwrite_report_id",
+                    "report_label",
+                    "use_ai_subtasks",
+                }
+            )
+            payload_snapshot: Dict[str, Any] = {
+                "estimation_input": payload_input,
+                "estimation_result": asdict(result),
+                "narrative_sections": narrative_sections or {},
+                "style_guide": req.style_guide,
+                "tone": tone,
+                "tool_version": req.tool_version,
+                "module_subtasks": module_subtasks,
+                "subtask_generation_status": subtask_status,
+            }
+            if roi_summary:
+                payload_snapshot["roi_summary"] = roi_summary
+            if estimation_data.get("contract_source"):
+                payload_snapshot["contract_source"] = estimation_data["contract_source"]
+
+            report_id = req.overwrite_report_id or report_registry_service.new_report_id()
+            report_item = report_registry_service.new_item(
+                owner_email=current_user,
+                report_id=report_id,
                 filename=upload["filename"],
                 content_type="application/pdf",
                 bucket=upload["bucket"],
                 key=upload["key"],
                 size_bytes=len(pdf_bytes),
-                meta={
-                    "tone": tone,
-                    "include_ai": include_ai,
-                    "tool_version": req.tool_version,
-                    "created_by": current_user,
-                    "proposal_version": req.proposal_version,
-                    "module_count": len(req.modules),
-                    "complexity": req.complexity,
-                    "total_cost": float(result.total_cost or 0),
-                    "total_hours": float(result.total_labor_hours or 0),
-                    "period_of_performance": req.period_of_performance,
-                    "estimating_method": req.estimating_method,
-                },
+                created_by=current_user,
+                tool_version=req.tool_version,
+                proposal_id=proposal_meta["proposal_id"],
+                proposal_title=proposal_meta["proposal_title"],
+                proposal_public_id=proposal_meta["proposal_public_id"],
+                proposal_version=req.proposal_version,
+                total_cost=float(result.total_cost or 0),
+                total_hours=float(result.total_labor_hours or 0),
+                module_count=len(req.modules),
+                complexity=req.complexity,
+                period_of_performance=req.period_of_performance,
+                estimating_method=req.estimating_method,
+                tone=tone,
+                include_ai=include_ai,
+                report_label=req.report_label or req.project_name or upload["filename"],
+                payload=payload_snapshot,
+                existing_created_at=(existing_item or {}).get("created_at"),
             )
-            session.add(doc)
-            # Commit happens via context manager in get_session
+            report_registry_service.save_report(report_item)
+
+            old_key = (existing_item or {}).get("key")
+            if old_key and old_key != upload["key"] and storage_service.is_configured():
+                storage_service.delete_object(old_key)
+
             storage_record = {
-                "id": doc.id,
+                "id": report_id,
                 "bucket": upload["bucket"],
                 "key": upload["key"],
                 "presigned_url": storage_service.presign_get(upload["key"]),
             }
+            report_status = "overwritten" if existing_item else "saved"
 
     headers = {
         "Content-Disposition": f"attachment; filename=\"{filename}\""
@@ -1449,6 +1529,8 @@ def generate_report(req: ReportRequest, include_ai: bool = False, tone: str = "p
     if storage_record and storage_record.get("presigned_url"):
         headers["X-Report-Location"] = storage_record["presigned_url"]
         headers["X-Report-Document-Id"] = storage_record["id"]
+        headers["X-Report-Id"] = storage_record["id"]
+    headers["X-Report-Status"] = report_status
 
     return StreamingResponse(
         iter([pdf_bytes]),
@@ -2047,6 +2129,20 @@ def list_reports(
     presign: bool = True,
     current_user: str = Depends(get_current_user),
 ):
+    if report_registry_service.is_configured():
+        rows = report_registry_service.list_reports(
+            current_user,
+            proposal_id=proposal_id,
+            limit=500,
+        )
+        docs = []
+        for item in rows:
+            url = None
+            if presign and storage_service.is_configured() and item.get("key"):
+                url = storage_service.presign_get(item["key"])
+            docs.append(report_registry_service.to_api_row(item, presigned_url=url))
+        return docs
+
     with get_session() as session:
         query = (
             session.query(ProposalDocument, Proposal)
@@ -2087,6 +2183,39 @@ def list_reports(
             row["url"] = storage_service.presign_get(doc.key)
         docs.append(row)
     return docs
+
+
+@app.get("/api/v1/reports/{report_id}/payload")
+def get_report_payload(report_id: str, current_user: str = Depends(get_current_user)):
+    if not report_registry_service.is_configured():
+        raise HTTPException(status_code=400, detail="Report registry is not configured")
+    row = report_registry_service.get_report(current_user, report_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="Report not found")
+    return {
+        "id": row.get("report_id"),
+        "proposal_id": row.get("proposal_id"),
+        "proposal_title": row.get("proposal_title"),
+        "proposal_public_id": row.get("proposal_public_id"),
+        "created_at": row.get("created_at"),
+        "updated_at": row.get("updated_at"),
+        "payload": row.get("payload") or {},
+    }
+
+
+@app.delete("/api/v1/reports/{report_id}")
+def delete_report_entry(report_id: str, current_user: str = Depends(get_current_user)):
+    if not report_registry_service.is_configured():
+        raise HTTPException(status_code=400, detail="Report registry is not configured")
+    row = report_registry_service.get_report(current_user, report_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="Report not found")
+
+    key = row.get("key")
+    deleted = report_registry_service.delete_report(current_user, report_id)
+    if deleted and storage_service.is_configured() and key:
+        storage_service.delete_object(str(key))
+    return {"deleted": deleted, "id": report_id}
 
 
 @app.post("/api/v1/proposals/{proposal_id}/documents")

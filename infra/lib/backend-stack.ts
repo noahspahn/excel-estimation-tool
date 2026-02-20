@@ -6,6 +6,8 @@ import * as iam from 'aws-cdk-lib/aws-iam'
 import * as cognito from 'aws-cdk-lib/aws-cognito'
 import * as ec2 from 'aws-cdk-lib/aws-ec2'
 import * as rds from 'aws-cdk-lib/aws-rds'
+import * as s3 from 'aws-cdk-lib/aws-s3'
+import * as dynamodb from 'aws-cdk-lib/aws-dynamodb'
 
 type BackendContext = {
   serviceName?: string
@@ -20,6 +22,8 @@ type BackendContext = {
   dbInstanceClass?: string
   dbInstanceSize?: string
   useDefaultVpc?: boolean
+  reportBucketName?: string
+  reportsTableName?: string
   imageTag?: string
   containerPort?: number | string
   cpu?: string
@@ -50,6 +54,8 @@ export class BackendStack extends Stack {
     const memory = cfg.memory ?? '2048'
     const shouldCreateService = cfg.createService !== false
     const shouldCreateDatabase = cfg.createDatabase !== false
+    const reportBucketName = cfg.reportBucketName
+    const reportsTableName = cfg.reportsTableName
 
     const shouldCreateRepo = cfg.createRepo === true
     const repoLookupName = cfg.existingRepoName ?? repoName
@@ -100,6 +106,26 @@ export class BackendStack extends Stack {
         userSrp: true,
         adminUserPassword: true,
       },
+    })
+
+    const reportsBucket = new s3.Bucket(this, 'ReportsBucket', {
+      bucketName: reportBucketName,
+      blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
+      encryption: s3.BucketEncryption.S3_MANAGED,
+      enforceSSL: true,
+      versioned: true,
+      removalPolicy: cdk.RemovalPolicy.RETAIN,
+    })
+
+    const reportsTable = new dynamodb.Table(this, 'ReportsTable', {
+      tableName: reportsTableName,
+      partitionKey: { name: 'owner_email', type: dynamodb.AttributeType.STRING },
+      sortKey: { name: 'report_id', type: dynamodb.AttributeType.STRING },
+      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+      pointInTimeRecoverySpecification: {
+        pointInTimeRecoveryEnabled: true,
+      },
+      removalPolicy: cdk.RemovalPolicy.RETAIN,
     })
 
     let dbInstance: rds.DatabaseInstance | null = null
@@ -160,9 +186,12 @@ export class BackendStack extends Stack {
 
     const envVars = {
       AUTH_REQUIRED: 'true',
+      AWS_REGION: Stack.of(this).region,
       COGNITO_REGION: Stack.of(this).region,
       COGNITO_USER_POOL_ID: userPool.userPoolId,
       COGNITO_CLIENT_ID: userPoolClient.userPoolClientId,
+      S3_REPORT_BUCKET: reportsBucket.bucketName,
+      REPORTS_TABLE_NAME: reportsTable.tableName,
       ...(databaseUrl ? { DATABASE_URL: databaseUrl } : {}),
       ...(cfg.env || {}),
     }
@@ -172,6 +201,13 @@ export class BackendStack extends Stack {
     }))
 
     if (shouldCreateService) {
+      const runtimeRole = new iam.Role(this, 'AppRunnerRuntimeRole', {
+        assumedBy: new iam.ServicePrincipal('tasks.apprunner.amazonaws.com'),
+        description: 'Runtime role for App Runner backend service',
+      })
+      reportsBucket.grantReadWrite(runtimeRole)
+      reportsTable.grantReadWriteData(runtimeRole)
+
       const accessRole = new iam.Role(this, 'AppRunnerEcrAccessRole', {
         assumedBy: new iam.ServicePrincipal('build.apprunner.amazonaws.com'),
         description: 'App Runner access role for ECR image pulls',
@@ -203,6 +239,7 @@ export class BackendStack extends Stack {
         instanceConfiguration: {
           cpu,
           memory,
+          instanceRoleArn: runtimeRole.roleArn,
         },
       })
       service.addDependency(vpcConnector)
@@ -225,6 +262,12 @@ export class BackendStack extends Stack {
     })
     new CfnOutput(this, 'CognitoRegion', {
       value: Stack.of(this).region,
+    })
+    new CfnOutput(this, 'ReportsBucketName', {
+      value: reportsBucket.bucketName,
+    })
+    new CfnOutput(this, 'ReportsTableName', {
+      value: reportsTable.tableName,
     })
     new CfnOutput(this, 'VpcConnectorArn', {
       value: vpcConnector.attrVpcConnectorArn,

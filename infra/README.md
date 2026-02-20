@@ -5,6 +5,7 @@ This CDK app provisions:
 - **Backend**: ECR repo + App Runner service (HTTPS endpoint).
 - **Cognito**: User pool + app client for auth.
 - **Database**: RDS Postgres + VPC + App Runner VPC connector + security groups.
+- **Reports**: S3 bucket for PDF binaries + DynamoDB table for report metadata/payload snapshots.
 - **Frontend (optional)**: S3 + CloudFront distribution for HTTPS hosting.
 
 ## Prereqs
@@ -59,6 +60,18 @@ When `createDatabase` is enabled (default), the stack outputs:
 
 The App Runner service is configured with a `DATABASE_URL` that points at
 the RDS instance and uses `sslmode=require`.
+
+## Report storage outputs
+
+The backend stack also outputs:
+
+- `ReportsBucketName`
+- `ReportsTableName`
+
+The App Runner service receives:
+
+- `S3_REPORT_BUCKET`
+- `REPORTS_TABLE_NAME`
 
 ## Cognito outputs
 

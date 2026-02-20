@@ -3,6 +3,7 @@ import './App.css'
 
 const NAV_ITEMS = [
   { to: '/', label: 'Estimator', end: true },
+  { to: '/reports', label: 'Saved Reports' },
   { to: '/subcontractors', label: 'Subcontractors' },
   { to: '/contracts', label: 'Contract Stats' },
 ]

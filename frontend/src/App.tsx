@@ -71,6 +71,10 @@ function App() {
   const [sharePublicId, setSharePublicId] = useState<string | null>(null)
   const [previewIdInput, setPreviewIdInput] = useState<string>('')
   const [proposalId, setProposalId] = useState<string | null>(null)
+  const [overwriteReportId, setOverwriteReportId] = useState<string | null>(null)
+  const [saveReportOnGenerate, setSaveReportOnGenerate] = useState(true)
+  const [reportLoadNotice, setReportLoadNotice] = useState<string | null>(null)
+  const [queryReportApplied, setQueryReportApplied] = useState(false)
   const [prereqWarnings, setPrereqWarnings] = useState<string[]>([])
   const [authEmail, setAuthEmail] = useState<string | null>(null)
   const [authToken, setAuthToken] = useState<string | null>(null)
@@ -913,6 +917,9 @@ function App() {
           tool_version: appVersion || undefined,
           proposal_id: reportProposalId || undefined,
           proposal_version: versions?.length ? versions[versions.length - 1]?.version : undefined,
+          save_report: saveReportOnGenerate,
+          overwrite_report_id: overwriteReportId || undefined,
+          report_label: projectName || undefined,
           use_ai_subtasks: includeAI,
           narrative_sections: hasCustomNarrative ? editableNarrative : undefined,
           contract_url: contractUrl,
@@ -931,11 +938,18 @@ function App() {
       a.click()
       a.remove()
       window.URL.revokeObjectURL(url)
-      const reportDocId = res.headers.get('X-Report-Document-Id')
-      if (reportDocId) {
+      const reportId = res.headers.get('X-Report-Id') || res.headers.get('X-Report-Document-Id')
+      const reportStatus = res.headers.get('X-Report-Status')
+      if (reportId) {
+        setOverwriteReportId(reportId)
+        setReportLoadNotice(
+          reportStatus === 'overwritten'
+            ? `Report ${reportId} overwritten and downloaded.`
+            : `Report ${reportId} saved and downloaded.`
+        )
         await loadReportDocs()
-      } else if (reportProposalId) {
-        setReportsError('Report generated but not saved. Check storage configuration.')
+      } else if (saveReportOnGenerate) {
+        setReportsError('Report generated but not saved. Check report storage configuration.')
       }
     } catch (err) {
       console.error(err)
@@ -1707,20 +1721,18 @@ function App() {
   }
 
   const deleteReport = async (doc: any) => {
-    const targetProposalId = doc?.proposal_id || proposalId
-    if (!targetProposalId) {
-      setReportsError('No proposal associated with this report.')
-      return
-    }
     if (!confirm('Delete this report? This removes the PDF and its database entry.')) return
     try {
       setReportsError(null)
       const headers: Record<string, string> = !AUTH_DISABLED && authToken ? { 'Authorization': `Bearer ${authToken}` } : {}
-      const res = await fetch(`${API}/api/v1/proposals/${targetProposalId}/documents/${doc.id}`, {
+      const res = await fetch(`${API}/api/v1/reports/${doc.id}`, {
         method: 'DELETE',
         headers,
       })
       if (!res.ok) throw new Error('Failed to delete report')
+      if (overwriteReportId === doc.id) {
+        setOverwriteReportId(null)
+      }
       await loadReportDocs()
     } catch (e: any) {
       setReportsError(e?.message || 'Failed to delete report')
@@ -1791,6 +1803,62 @@ function App() {
     setEstimate(payload?.estimation_result || null)
     setShowPreview(!!payload?.estimation_result)
   }
+
+  const loadSavedReportPayload = async (reportId: string, overwriteId?: string | null) => {
+    if (!reportId) return
+    if (!AUTH_DISABLED && !authToken) return
+    try {
+      setReportsError(null)
+      const headers: Record<string, string> = !AUTH_DISABLED && authToken ? { Authorization: `Bearer ${authToken}` } : {}
+      const res = await fetch(`${API}/api/v1/reports/${encodeURIComponent(reportId)}/payload`, { headers })
+      if (!res.ok) throw new Error('Failed to load saved report payload')
+      const data = await res.json()
+      applyPayloadToEditor(data?.payload || {})
+      if (data?.proposal_id) {
+        setProposalId(data.proposal_id)
+      }
+      if (data?.proposal_public_id) {
+        setSharePublicId(data.proposal_public_id)
+        setPreviewIdInput(data.proposal_public_id)
+        setShareUrl(`${window.location.origin}/preview/${encodeURIComponent(data.proposal_public_id)}`)
+      }
+      const nextOverwriteId = overwriteId || null
+      setOverwriteReportId(nextOverwriteId)
+      setReportLoadNotice(
+        nextOverwriteId
+          ? `Loaded report ${reportId}. Next report save will overwrite this entry.`
+          : `Loaded report ${reportId} into the editor.`
+      )
+      await loadReportDocs()
+    } catch (e: any) {
+      setReportLoadNotice(null)
+      setReportsError(e?.message || 'Failed to load saved report payload')
+    }
+  }
+
+  useEffect(() => {
+    if (queryReportApplied) return
+    const params = new URLSearchParams(window.location.search)
+    const reportId = params.get('load_report_id')
+    if (!reportId) {
+      setQueryReportApplied(true)
+      return
+    }
+    if (!AUTH_DISABLED && !authToken) {
+      return
+    }
+
+    const overwriteId = params.get('overwrite_report_id')
+    loadSavedReportPayload(reportId, overwriteId)
+      .finally(() => {
+        params.delete('load_report_id')
+        params.delete('overwrite_report_id')
+        const qs = params.toString()
+        const next = `${window.location.pathname}${qs ? `?${qs}` : ''}${window.location.hash || ''}`
+        window.history.replaceState({}, '', next)
+        setQueryReportApplied(true)
+      })
+  }, [authToken, queryReportApplied])
 
   const restoreVersion = async (ver: number) => {
     if (!proposalId || (!AUTH_DISABLED && !authToken)) { alert('Sign in and create a share link first.'); return }
@@ -2748,7 +2816,7 @@ function App() {
       </div>
       <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center', marginBottom: 8 }}>
         <label>
-          Proposal ID (optional, saves PDF to proposal):
+          Proposal ID (optional):
           <input
             type="text"
             value={proposalId || ''}
@@ -2757,10 +2825,31 @@ function App() {
             style={{ marginLeft: 6, padding: '4px 6px', minWidth: 200 }}
           />
         </label>
+        <label>
+          <input
+            type="checkbox"
+            checked={saveReportOnGenerate}
+            onChange={(e) => setSaveReportOnGenerate(e.target.checked)}
+          />{' '}
+          Save to report library
+        </label>
+        {overwriteReportId && (
+          <div style={{ display: 'inline-flex', gap: 6, alignItems: 'center' }}>
+            <span style={{ fontSize: 12, color: '#555' }}>Overwrite target: {overwriteReportId}</span>
+            <button className="btn" onClick={() => setOverwriteReportId(null)}>
+              Clear
+            </button>
+          </div>
+        )}
         <div style={{ fontSize: 12, color: '#555' }}>
-          Selected modules + scraped excerpt will drive the subtask section in the PDF.
+          Selected modules + scraped excerpt drive the subtask section in the PDF.
         </div>
       </div>
+      {reportLoadNotice && (
+        <div style={{ marginBottom: 8, fontSize: 12, color: '#1b5e20' }}>
+          {reportLoadNotice}
+        </div>
+      )}
 
       <div style={{ border: '1px dashed #ccc', borderRadius: 6, padding: 10, marginBottom: 12, background: '#fafafa' }}>
         <div style={{ fontWeight: 600, marginBottom: 4 }}>Subtask context preview</div>
@@ -3187,11 +3276,15 @@ function App() {
                         <span style={{ fontSize: 12, color: '#777' }}>No link</span>
                       )}
                       <div style={{ fontSize: 11, color: '#777' }}>
-                        {doc.filename || 'report.pdf'} · {formatBytes(doc.size_bytes)}
+                        {doc.filename || 'report.pdf'} - {formatBytes(doc.size_bytes)}
                       </div>
                     </td>
                     <td style={{ padding: 6 }}>
-                      <button className="btn" onClick={() => deleteReport(doc)}>Delete</button>
+                      <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                        <button className="btn" onClick={() => loadSavedReportPayload(doc.id, null)}>Load</button>
+                        <button className="btn" onClick={() => loadSavedReportPayload(doc.id, doc.id)}>Load + Overwrite</button>
+                        <button className="btn" onClick={() => deleteReport(doc)}>Delete</button>
+                      </div>
                     </td>
                   </tr>
                 ))}

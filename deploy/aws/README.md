@@ -5,6 +5,7 @@
 The recommended deployment path is now the CDK app in `infra/`:
 
 - **Backend**: App Runner + ECR + Cognito + RDS (auth enabled, DB prewired)
+- **Report persistence**: S3 + DynamoDB (PDF storage + report metadata/payload)
 - **Frontend**: S3 + CloudFront (HTTPS)
 
 Start here:
