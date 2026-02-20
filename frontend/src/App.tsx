@@ -1,9 +1,9 @@
 import { useState, useEffect } from 'react'
 import TopNav from './TopNav'
 import './App.css'
+import { getApiBase } from './apiConfig'
 
-const rawApi = (import.meta as any).env?.VITE_API_URL || (typeof window !== 'undefined' ? window.location.origin : 'http://localhost:8000')
-const API = rawApi.replace(/\/+$/, '')
+const API = getApiBase()
 
 const COGNITO_CLIENT_ID = (import.meta as any).env?.VITE_COGNITO_CLIENT_ID
 const COGNITO_REGION = (import.meta as any).env?.VITE_COGNITO_REGION

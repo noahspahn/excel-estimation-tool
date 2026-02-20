@@ -2,9 +2,9 @@ import { useEffect, useState } from 'react'
 import { useParams } from 'react-router-dom'
 import './App.css'
 import TopNav from './TopNav'
+import { getApiBase } from './apiConfig'
 
-const rawApi = (import.meta as any).env?.VITE_API_URL || (typeof window !== 'undefined' ? window.location.origin : 'http://localhost:8000')
-const API = rawApi.replace(/\/+$/, '')
+const API = getApiBase()
 const AUTH_DISABLED = String((import.meta as any).env?.VITE_DISABLE_AUTH ?? 'false').toLowerCase() === 'true'
 
 type VersionInfo = { id: string; version: number; title?: string; created_at?: string }

@@ -5,6 +5,7 @@
 The recommended deployment path is now the CDK app in `infra/`:
 
 - **Backend**: App Runner + ECR + Cognito + RDS (auth enabled, DB prewired)
+- **Backend Next (stage 1 migration)**: API Gateway + Lambda, proxied behind CloudFront at `/api-next/*`
 - **Report persistence**: S3 + DynamoDB (PDF storage + report metadata/payload)
 - **Frontend**: S3 + CloudFront (HTTPS)
 
@@ -15,13 +16,14 @@ cd infra
 npm install
 npx cdk bootstrap
 npx cdk deploy EstimationBackendStack
+npx cdk deploy EstimationBackendLambdaStack
 npx cdk deploy EstimationFrontendStack
 ```
 
 Use the stack outputs to set:
 
 - Backend env: `COGNITO_REGION`, `COGNITO_USER_POOL_ID`, `COGNITO_CLIENT_ID`
-- Frontend build env: `VITE_API_URL=/`, `VITE_COGNITO_REGION`, `VITE_COGNITO_CLIENT_ID`, `VITE_DISABLE_AUTH=false`
+- Frontend build env: `VITE_API_URL=/`, `VITE_COGNITO_REGION`, `VITE_COGNITO_CLIENT_ID`, `VITE_DISABLE_AUTH=false`, `VITE_BACKEND_TARGET=legacy|next`
 
 See `infra/README.md` for full details.
 

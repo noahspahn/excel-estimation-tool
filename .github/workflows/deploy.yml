@@ -21,6 +21,7 @@ jobs:
       S3_BUCKET: ${{ vars.S3_BUCKET }}
       VITE_EXCEL_API_ENABLED: ${{ vars.VITE_EXCEL_API_ENABLED || 'true' }}
       VITE_DISABLE_AUTH: ${{ vars.VITE_DISABLE_AUTH || '' }}
+      VITE_BACKEND_TARGET: ${{ vars.VITE_BACKEND_TARGET || 'legacy' }}
       VITE_APP_ENV: ${{ github.ref_name == 'main' && 'prod' || github.ref_name == 'stage' && 'stage' || 'dev' }}
       VITE_COGNITO_REGION: ${{ vars.VITE_COGNITO_REGION || '' }}
       VITE_COGNITO_CLIENT_ID: ${{ vars.VITE_COGNITO_CLIENT_ID || '' }}
@@ -107,10 +108,18 @@ jobs:
           API_DOMAIN="${BACKEND_URL#https://}"
           API_DOMAIN="${API_DOMAIN#http://}"
           API_DOMAIN="${API_DOMAIN%%/*}"
-          FRONTEND_CONTEXT=$(printf '{"apiDomain":"%s"}' "${API_DOMAIN}")
           cd infra
           npm ci
           npx cdk bootstrap
+          BACKEND_LAMBDA_CONTEXT=$(printf '{"legacyBackendUrl":"%s"}' "${BACKEND_URL}")
+          npx cdk deploy EstimationBackendLambdaStack --require-approval never -c backendLambda="${BACKEND_LAMBDA_CONTEXT}"
+          NEXT_API_URL=$(aws cloudformation describe-stacks --stack-name EstimationBackendLambdaStack --region "${AWS_REGION}" \
+            --query "Stacks[0].Outputs[?OutputKey=='BackendLambdaApiUrl'].OutputValue" --output text)
+          if [ -n "${NEXT_API_URL}" ] && [ "${NEXT_API_URL}" != "None" ]; then
+            FRONTEND_CONTEXT=$(printf '{"apiDomain":"%s","nextApiUrl":"%s"}' "${API_DOMAIN}" "${NEXT_API_URL}")
+          else
+            FRONTEND_CONTEXT=$(printf '{"apiDomain":"%s"}' "${API_DOMAIN}")
+          fi
           npx cdk deploy EstimationFrontendStack --require-approval never -c frontend="${FRONTEND_CONTEXT}"
           FRONTEND_BUCKET=$(aws cloudformation describe-stacks --stack-name EstimationFrontendStack --region "${AWS_REGION}" \
             --query "Stacks[0].Outputs[?OutputKey=='FrontendBucketName'].OutputValue" --output text)
@@ -135,6 +144,7 @@ jobs:
           export VITE_API_URL="/"
           if [ -n "${VITE_EXCEL_API_ENABLED}" ]; then export VITE_EXCEL_API_ENABLED; fi
           if [ -n "${VITE_DISABLE_AUTH}" ]; then export VITE_DISABLE_AUTH; fi
+          if [ -n "${VITE_BACKEND_TARGET}" ]; then export VITE_BACKEND_TARGET; fi
           if [ -n "${VITE_APP_ENV}" ]; then export VITE_APP_ENV; fi
           if [ -n "${VITE_COGNITO_REGION}" ]; then export VITE_COGNITO_REGION; fi
           if [ -n "${VITE_COGNITO_CLIENT_ID}" ]; then export VITE_COGNITO_CLIENT_ID; fi

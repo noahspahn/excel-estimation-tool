@@ -3,6 +3,7 @@
 This CDK app provisions:
 
 - **Backend**: ECR repo + App Runner service (HTTPS endpoint).
+- **Backend Next (stage 1)**: API Gateway + Lambda proxy for side-by-side backend migration.
 - **Cognito**: User pool + app client for auth.
 - **Database**: RDS Postgres + VPC + App Runner VPC connector + security groups.
 - **Reports**: S3 bucket for PDF binaries + DynamoDB table for report metadata/payload snapshots.
@@ -47,6 +48,20 @@ docker push <ACCOUNT_ID>.dkr.ecr.<REGION>.amazonaws.com/estimation-backend:lates
 ```
 
 App Runner will auto-deploy when the image tag updates.
+
+## Deploy backend-next (API Gateway + Lambda)
+
+This stack is intended for migration testing while the App Runner backend remains
+the primary path.
+
+```
+npx cdk deploy EstimationBackendLambdaStack -c backendLambda='{"legacyBackendUrl":"https://<your-apprunner-domain>"}'
+```
+
+Outputs include:
+
+- `BackendLambdaApiUrl`
+- `BackendLambdaApiDomain`
 
 ## RDS + VPC outputs
 
@@ -95,11 +110,19 @@ Deploy the frontend stack. If you want CloudFront to proxy `/api/*` to App Runne
 npx cdk deploy EstimationFrontendStack -c frontend='{"apiDomain":"<your-apprunner-domain>"}'
 ```
 
+To also enable the stage-1 backend route (`/api-next/*`), pass `nextApiUrl` from
+the `EstimationBackendLambdaStack` output:
+
+```
+npx cdk deploy EstimationFrontendStack -c frontend='{"apiDomain":"<your-apprunner-domain>","nextApiUrl":"https://<api-id>.execute-api.<region>.amazonaws.com/prod/"}'
+```
+
 Build the frontend and sync:
 
 ```
 cd ../frontend
 $env:VITE_API_URL = "/"
+$env:VITE_BACKEND_TARGET = "legacy"
 $env:VITE_DISABLE_AUTH = "false"
 $env:VITE_APP_ENV = "prod"
 npm ci

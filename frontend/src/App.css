@@ -506,6 +506,32 @@
   border: 1px solid #eee;
 }
 
+.backend-target {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 8px;
+  border-radius: 999px;
+  background: #fff;
+  border: 1px solid #eee;
+}
+
+.backend-target__label {
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: #666;
+}
+
+.backend-target__select {
+  border: 1px solid #ddd;
+  border-radius: 999px;
+  font-size: 0.78rem;
+  padding: 2px 8px;
+  background: #fff;
+  color: #333;
+}
+
 .stat-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));

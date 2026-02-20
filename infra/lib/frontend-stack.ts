@@ -13,6 +13,49 @@ type FrontendContext = {
   apiDomain?: string
   apiUrl?: string
   apiProtocol?: 'http' | 'https'
+  nextApiDomain?: string
+  nextApiUrl?: string
+  nextApiProtocol?: 'http' | 'https'
+}
+
+type ApiOriginConfig = {
+  domain: string
+  protocol: 'http' | 'https'
+  originPath?: string
+}
+
+function resolveApiOrigin(
+  domainInput?: string,
+  urlInput?: string,
+  protocolInput?: 'http' | 'https',
+): ApiOriginConfig | undefined {
+  const domainValue = (domainInput || '').trim()
+  const urlValue = (urlInput || '').trim()
+
+  if (domainValue) {
+    return {
+      domain: domainValue,
+      protocol: protocolInput ?? 'https',
+    }
+  }
+
+  if (!urlValue) {
+    return undefined
+  }
+
+  try {
+    const parsed = new URL(urlValue)
+    return {
+      domain: parsed.hostname,
+      protocol: protocolInput ?? (parsed.protocol === 'http:' ? 'http' : 'https'),
+      originPath: parsed.pathname && parsed.pathname !== '/' ? parsed.pathname.replace(/\/+$/, '') : undefined,
+    }
+  } catch {
+    return {
+      domain: urlValue,
+      protocol: protocolInput ?? 'https',
+    }
+  }
 }
 
 export class FrontendStack extends Stack {
@@ -37,38 +80,41 @@ export class FrontendStack extends Stack {
       removalPolicy: cdk.RemovalPolicy.RETAIN,
     })
 
-    const apiDomain = (() => {
-      if (cfg.apiDomain) {
-        return cfg.apiDomain
-      }
-      if (!cfg.apiUrl) {
-        return undefined
-      }
-      try {
-        return new URL(cfg.apiUrl).hostname
-      } catch {
-        return cfg.apiUrl
-      }
-    })()
-    const apiProtocol =
-      cfg.apiProtocol ?? (cfg.apiUrl && cfg.apiUrl.startsWith('http://') ? 'http' : 'https')
+    const additionalBehaviors: Record<string, cloudfront.BehaviorOptions> = {}
 
-    const apiBehavior = apiDomain
-      ? {
-          'api/*': {
-            origin: new origins.HttpOrigin(apiDomain, {
-              protocolPolicy:
-                apiProtocol === 'http'
-                  ? cloudfront.OriginProtocolPolicy.HTTP_ONLY
-                  : cloudfront.OriginProtocolPolicy.HTTPS_ONLY,
-            }),
-            allowedMethods: cloudfront.AllowedMethods.ALLOW_ALL,
-            cachePolicy: cloudfront.CachePolicy.CACHING_DISABLED,
-            originRequestPolicy: cloudfront.OriginRequestPolicy.ALL_VIEWER_EXCEPT_HOST_HEADER,
-            viewerProtocolPolicy: cloudfront.ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
-          },
-        }
-      : undefined
+    const apiOrigin = resolveApiOrigin(cfg.apiDomain, cfg.apiUrl, cfg.apiProtocol)
+    if (apiOrigin) {
+      additionalBehaviors['api/*'] = {
+        origin: new origins.HttpOrigin(apiOrigin.domain, {
+          protocolPolicy:
+            apiOrigin.protocol === 'http'
+              ? cloudfront.OriginProtocolPolicy.HTTP_ONLY
+              : cloudfront.OriginProtocolPolicy.HTTPS_ONLY,
+          originPath: apiOrigin.originPath,
+        }),
+        allowedMethods: cloudfront.AllowedMethods.ALLOW_ALL,
+        cachePolicy: cloudfront.CachePolicy.CACHING_DISABLED,
+        originRequestPolicy: cloudfront.OriginRequestPolicy.ALL_VIEWER_EXCEPT_HOST_HEADER,
+        viewerProtocolPolicy: cloudfront.ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
+      }
+    }
+
+    const nextApiOrigin = resolveApiOrigin(cfg.nextApiDomain, cfg.nextApiUrl, cfg.nextApiProtocol)
+    if (nextApiOrigin) {
+      additionalBehaviors['api-next/*'] = {
+        origin: new origins.HttpOrigin(nextApiOrigin.domain, {
+          protocolPolicy:
+            nextApiOrigin.protocol === 'http'
+              ? cloudfront.OriginProtocolPolicy.HTTP_ONLY
+              : cloudfront.OriginProtocolPolicy.HTTPS_ONLY,
+          originPath: nextApiOrigin.originPath,
+        }),
+        allowedMethods: cloudfront.AllowedMethods.ALLOW_ALL,
+        cachePolicy: cloudfront.CachePolicy.CACHING_DISABLED,
+        originRequestPolicy: cloudfront.OriginRequestPolicy.ALL_VIEWER_EXCEPT_HOST_HEADER,
+        viewerProtocolPolicy: cloudfront.ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
+      }
+    }
 
     const distribution = new cloudfront.Distribution(this, 'FrontendDistribution', {
       defaultRootObject: 'index.html',
@@ -76,7 +122,7 @@ export class FrontendStack extends Stack {
         origin: origins.S3BucketOrigin.withOriginAccessControl(bucket),
         viewerProtocolPolicy: cloudfront.ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
       },
-      additionalBehaviors: apiBehavior,
+      additionalBehaviors: Object.keys(additionalBehaviors).length ? additionalBehaviors : undefined,
       errorResponses: [
         {
           httpStatus: 403,
