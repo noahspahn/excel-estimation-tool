@@ -3,7 +3,7 @@
 This CDK app provisions:
 
 - **Backend**: ECR repo + App Runner service (HTTPS endpoint).
-- **Backend Next (stage 1)**: API Gateway + Lambda proxy for side-by-side backend migration.
+- **Backend Next (stage 1)**: API Gateway + Lambda for side-by-side backend migration.
 - **Cognito**: User pool + app client for auth.
 - **Database**: RDS Postgres + VPC + App Runner VPC connector + security groups.
 - **Reports**: S3 bucket for PDF binaries + DynamoDB table for report metadata/payload snapshots.
@@ -55,8 +55,14 @@ This stack is intended for migration testing while the App Runner backend remain
 the primary path.
 
 ```
-npx cdk deploy EstimationBackendLambdaStack -c backendLambda='{"legacyBackendUrl":"https://<your-apprunner-domain>"}'
+npx cdk deploy EstimationBackendLambdaStack -c backendLambda='{"mode":"fastapi","env":{"AWS_REGION":"us-east-1"}}'
 ```
+
+`mode` options:
+
+- `fastapi` (default): run the full backend app in Lambda via Mangum.
+- `router`: use the lightweight router Lambda and proxy unknown routes to
+  `legacyBackendUrl`.
 
 Outputs include:
 

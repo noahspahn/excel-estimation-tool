@@ -108,10 +108,24 @@ jobs:
           API_DOMAIN="${BACKEND_URL#https://}"
           API_DOMAIN="${API_DOMAIN#http://}"
           API_DOMAIN="${API_DOMAIN%%/*}"
+          SERVICE_ARN=$(aws apprunner list-services --region "${AWS_REGION}" \
+            --query "ServiceSummaryList[?ServiceName=='${APP_RUNNER_SERVICE}'].ServiceArn" \
+            --output text)
+          if [ -z "${SERVICE_ARN}" ] || [ "${SERVICE_ARN}" = "None" ]; then
+            echo "App Runner service '${APP_RUNNER_SERVICE}' not found."
+            exit 1
+          fi
+          APP_RUNNER_ENV=$(aws apprunner describe-service --service-arn "${SERVICE_ARN}" --region "${AWS_REGION}" \
+            --query "Service.SourceConfiguration.ImageRepository.ImageConfiguration.RuntimeEnvironmentVariables" --output json)
           cd infra
           npm ci
           npx cdk bootstrap
-          BACKEND_LAMBDA_CONTEXT=$(printf '{"legacyBackendUrl":"%s"}' "${BACKEND_URL}")
+          BACKEND_LAMBDA_CONTEXT=$(jq -cn \
+            --arg mode "fastapi" \
+            --arg legacy "${BACKEND_URL}" \
+            --arg region "${AWS_REGION}" \
+            --argjson env "${APP_RUNNER_ENV}" \
+            '{mode:$mode,legacyBackendUrl:$legacy,env:($env + {"AWS_REGION":$region})}')
           npx cdk deploy EstimationBackendLambdaStack --require-approval never -c backendLambda="${BACKEND_LAMBDA_CONTEXT}"
           NEXT_API_URL=$(aws cloudformation describe-stacks --stack-name EstimationBackendLambdaStack --region "${AWS_REGION}" \
             --query "Stacks[0].Outputs[?OutputKey=='BackendLambdaApiUrl'].OutputValue" --output text)

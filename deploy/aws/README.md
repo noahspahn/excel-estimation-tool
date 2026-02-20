@@ -5,7 +5,7 @@
 The recommended deployment path is now the CDK app in `infra/`:
 
 - **Backend**: App Runner + ECR + Cognito + RDS (auth enabled, DB prewired)
-- **Backend Next (stage 1 migration)**: API Gateway + Lambda, proxied behind CloudFront at `/api-next/*`
+- **Backend Next (stage 1 migration)**: API Gateway + Lambda (full FastAPI in Lambda by default), routed behind CloudFront at `/api-next/*`
 - **Report persistence**: S3 + DynamoDB (PDF storage + report metadata/payload)
 - **Frontend**: S3 + CloudFront (HTTPS)
 

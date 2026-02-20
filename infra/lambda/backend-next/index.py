@@ -185,6 +185,11 @@ def _normalize_path(event: Dict) -> str:
         path = path[len(stage) + 1 :]
     if not path.startswith("/"):
         path = f"/{path}"
+    # CloudFront routes backend-next traffic as /api-next/*.
+    if path == "/api-next":
+        path = "/"
+    elif path.startswith("/api-next/"):
+        path = path[len("/api-next") :]
     return path
 
 

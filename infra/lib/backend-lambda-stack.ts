@@ -8,6 +8,7 @@ import * as path from 'path'
 type BackendLambdaContext = {
   apiName?: string
   stageName?: string
+  mode?: 'fastapi' | 'router'
   legacyBackendUrl?: string
   timeoutSeconds?: number | string
   memorySize?: number | string
@@ -32,22 +33,46 @@ export class BackendLambdaStack extends Stack {
 
     const apiName = cfg.apiName ?? 'estimation-backend-next'
     const stageName = cfg.stageName ?? 'prod'
+    const mode = cfg.mode === 'router' ? 'router' : 'fastapi'
     const timeoutSeconds = Number(cfg.timeoutSeconds ?? 60)
     const memorySize = Number(cfg.memorySize ?? 512)
     const legacyBackendUrl = String(cfg.legacyBackendUrl ?? '').trim().replace(/\/+$/, '')
+    const envVars = {
+      ...(cfg.env || {}),
+      BACKEND_MODE: 'api-next',
+    }
 
-    const handler = new lambda.Function(this, 'BackendNextHandler', {
-      functionName: `${apiName}-handler`,
-      runtime: lambda.Runtime.PYTHON_3_11,
-      handler: 'index.handler',
-      code: lambda.Code.fromAsset(path.join(__dirname, '..', 'lambda', 'backend-next')),
-      timeout: cdk.Duration.seconds(timeoutSeconds),
-      memorySize,
-      environment: {
-        LEGACY_BASE_URL: legacyBackendUrl,
-        ...(cfg.env || {}),
-      },
-    })
+    let handler: lambda.IFunction
+    if (mode === 'router') {
+      if (!legacyBackendUrl) {
+        throw new Error(
+          'backendLambda.legacyBackendUrl is required in router mode. Example: ' +
+            `-c backendLambda='{"mode":"router","legacyBackendUrl":"https://<app-runner-domain>"}'`,
+        )
+      }
+      handler = new lambda.Function(this, 'BackendNextHandler', {
+        functionName: `${apiName}-handler`,
+        runtime: lambda.Runtime.PYTHON_3_11,
+        handler: 'index.handler',
+        code: lambda.Code.fromAsset(path.join(__dirname, '..', 'lambda', 'backend-next')),
+        timeout: cdk.Duration.seconds(timeoutSeconds),
+        memorySize,
+        environment: {
+          LEGACY_BASE_URL: legacyBackendUrl,
+          ...envVars,
+        },
+      })
+    } else {
+      handler = new lambda.DockerImageFunction(this, 'BackendNextHandler', {
+        functionName: `${apiName}-handler`,
+        code: lambda.DockerImageCode.fromImageAsset(path.join(__dirname, '..', '..', 'backend'), {
+          file: 'Dockerfile.lambda',
+        }),
+        timeout: cdk.Duration.seconds(timeoutSeconds),
+        memorySize,
+        environment: envVars,
+      })
+    }
 
     const accessLogs = new logs.LogGroup(this, 'BackendNextApiAccessLogs', {
       retention: logs.RetentionDays.TWO_WEEKS,
@@ -96,6 +121,9 @@ export class BackendLambdaStack extends Stack {
     })
     new CfnOutput(this, 'BackendNextHandlerName', {
       value: handler.functionName,
+    })
+    new CfnOutput(this, 'BackendLambdaMode', {
+      value: mode,
     })
   }
 }
