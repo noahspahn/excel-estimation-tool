@@ -72,7 +72,6 @@ function App() {
   const [previewIdInput, setPreviewIdInput] = useState<string>('')
   const [proposalId, setProposalId] = useState<string | null>(null)
   const [overwriteReportId, setOverwriteReportId] = useState<string | null>(null)
-  const [saveReportOnGenerate, setSaveReportOnGenerate] = useState(true)
   const [reportLoadNotice, setReportLoadNotice] = useState<string | null>(null)
   const [queryReportApplied, setQueryReportApplied] = useState(false)
   const [prereqWarnings, setPrereqWarnings] = useState<string[]>([])
@@ -839,7 +838,7 @@ function App() {
     setPrereqWarnings(Array.from(new Set(missing)))
   }, [selectedModules, modules])
 
-  const downloadReport = async () => {
+  const saveReportToServer = async () => {
     if (selectedModules.length === 0) {
       alert('Please select at least one module.')
       return
@@ -861,6 +860,7 @@ function App() {
         alert('Unable to initialize a proposal. Report was not generated.')
         return
       }
+      const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
       // If the user has edited narrative, pass it through and skip server-side AI
       const hasCustomNarrative = Object.keys(editableNarrative || {}).length > 0
       const qs = `?include_ai=${includeAI && !hasCustomNarrative}&tone=${encodeURIComponent(tone)}`
@@ -868,7 +868,7 @@ function App() {
       const contractExcerpt = scrapeResult?.success ? (scrapeResult.text_excerpt || '') : undefined
       const headers: Record<string, string> = { 'Content-Type': 'application/json' }
       if (!AUTH_DISABLED && authToken) headers.Authorization = `Bearer ${authToken}`
-      const res = await fetch(`${API}/api/v1/report${qs}`, {
+      const res = await fetch(`${API}/api/v1/report/jobs${qs}`, {
         method: 'POST',
         headers,
         body: JSON.stringify({
@@ -917,7 +917,7 @@ function App() {
           tool_version: appVersion || undefined,
           proposal_id: reportProposalId || undefined,
           proposal_version: versions?.length ? versions[versions.length - 1]?.version : undefined,
-          save_report: saveReportOnGenerate,
+          save_report: true,
           overwrite_report_id: overwriteReportId || undefined,
           report_label: projectName || undefined,
           use_ai_subtasks: includeAI,
@@ -927,33 +927,49 @@ function App() {
           style_guide: styleGuide || undefined,
         })
       })
-      if (!res.ok) throw new Error('Failed to generate report')
-      const blob = await res.blob()
-      const url = window.URL.createObjectURL(blob)
-      const a = document.createElement('a')
-      a.href = url
-      const ts = new Date().toISOString().replace(/[-:T]/g, '').slice(0, 15)
-      a.download = `estimation_report_${ts}.pdf`
-      document.body.appendChild(a)
-      a.click()
-      a.remove()
-      window.URL.revokeObjectURL(url)
-      const reportId = res.headers.get('X-Report-Id') || res.headers.get('X-Report-Document-Id')
-      const reportStatus = res.headers.get('X-Report-Status')
-      if (reportId) {
-        setOverwriteReportId(reportId)
-        setReportLoadNotice(
-          reportStatus === 'overwritten'
-            ? `Report ${reportId} overwritten and downloaded.`
-            : `Report ${reportId} saved and downloaded.`
-        )
-        await loadReportDocs()
-      } else if (saveReportOnGenerate) {
-        setReportsError('Report generated but not saved. Check report storage configuration.')
+      if (!res.ok) throw new Error('Failed to queue report save job')
+      const queued = await res.json().catch(() => ({}))
+      const jobId = queued?.job_id
+      if (!jobId) throw new Error('Report job id was not returned by the API')
+      setReportLoadNotice(`Report save queued (${jobId}).`)
+
+      const deadline = Date.now() + 10 * 60 * 1000
+      let done = false
+      while (!done && Date.now() < deadline) {
+        await sleep(2000)
+        const statusRes = await fetch(`${API}/api/v1/report/jobs/${encodeURIComponent(jobId)}`, { headers })
+        if (!statusRes.ok) throw new Error('Failed to fetch report job status')
+        const statusData = await statusRes.json().catch(() => ({}))
+        const status = statusData?.status
+        if (status === 'queued' || status === 'running') {
+          setReportLoadNotice(`Report save in progress (${jobId})...`)
+          continue
+        }
+        if (status === 'failed') {
+          throw new Error(statusData?.error || 'Report save job failed')
+        }
+        if (status === 'completed') {
+          const result = statusData?.result || {}
+          const reportId = result?.report_id || result?.storage_record?.id || null
+          const reportStatus = result?.report_status
+          if (reportId) setOverwriteReportId(reportId)
+          setReportLoadNotice(
+            reportId
+              ? reportStatus === 'overwritten'
+                ? `Report ${reportId} overwritten and saved to server. Download from the Reports table below.`
+                : `Report ${reportId} saved to server. Download from the Reports table below.`
+              : `Report job completed. Refresh Reports to download.`
+          )
+          done = true
+          await loadReportDocs()
+        }
+      }
+      if (!done) {
+        throw new Error('Report save job timed out while waiting for completion')
       }
     } catch (err) {
       console.error(err)
-      alert('Report generation failed')
+      alert('Report save failed')
     } finally {
       setDownloading(false)
     }
@@ -1246,14 +1262,16 @@ function App() {
     setSubtaskError(null)
     setSubtaskPreview(null)
     try {
+      const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
       const contractUrl = scrapeResult?.success ? (scrapeResult.final_url || scrapeResult.url) : undefined
       const contractExcerpt = scrapeResult?.success ? (scrapeResult.text_excerpt || '') : undefined
-      const res = await fetch(`${API}/api/v1/subtasks/preview`, {
+      const headers: Record<string, string> = {
+        'Content-Type': 'application/json',
+        ...(!AUTH_DISABLED && authToken ? { Authorization: `Bearer ${authToken}` } : {}),
+      }
+      const res = await fetch(`${API}/api/v1/subtasks/preview/jobs`, {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          ...(!AUTH_DISABLED && authToken ? { Authorization: `Bearer ${authToken}` } : {}),
-        },
+        headers,
         body: JSON.stringify({
           modules: selectedModules,
           complexity,
@@ -1303,15 +1321,34 @@ function App() {
       })
       if (!res.ok) {
         const err = await res.json().catch(() => ({}))
-        const detail = err?.detail || 'Failed to generate subtasks'
+        const detail = err?.detail || 'Failed to queue subtask preview'
         throw new Error(detail)
       }
-      const data = await res.json()
-      console.debug('Subtask preview response', data)
-      setSubtaskPreview(data?.module_subtasks || [])
-      setSubtaskStatus(data?.status || null)
-      setSubtaskRaw(data?.raw_ai_response || null)
-      if (data?.error) setSubtaskError(data.error)
+      const queued = await res.json().catch(() => ({}))
+      const jobId = queued?.job_id
+      if (!jobId) throw new Error('Subtask preview job id missing')
+
+      const deadline = Date.now() + 5 * 60 * 1000
+      let done = false
+      while (!done && Date.now() < deadline) {
+        await sleep(1500)
+        const statusRes = await fetch(`${API}/api/v1/subtasks/preview/jobs/${encodeURIComponent(jobId)}`, { headers })
+        if (!statusRes.ok) throw new Error('Failed to get subtask preview status')
+        const statusData = await statusRes.json().catch(() => ({}))
+        const status = statusData?.status
+        if (status === 'queued' || status === 'running') continue
+        if (status === 'failed') throw new Error(statusData?.error || 'Subtask preview failed')
+        if (status === 'completed') {
+          const data = statusData?.result || {}
+          console.debug('Subtask preview response', data)
+          setSubtaskPreview(data?.module_subtasks || [])
+          setSubtaskStatus(data?.status || null)
+          setSubtaskRaw(data?.raw_ai_response || null)
+          if (data?.error) setSubtaskError(data.error)
+          done = true
+        }
+      }
+      if (!done) throw new Error('Subtask preview timed out')
     } catch (e: any) {
       console.error('Subtask preview failed', e)
       setSubtaskError(e?.message || 'Failed to generate subtasks')
@@ -2825,14 +2862,6 @@ function App() {
             style={{ marginLeft: 6, padding: '4px 6px', minWidth: 200 }}
           />
         </label>
-        <label>
-          <input
-            type="checkbox"
-            checked={saveReportOnGenerate}
-            onChange={(e) => setSaveReportOnGenerate(e.target.checked)}
-          />{' '}
-          Save to report library
-        </label>
         {overwriteReportId && (
           <div style={{ display: 'inline-flex', gap: 6, alignItems: 'center' }}>
             <span style={{ fontSize: 12, color: '#555' }}>Overwrite target: {overwriteReportId}</span>
@@ -2875,8 +2904,8 @@ function App() {
         <button className="btn btn-primary" onClick={previewReport} disabled={previewLoading || readOnly}>
           {previewLoading ? 'Building Preview...' : 'Preview Report'}
         </button>
-        <button className="btn btn-primary" onClick={downloadReport} disabled={downloading}>
-          {downloading ? 'Generating...' : 'Download PDF Report'}
+        <button className="btn btn-primary" onClick={saveReportToServer} disabled={downloading}>
+          {downloading ? 'Saving...' : 'Save Report to Server'}
         </button>
         <button className="btn" onClick={previewNarrative} disabled={loadingNarrative}>
           {loadingNarrative ? 'Regenerating Narrative...' : 'Regenerate Narrative'}

@@ -82,9 +82,16 @@ The “live” setup looks like this:
     - `DATABASE_URL` (or SQLite default).
     - `SECRET_KEY`, `ALGORITHM`, `ACCESS_TOKEN_EXPIRE_MINUTES`.
     - `OPENAI_API_KEY` (optional).
+    - `OPENAI_REQUEST_TIMEOUT_SECONDS` (optional, recommended `8` to avoid API 504 on long AI calls).
     - `ALLOWED_ORIGINS` for CORS (`http://localhost:3000,http://localhost:3001` etc).
     - `COGNITO_REGION`, `COGNITO_USER_POOL_ID`, `COGNITO_CLIENT_ID` (only needed when auth is enabled).
+    - `COGNITO_JWKS_TIMEOUT_SECONDS` (optional, default `5`).
+    - `REPORT_JOB_WORKERS` (optional, default `2` for non-Lambda background execution).
+    - `REPORT_JOB_SELF_INVOKE` (optional, default `true`; Lambda async jobs self-invoke to avoid API timeout).
   - `get_current_user()` in `backend/app/main.py` verifies Cognito JWTs when auth is enabled.
+  - Long-running operations now support async job endpoints:
+    - `POST /api/v1/report/jobs` + `GET /api/v1/report/jobs/{job_id}`
+    - `POST /api/v1/subtasks/preview/jobs` + `GET /api/v1/subtasks/preview/jobs/{job_id}`
 
 - **Frontend app**
 

@@ -1,6 +1,7 @@
 import * as cdk from 'aws-cdk-lib'
 import { CfnOutput, Stack, StackProps } from 'aws-cdk-lib'
 import * as apigateway from 'aws-cdk-lib/aws-apigateway'
+import * as iam from 'aws-cdk-lib/aws-iam'
 import * as lambda from 'aws-cdk-lib/aws-lambda'
 import * as logs from 'aws-cdk-lib/aws-logs'
 import * as path from 'path'
@@ -81,6 +82,15 @@ export class BackendLambdaStack extends Stack {
         memorySize,
         environment: envVars,
       })
+    }
+
+    if (mode === 'fastapi' && handler instanceof lambda.Function) {
+      handler.addToRolePolicy(
+        new iam.PolicyStatement({
+          actions: ['lambda:InvokeFunction'],
+          resources: [handler.functionArn],
+        }),
+      )
     }
 
     const accessLogs = new logs.LogGroup(this, 'BackendNextApiAccessLogs', {

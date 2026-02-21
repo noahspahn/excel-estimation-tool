@@ -19,6 +19,11 @@ class AIService:
 
     def __init__(self):
         self.api_key = os.getenv("OPENAI_API_KEY")
+        try:
+            timeout_seconds = float(os.getenv("OPENAI_REQUEST_TIMEOUT_SECONDS", "8"))
+        except Exception:
+            timeout_seconds = 8.0
+        self.request_timeout_seconds = max(1.0, timeout_seconds)
         # Lazy import in methods to avoid hard dependency during boot
 
     def is_configured(self) -> bool:
@@ -35,41 +40,7 @@ class AIService:
         if not self.is_configured():
             raise RuntimeError("OPENAI_API_KEY not configured")
 
-        # Try OpenAI SDK v1 first, then fall back to legacy 0.x if present
-        client = None
-        client_mode = None  # "v1" or "v0"
-        v1_import_error = None
-        try:
-            from openai import OpenAI  # type: ignore
-
-            client = OpenAI(api_key=self.api_key)
-            client_mode = "v1"
-        except Exception as e:
-            v1_import_error = e
-            try:
-                import openai  # type: ignore
-
-                openai.api_key = self.api_key
-                client = openai
-                client_mode = "v0"
-            except Exception as legacy_e:
-                installed_version = None
-                try:
-                    import openai as maybe_openai  # type: ignore
-
-                    installed_version = getattr(maybe_openai, "__version__", None)
-                except Exception:
-                    pass
-
-                details = [
-                    "OpenAI SDK not available.",
-                    "Install or upgrade with: pip install -U openai",
-                ]
-                if installed_version:
-                    details.append(f"Detected openai version: {installed_version}")
-                details.append(f"v1 import error: {v1_import_error}")
-                details.append(f"v0 import error: {legacy_e}")
-                raise RuntimeError("; ".join(details))
+        client, client_mode = self._get_client()
 
         if sections is None:
             sections = ["executive_summary", "assumptions", "risks"]
@@ -103,7 +74,9 @@ class AIService:
         # Call appropriate API depending on SDK mode
         if client_mode == "v1":
             try:
-                completion = client.chat.completions.create(
+                completion = self._chat_completion(
+                    client,
+                    client_mode=client_mode,
                     model=model,
                     messages=messages,
                     temperature=0.3,
@@ -113,7 +86,9 @@ class AIService:
                 return self._offline_narrative(context, sections, tone)
         else:
             try:
-                completion = client.ChatCompletion.create(
+                completion = self._chat_completion(
+                    client,
+                    client_mode=client_mode,
                     model=model,
                     messages=messages,
                     temperature=0.3,
@@ -181,14 +156,18 @@ class AIService:
         content = None
         try:
             if client_mode == "v1":
-                completion = client.chat.completions.create(
+                completion = self._chat_completion(
+                    client,
+                    client_mode=client_mode,
                     model=model,
                     messages=messages,
                     temperature=0.4,
                 )
                 content = completion.choices[0].message.content or "[]"
             else:
-                completion = client.ChatCompletion.create(
+                completion = self._chat_completion(
+                    client,
+                    client_mode=client_mode,
                     model=model,
                     messages=messages,
                     temperature=0.4,
@@ -251,14 +230,18 @@ class AIService:
         content: Optional[str] = None
         try:
             if client_mode == "v1":
-                completion = client.chat.completions.create(
+                completion = self._chat_completion(
+                    client,
+                    client_mode=client_mode,
                     model=model,
                     messages=messages,
                     temperature=0.35,
                 )
                 content = completion.choices[0].message.content or "{}"
             else:
-                completion = client.ChatCompletion.create(
+                completion = self._chat_completion(
+                    client,
+                    client_mode=client_mode,
                     model=model,
                     messages=messages,
                     temperature=0.35,
@@ -342,14 +325,18 @@ class AIService:
 
         content: Optional[str] = None
         if client_mode == "v1":
-            completion = client.chat.completions.create(
+            completion = self._chat_completion(
+                client,
+                client_mode=client_mode,
                 model=model,
                 messages=messages,
                 temperature=temperature,
             )
             content = completion.choices[0].message.content or ""
         else:
-            completion = client.ChatCompletion.create(
+            completion = self._chat_completion(
+                client,
+                client_mode=client_mode,
                 model=model,
                 messages=messages,
                 temperature=temperature,
@@ -451,7 +438,7 @@ class AIService:
         try:
             from openai import OpenAI  # type: ignore
 
-            client = OpenAI(api_key=self.api_key)
+            client = OpenAI(api_key=self.api_key, timeout=self.request_timeout_seconds, max_retries=1)
             client_mode = "v1"
         except Exception as e:
             v1_import_error = e
@@ -480,6 +467,29 @@ class AIService:
                 details.append(f"v0 import error: {legacy_e}")
                 raise RuntimeError("; ".join(details))
         return client, client_mode
+
+    def _chat_completion(
+        self,
+        client: Any,
+        *,
+        client_mode: str,
+        model: str,
+        messages: List[Dict[str, str]],
+        temperature: float,
+    ) -> Any:
+        if client_mode == "v1":
+            return client.chat.completions.create(
+                model=model,
+                messages=messages,
+                temperature=temperature,
+                timeout=self.request_timeout_seconds,
+            )
+        return client.ChatCompletion.create(
+            model=model,
+            messages=messages,
+            temperature=temperature,
+            request_timeout=self.request_timeout_seconds,
+        )
 
     def _build_section_guidance(self, sections: List[str]) -> Dict[str, str]:
         guidance = {

@@ -28,6 +28,15 @@ def _normalize_path(path: str, stage: str) -> str:
 
 
 def handler(event, context):
+    if isinstance(event, dict) and event.get("job_type") == "report_job":
+        from app.main import run_report_job_now
+
+        run_report_job_now(
+            job_id=str(event.get("job_id") or ""),
+            owner_email=str(event.get("owner_email") or "") or None,
+        )
+        return {"status": "ok", "job_id": event.get("job_id")}
+
     request_context = event.get("requestContext") or {}
     stage = str(request_context.get("stage") or "").strip("/")
 

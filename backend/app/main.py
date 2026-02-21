@@ -1,14 +1,17 @@
-from fastapi import FastAPI, HTTPException, Depends, Header, UploadFile, File
+from fastapi import FastAPI, HTTPException, Depends, Header, UploadFile, File, Request
 from fastapi.responses import StreamingResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import List, Dict, Optional, Any
 from dataclasses import asdict
+from concurrent.futures import ThreadPoolExecutor
 import uvicorn
 import os
 import json
 import time
 import threading
+import logging
+import secrets
 import urllib.request
 from collections import Counter
 from pathlib import Path
@@ -40,7 +43,15 @@ from .services.storage_service import StorageService
 from .services.report_registry_service import ReportRegistryService
 from .models import ComplexityLevel, EstimationInput
 from .db import engine, get_session
-from .db_models import Base, Proposal, ProposalVersion, ProposalDocument, ContractOpportunity, ContractSyncState
+from .db_models import (
+    Base,
+    Proposal,
+    ProposalVersion,
+    ProposalDocument,
+    ContractOpportunity,
+    ContractSyncState,
+    ReportJob,
+)
 from .services.sam_contract_service import (
     fetch_sam_opportunities,
     extract_sam_results,
@@ -48,6 +59,7 @@ from .services.sam_contract_service import (
 )
 
 app = FastAPI(title="Estimation Tool API", version="2.0.0")
+logger = logging.getLogger("estimation.api")
 
 # Enable CORS
 _default_origins = "http://localhost:3000,http://localhost:3001,http://127.0.0.1:3000,http://127.0.0.1:3001"
@@ -68,6 +80,15 @@ app.add_middleware(
     ],
 )
 
+
+@app.middleware("http")
+async def add_process_time_header(request: Request, call_next):
+    started = time.perf_counter()
+    response = await call_next(request)
+    elapsed_ms = (time.perf_counter() - started) * 1000.0
+    response.headers["X-Process-Time-Ms"] = f"{elapsed_ms:.2f}"
+    return response
+
 # Initialize services
 calculation_service = CalculationService()
 data_service = DataService()
@@ -75,6 +96,10 @@ web_scraper_service = WebScraperService()
 storage_service = StorageService()
 report_registry_service = ReportRegistryService()
 # Note: ExportService (and ReportLab) are imported lazily in the report endpoint
+REPORT_JOB_WORKERS = max(1, int(os.getenv("REPORT_JOB_WORKERS", "2")))
+REPORT_JOB_SELF_INVOKE = os.getenv("REPORT_JOB_SELF_INVOKE", "true").lower() in ("1", "true", "yes")
+REPORT_JOB_ALLOWED_KINDS = {"report", "subtasks_preview"}
+_report_job_executor = ThreadPoolExecutor(max_workers=REPORT_JOB_WORKERS)
 
 CONTRACT_STATUSES = {"new", "in_progress", "submitted", "awarded", "lost"}
 
@@ -1244,14 +1269,27 @@ def generate_compliance_frameworks(req: AssumptionsPromptRequest, current_user: 
     return {"text": text, "raw": raw}
 
 
-@app.post("/api/v1/report")
-def generate_report(req: ReportRequest, include_ai: bool = False, tone: str = "professional", current_user: str = Depends(get_current_user)):
-    """Generate and return a PDF estimation report as a download"""
-    # Lazy import so the API can run without reportlab installed
+def _generate_report_artifact(
+    req: ReportRequest,
+    *,
+    include_ai: bool,
+    tone: str,
+    current_user: str,
+    force_save: Optional[bool] = None,
+) -> Dict[str, Any]:
+    overall_start = time.perf_counter()
+    timings_ms: Dict[str, float] = {}
+
+    def _record_timing(label: str, started: float) -> None:
+        timings_ms[label] = round((time.perf_counter() - started) * 1000.0, 2)
+
     try:
+        import_started = time.perf_counter()
         from .services.export_service import ExportService  # type: ignore
-    except Exception as e:
+        _record_timing("import_export_service", import_started)
+    except Exception:
         raise HTTPException(status_code=500, detail="Report generation dependency missing. Install 'reportlab'.")
+
     try:
         complexity_level = ComplexityLevel(req.complexity)
     except ValueError:
@@ -1292,7 +1330,9 @@ def generate_report(req: ReportRequest, include_ai: bool = False, tone: str = "p
         warranty_cost=req.warranty_cost or 0.0,
     )
 
+    calc_started = time.perf_counter()
     result = calculation_service.calculate_estimate(est_input)
+    _record_timing("calculate_estimate", calc_started)
 
     estimation_data = {
         "estimation_result": asdict(result),
@@ -1343,15 +1383,18 @@ def generate_report(req: ReportRequest, include_ai: bool = False, tone: str = "p
         "complexity": req.complexity,
         "module_count": len(req.modules),
     }
+    subtasks_started = time.perf_counter()
     module_subtasks = calculation_service.build_module_subtasks(
         est_input,
         contract_excerpt=req.contract_excerpt,
     )
+    _record_timing("build_module_subtasks", subtasks_started)
     subtask_status = "deterministic"
     subtask_error: Optional[str] = None
     subtask_ai_raw: Optional[str] = None
     if req.use_ai_subtasks:
         try:
+            ai_subtasks_started = time.perf_counter()
             from .services.ai_service import AIService  # type: ignore
 
             ai = AIService()
@@ -1364,10 +1407,11 @@ def generate_report(req: ReportRequest, include_ai: bool = False, tone: str = "p
                 subtask_status = "ai_generated"
             else:
                 subtask_status = "ai_disabled"
+            _record_timing("ai_subtasks", ai_subtasks_started)
         except Exception as e:
-            # Keep deterministic subtasks but record failure
             subtask_status = "ai_failed"
             subtask_error = str(e)
+            timings_ms["ai_subtasks"] = round((time.perf_counter() - ai_subtasks_started) * 1000.0, 2)
     estimation_data["module_subtasks"] = module_subtasks
     estimation_data["subtask_generation_status"] = subtask_status
     if subtask_ai_raw:
@@ -1375,12 +1419,14 @@ def generate_report(req: ReportRequest, include_ai: bool = False, tone: str = "p
     if subtask_error:
         estimation_data["subtask_generation_error"] = subtask_error
 
+    export_started = time.perf_counter()
     export_service = ExportService()
+    _record_timing("init_export_service", export_started)
 
-    # Prefer client-provided narrative sections if present.
     narrative_sections = req.narrative_sections or None
     if narrative_sections is None and include_ai:
         try:
+            ai_narrative_started = time.perf_counter()
             from .services.ai_service import AIService  # type: ignore
 
             ai = AIService()
@@ -1390,24 +1436,29 @@ def generate_report(req: ReportRequest, include_ai: bool = False, tone: str = "p
                     input_summary=input_summary,
                     tone=tone,
                 )
+            _record_timing("ai_narrative", ai_narrative_started)
         except Exception:
-            # If AI generation fails or is not configured, continue without AI text
             narrative_sections = None
+            timings_ms["ai_narrative"] = round((time.perf_counter() - ai_narrative_started) * 1000.0, 2)
 
+    pdf_started = time.perf_counter()
     pdf_bytes = export_service.generate_estimation_pdf(
         estimation_data,
         input_summary,
         narrative_sections=narrative_sections,
         module_subtasks=module_subtasks,
     )
+    _record_timing("generate_pdf", pdf_started)
 
-    from datetime import datetime
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     filename = f"estimation_report_{ts}.pdf"
 
+    should_save = req.save_report if force_save is None else bool(force_save)
     storage_record: Optional[Dict[str, Any]] = None
     report_status = "not_saved"
-    if req.save_report:
+    report_id: Optional[str] = None
+    if should_save:
+        storage_started = time.perf_counter()
         if not storage_service.is_configured() or not report_registry_service.is_configured():
             report_status = "storage_not_configured"
         else:
@@ -1522,21 +1573,286 @@ def generate_report(req: ReportRequest, include_ai: bool = False, tone: str = "p
                 "presigned_url": storage_service.presign_get(upload["key"]),
             }
             report_status = "overwritten" if existing_item else "saved"
+        _record_timing("save_report", storage_started)
 
-    headers = {
-        "Content-Disposition": f"attachment; filename=\"{filename}\""
+    timings_ms["total"] = round((time.perf_counter() - overall_start) * 1000.0, 2)
+    return {
+        "pdf_bytes": pdf_bytes,
+        "filename": filename,
+        "storage_record": storage_record,
+        "report_status": report_status,
+        "report_id": report_id,
+        "subtask_status": subtask_status,
+        "timings_ms": timings_ms,
     }
-    if storage_record and storage_record.get("presigned_url"):
-        headers["X-Report-Location"] = storage_record["presigned_url"]
-        headers["X-Report-Document-Id"] = storage_record["id"]
-        headers["X-Report-Id"] = storage_record["id"]
-    headers["X-Report-Status"] = report_status
 
+
+@app.post("/api/v1/report")
+def generate_report(req: ReportRequest, include_ai: bool = False, tone: str = "professional", current_user: str = Depends(get_current_user)):
+    """Generate and return a PDF estimation report as a download"""
+    payload = _generate_report_artifact(
+        req,
+        include_ai=include_ai,
+        tone=tone,
+        current_user=current_user,
+    )
+    headers = {
+        "Content-Disposition": f"attachment; filename=\"{payload['filename']}\""
+    }
+    storage_record = payload.get("storage_record") or {}
+    if storage_record.get("presigned_url"):
+        headers["X-Report-Location"] = storage_record["presigned_url"]
+        headers["X-Report-Document-Id"] = storage_record.get("id") or ""
+        headers["X-Report-Id"] = storage_record.get("id") or ""
+    headers["X-Report-Status"] = payload.get("report_status") or "not_saved"
+    logger.info(
+        "report_request user=%s modules=%d include_ai=%s use_ai_subtasks=%s subtask_status=%s report_status=%s timings_ms=%s",
+        current_user,
+        len(req.modules),
+        include_ai,
+        req.use_ai_subtasks,
+        payload.get("subtask_status"),
+        payload.get("report_status"),
+        json.dumps(payload.get("timings_ms") or {}, ensure_ascii=True),
+    )
     return StreamingResponse(
-        iter([pdf_bytes]),
+        iter([payload["pdf_bytes"]]),
         media_type="application/pdf",
         headers=headers,
     )
+
+
+def _new_report_job_id() -> str:
+    return f"job_{secrets.token_urlsafe(8)}"
+
+
+def _report_job_to_api(job: ReportJob) -> Dict[str, Any]:
+    return {
+        "id": job.id,
+        "job_kind": job.job_kind,
+        "status": job.status,
+        "error": job.error,
+        "result": job.result_payload or {},
+        "created_at": _dt_to_str(job.created_at),
+        "started_at": _dt_to_str(job.started_at),
+        "finished_at": _dt_to_str(job.finished_at),
+        "updated_at": _dt_to_str(job.updated_at),
+    }
+
+
+def _create_report_job(
+    *,
+    owner_email: str,
+    job_kind: str,
+    request_payload: Dict[str, Any],
+) -> str:
+    if job_kind not in REPORT_JOB_ALLOWED_KINDS:
+        raise RuntimeError(f"Unsupported report job kind: {job_kind}")
+    now = datetime.utcnow()
+    job_id = _new_report_job_id()
+    with get_session() as session:
+        job = ReportJob(
+            id=job_id,
+            owner_email=owner_email,
+            job_kind=job_kind,
+            status="queued",
+            request_payload=request_payload,
+            created_at=now,
+            updated_at=now,
+        )
+        session.add(job)
+        session.flush()
+    return job_id
+
+
+def _invoke_self_lambda_job(owner_email: str, job_id: str) -> bool:
+    if not REPORT_JOB_SELF_INVOKE:
+        return False
+    fn_name = os.getenv("AWS_LAMBDA_FUNCTION_NAME")
+    if not fn_name:
+        return False
+    try:
+        import boto3
+
+        region = os.getenv("AWS_REGION") or os.getenv("AWS_DEFAULT_REGION")
+        client = boto3.client("lambda", region_name=region)
+        payload = {
+            "job_type": "report_job",
+            "owner_email": owner_email,
+            "job_id": job_id,
+        }
+        client.invoke(
+            FunctionName=fn_name,
+            InvocationType="Event",
+            Payload=json.dumps(payload).encode("utf-8"),
+        )
+        return True
+    except Exception as exc:
+        logger.warning("report_job self invoke failed for %s: %s", job_id, exc)
+        return False
+
+
+def _dispatch_report_job(owner_email: str, job_id: str) -> None:
+    in_lambda = bool(os.getenv("AWS_LAMBDA_FUNCTION_NAME"))
+    if in_lambda:
+        if _invoke_self_lambda_job(owner_email, job_id):
+            return
+        with get_session() as session:
+            job = (
+                session.query(ReportJob)
+                .filter(ReportJob.id == job_id, ReportJob.owner_email == owner_email)
+                .one_or_none()
+            )
+            if job:
+                _set_report_job_status(
+                    job,
+                    status="failed",
+                    error="Unable to dispatch async job in Lambda. Check invoke permission.",
+                )
+                session.flush()
+        return
+    if _invoke_self_lambda_job(owner_email, job_id):
+        return
+    _report_job_executor.submit(_run_report_job_by_id, owner_email, job_id)
+
+
+def _set_report_job_status(
+    job: ReportJob,
+    *,
+    status: str,
+    error: Optional[str] = None,
+    result_payload: Optional[Dict[str, Any]] = None,
+) -> None:
+    now = datetime.utcnow()
+    job.status = status
+    job.updated_at = now
+    if status == "running" and not job.started_at:
+        job.started_at = now
+    if status in ("completed", "failed"):
+        job.finished_at = now
+    if error is not None:
+        job.error = error
+    if result_payload is not None:
+        job.result_payload = result_payload
+
+
+def _run_report_job_by_id(owner_email: str, job_id: str) -> None:
+    request_payload: Dict[str, Any] = {}
+    job_kind = "report"
+    with get_session() as session:
+        job = (
+            session.query(ReportJob)
+            .filter(ReportJob.id == job_id, ReportJob.owner_email == owner_email)
+            .one_or_none()
+        )
+        if not job:
+            return
+        if job.status not in ("queued", "running"):
+            return
+        _set_report_job_status(job, status="running")
+        request_payload = dict(job.request_payload or {})
+        job_kind = str(job.job_kind or "report")
+        session.flush()
+
+    try:
+        request_data = request_payload.get("request") or {}
+        include_ai = bool(request_payload.get("include_ai", False))
+        tone = str(request_payload.get("tone") or "professional")
+        req = ReportRequest.model_validate(request_data)
+
+        if job_kind == "report":
+            artifact = _generate_report_artifact(
+                req,
+                include_ai=include_ai,
+                tone=tone,
+                current_user=owner_email,
+                force_save=True,
+            )
+            result_payload = {
+                "report_id": artifact.get("report_id"),
+                "report_status": artifact.get("report_status"),
+                "filename": artifact.get("filename"),
+                "storage_record": artifact.get("storage_record"),
+                "timings_ms": artifact.get("timings_ms"),
+            }
+        elif job_kind == "subtasks_preview":
+            result_payload = _build_subtasks_preview_payload(
+                req,
+                tone=tone,
+                debug=bool(request_payload.get("debug", False)),
+                current_user=owner_email,
+            )
+        else:
+            raise RuntimeError(f"Unsupported report job kind: {job_kind}")
+
+        with get_session() as session:
+            job = (
+                session.query(ReportJob)
+                .filter(ReportJob.id == job_id, ReportJob.owner_email == owner_email)
+                .one_or_none()
+            )
+            if not job:
+                return
+            _set_report_job_status(job, status="completed", result_payload=result_payload)
+            session.flush()
+    except Exception as exc:
+        logger.exception("report_job_failed owner=%s job=%s kind=%s", owner_email, job_id, job_kind)
+        with get_session() as session:
+            job = (
+                session.query(ReportJob)
+                .filter(ReportJob.id == job_id, ReportJob.owner_email == owner_email)
+                .one_or_none()
+            )
+            if not job:
+                return
+            _set_report_job_status(job, status="failed", error=str(exc)[:2000])
+            session.flush()
+
+
+def run_report_job_now(job_id: str, owner_email: Optional[str] = None) -> None:
+    with get_session() as session:
+        query = session.query(ReportJob).filter(ReportJob.id == job_id)
+        if owner_email:
+            query = query.filter(ReportJob.owner_email == owner_email)
+        job = query.one_or_none()
+        if not job:
+            return
+        owner = str(job.owner_email)
+    _run_report_job_by_id(owner, job_id)
+
+
+@app.post("/api/v1/report/jobs")
+def queue_report_job(
+    req: ReportRequest,
+    include_ai: bool = False,
+    tone: str = "professional",
+    current_user: str = Depends(get_current_user),
+):
+    payload = {
+        "request": req.model_dump(),
+        "include_ai": include_ai,
+        "tone": tone,
+    }
+    job_id = _create_report_job(
+        owner_email=current_user,
+        job_kind="report",
+        request_payload=payload,
+    )
+    _dispatch_report_job(current_user, job_id)
+    return {"job_id": job_id, "status": "queued"}
+
+
+@app.get("/api/v1/report/jobs/{job_id}")
+def get_report_job(job_id: str, current_user: str = Depends(get_current_user)):
+    with get_session() as session:
+        job = (
+            session.query(ReportJob)
+            .filter(ReportJob.id == job_id, ReportJob.owner_email == current_user)
+            .one_or_none()
+        )
+        if not job:
+            raise HTTPException(status_code=404, detail="Report job not found")
+        return _report_job_to_api(job)
 
 # -----------------------------
 # -----------------------------
@@ -1757,11 +2073,19 @@ def contract_stats(current_user: str = Depends(get_current_user)):
     }
 
 
-@app.post("/api/v1/subtasks/preview")
-def preview_subtasks(req: ReportRequest, tone: str = "professional", debug: bool = True, current_user: str = Depends(get_current_user)):
-    """
-    Build module subtasks with optional AI enrichment for preview in the UI.
-    """
+def _build_subtasks_preview_payload(
+    req: ReportRequest,
+    *,
+    tone: str,
+    debug: bool,
+    current_user: str,
+) -> Dict[str, Any]:
+    overall_start = time.perf_counter()
+    timings_ms: Dict[str, float] = {}
+
+    def _record_timing(label: str, started: float) -> None:
+        timings_ms[label] = round((time.perf_counter() - started) * 1000.0, 2)
+
     try:
         complexity_level = ComplexityLevel(req.complexity)
     except ValueError:
@@ -1802,9 +2126,11 @@ def preview_subtasks(req: ReportRequest, tone: str = "professional", debug: bool
         warranty_cost=req.warranty_cost or 0.0,
     )
 
+    build_started = time.perf_counter()
     deterministic_subtasks = calculation_service.build_module_subtasks(
         est_input, contract_excerpt=req.contract_excerpt
     )
+    _record_timing("build_module_subtasks", build_started)
     module_subtasks = deterministic_subtasks
     status = "deterministic"
     error: Optional[str] = None
@@ -1812,6 +2138,7 @@ def preview_subtasks(req: ReportRequest, tone: str = "professional", debug: bool
     debug_payload: Optional[Dict[str, Any]] = None
     if req.use_ai_subtasks:
         try:
+            ai_subtasks_started = time.perf_counter()
             from .services.ai_service import AIService  # type: ignore
 
             ai = AIService()
@@ -1824,11 +2151,14 @@ def preview_subtasks(req: ReportRequest, tone: str = "professional", debug: bool
                 status = "ai_generated"
             else:
                 status = "ai_disabled"
+            _record_timing("ai_subtasks", ai_subtasks_started)
         except Exception as e:
             status = "ai_failed"
             error = str(e)
+            timings_ms["ai_subtasks"] = round((time.perf_counter() - ai_subtasks_started) * 1000.0, 2)
     if debug:
         try:
+            debug_started = time.perf_counter()
             from .services.ai_service import AIService  # type: ignore
 
             ai = AIService()
@@ -1840,8 +2170,10 @@ def preview_subtasks(req: ReportRequest, tone: str = "professional", debug: bool
                 "module_guidance": guidance,
                 "prompt_sources": sources,
             }
+            _record_timing("debug_guidance", debug_started)
         except Exception as e:
             debug_payload = {"error": str(e)}
+            timings_ms["debug_guidance"] = round((time.perf_counter() - debug_started) * 1000.0, 2)
 
     response = {
         "module_subtasks": module_subtasks,
@@ -1851,7 +2183,69 @@ def preview_subtasks(req: ReportRequest, tone: str = "professional", debug: bool
     }
     if debug:
         response["debug"] = debug_payload
+    timings_ms["total"] = round((time.perf_counter() - overall_start) * 1000.0, 2)
+    response["timings_ms"] = timings_ms
+    logger.info(
+        "subtasks_preview user=%s modules=%d use_ai_subtasks=%s status=%s timings_ms=%s",
+        current_user,
+        len(req.modules),
+        req.use_ai_subtasks,
+        status,
+        json.dumps(timings_ms, ensure_ascii=True),
+    )
     return response
+
+
+@app.post("/api/v1/subtasks/preview")
+def preview_subtasks(req: ReportRequest, tone: str = "professional", debug: bool = False, current_user: str = Depends(get_current_user)):
+    """
+    Build module subtasks with optional AI enrichment for preview in the UI.
+    """
+    return _build_subtasks_preview_payload(
+        req,
+        tone=tone,
+        debug=debug,
+        current_user=current_user,
+    )
+
+
+@app.post("/api/v1/subtasks/preview/jobs")
+def queue_subtasks_preview_job(
+    req: ReportRequest,
+    tone: str = "professional",
+    debug: bool = False,
+    current_user: str = Depends(get_current_user),
+):
+    payload = {
+        "request": req.model_dump(),
+        "include_ai": False,
+        "tone": tone,
+        "debug": debug,
+    }
+    job_id = _create_report_job(
+        owner_email=current_user,
+        job_kind="subtasks_preview",
+        request_payload=payload,
+    )
+    _dispatch_report_job(current_user, job_id)
+    return {"job_id": job_id, "status": "queued"}
+
+
+@app.get("/api/v1/subtasks/preview/jobs/{job_id}")
+def get_subtasks_preview_job(job_id: str, current_user: str = Depends(get_current_user)):
+    with get_session() as session:
+        job = (
+            session.query(ReportJob)
+            .filter(
+                ReportJob.id == job_id,
+                ReportJob.owner_email == current_user,
+                ReportJob.job_kind == "subtasks_preview",
+            )
+            .one_or_none()
+        )
+        if not job:
+            raise HTTPException(status_code=404, detail="Subtask preview job not found")
+        return _report_job_to_api(job)
 
 
 class ProposalCreate(BaseModel):
@@ -2312,6 +2706,10 @@ AUTH_ALLOWED = os.getenv("ALLOWED_AUTH_DOMAINS", "*")
 COGNITO_REGION = os.getenv("COGNITO_REGION")
 COGNITO_USER_POOL_ID = os.getenv("COGNITO_USER_POOL_ID")
 COGNITO_CLIENT_ID = os.getenv("COGNITO_CLIENT_ID")
+try:
+    COGNITO_JWKS_TIMEOUT_SECONDS = max(1.0, float(os.getenv("COGNITO_JWKS_TIMEOUT_SECONDS", "5")))
+except Exception:
+    COGNITO_JWKS_TIMEOUT_SECONDS = 5.0
 
 if COGNITO_REGION and COGNITO_USER_POOL_ID:
     COGNITO_ISS = f"https://cognito-idp.{COGNITO_REGION}.amazonaws.com/{COGNITO_USER_POOL_ID}"
@@ -2330,8 +2728,14 @@ def _get_cognito_jwks() -> List[Dict[str, Any]]:
     cached = _JWKS_CACHE.get("data")
     if cached is not None and now - _JWKS_CACHE.get("ts", 0) < 3600:
         return cached  # type: ignore[return-value]
-    with urllib.request.urlopen(COGNITO_JWKS_URL) as resp:
-        data = json.load(resp)
+    try:
+        with urllib.request.urlopen(COGNITO_JWKS_URL, timeout=COGNITO_JWKS_TIMEOUT_SECONDS) as resp:
+            data = json.load(resp)
+    except Exception as exc:
+        # If we have stale keys cached, prefer those over blocking/failing hard.
+        if cached is not None:
+            return cached  # type: ignore[return-value]
+        raise RuntimeError(f"Unable to fetch Cognito JWKS: {exc}") from exc
     keys = data.get("keys", [])
     _JWKS_CACHE["data"] = keys
     _JWKS_CACHE["ts"] = now
@@ -2390,7 +2794,10 @@ def _verify_cognito_token(raw: str) -> str:
     if not kid:
         raise HTTPException(status_code=401, detail="Invalid token kid")
 
-    keys = _get_cognito_jwks()
+    try:
+        keys = _get_cognito_jwks()
+    except Exception:
+        raise HTTPException(status_code=503, detail="Authentication provider unavailable")
     key = next((k for k in keys if k.get("kid") == kid), None)
     if not key:
         raise HTTPException(status_code=401, detail="Unknown token key")

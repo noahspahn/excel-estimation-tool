@@ -125,3 +125,19 @@ class ContractSyncState(Base):
     last_result = Column(JSON, nullable=True)
     created_at = Column(DateTime, nullable=False, server_default=text("CURRENT_TIMESTAMP"))
     updated_at = Column(DateTime, nullable=False, server_default=text("CURRENT_TIMESTAMP"))
+
+
+class ReportJob(Base):
+    __tablename__ = "report_jobs"
+
+    id = Column(String(64), primary_key=True, default=lambda: _gen_id("job"))
+    owner_email = Column(String(255), nullable=False, index=True)
+    job_kind = Column(String(32), nullable=False, index=True, default="report")
+    status = Column(String(32), nullable=False, index=True, default="queued")
+    request_payload = Column(JSON, nullable=False)
+    result_payload = Column(JSON, nullable=True)
+    error = Column(Text, nullable=True)
+    created_at = Column(DateTime, nullable=False, server_default=text("CURRENT_TIMESTAMP"))
+    started_at = Column(DateTime, nullable=True)
+    finished_at = Column(DateTime, nullable=True)
+    updated_at = Column(DateTime, nullable=False, server_default=text("CURRENT_TIMESTAMP"))
