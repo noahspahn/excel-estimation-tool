@@ -47,9 +47,21 @@ export class BackendLambdaStack extends Stack {
     const effectiveApiTimeoutSeconds = Math.min(normalizedApiTimeoutSeconds, normalizedLambdaTimeoutSeconds)
     const memorySize = Number(cfg.memorySize ?? 512)
     const legacyBackendUrl = String(cfg.legacyBackendUrl ?? '').trim().replace(/\/+$/, '')
-    const envVars = {
-      ...(cfg.env || {}),
-      BACKEND_MODE: 'api-next',
+    const reservedLambdaEnvKeys = new Set(['AWS_REGION', 'AWS_DEFAULT_REGION'])
+    const droppedKeys: string[] = []
+    const envVars: Record<string, string> = {}
+    for (const [key, value] of Object.entries(cfg.env || {})) {
+      if (reservedLambdaEnvKeys.has(key)) {
+        droppedKeys.push(key)
+        continue
+      }
+      envVars[key] = value
+    }
+    envVars.BACKEND_MODE = 'api-next'
+    if (droppedKeys.length > 0) {
+      cdk.Annotations.of(this).addWarning(
+        `Ignoring reserved Lambda environment variable(s): ${droppedKeys.join(', ')}`,
+      )
     }
 
     let handler: lambda.IFunction

@@ -125,11 +125,10 @@ jobs:
           BACKEND_LAMBDA_CONTEXT=$(jq -cn \
             --arg mode "fastapi" \
             --arg legacy "${BACKEND_URL}" \
-            --arg region "${AWS_REGION}" \
             --arg timeout "${BACKEND_LAMBDA_TIMEOUT_SECONDS}" \
             --arg apiTimeout "${BACKEND_LAMBDA_API_TIMEOUT_SECONDS}" \
             --argjson env "${APP_RUNNER_ENV}" \
-            '{mode:$mode,legacyBackendUrl:$legacy,timeoutSeconds:($timeout|tonumber),apiTimeoutSeconds:($apiTimeout|tonumber),env:($env + {"AWS_REGION":$region})}')
+            '{mode:$mode,legacyBackendUrl:$legacy,timeoutSeconds:($timeout|tonumber),apiTimeoutSeconds:($apiTimeout|tonumber),env:($env | with_entries(select(.key != "AWS_REGION" and .key != "AWS_DEFAULT_REGION")))}')
           npx cdk deploy EstimationBackendLambdaStack --require-approval never -c backendLambda="${BACKEND_LAMBDA_CONTEXT}"
           NEXT_API_URL=$(aws cloudformation describe-stacks --stack-name EstimationBackendLambdaStack --region "${AWS_REGION}" \
             --query "Stacks[0].Outputs[?OutputKey=='BackendLambdaApiUrl'].OutputValue" --output text)

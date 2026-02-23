@@ -88,6 +88,7 @@ The “live” setup looks like this:
     - `COGNITO_JWKS_TIMEOUT_SECONDS` (optional, default `5`).
     - `REPORT_JOB_WORKERS` (optional, default `2` for non-Lambda background execution).
     - `REPORT_JOB_SELF_INVOKE` (optional, default `true`; Lambda async jobs self-invoke to avoid API timeout).
+    - Do not set Lambda runtime-reserved keys like `AWS_REGION` in backend-next Lambda env; CDK now strips these automatically.
   - `get_current_user()` in `backend/app/main.py` verifies Cognito JWTs when auth is enabled.
   - Long-running operations now support async job endpoints:
     - `POST /api/v1/report/jobs` + `GET /api/v1/report/jobs/{job_id}`
