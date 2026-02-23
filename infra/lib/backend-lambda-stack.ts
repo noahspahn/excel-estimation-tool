@@ -97,10 +97,15 @@ export class BackendLambdaStack extends Stack {
     }
 
     if (mode === 'fastapi' && handler instanceof lambda.Function) {
+      const selfInvokeArn = cdk.Stack.of(this).formatArn({
+        service: 'lambda',
+        resource: 'function',
+        resourceName: `${apiName}-handler`,
+      })
       handler.addToRolePolicy(
         new iam.PolicyStatement({
           actions: ['lambda:InvokeFunction'],
-          resources: [handler.functionArn],
+          resources: [selfInvokeArn],
         }),
       )
     }
