@@ -36,6 +36,7 @@ export class BackendLambdaStack extends Stack {
     const apiName = cfg.apiName ?? 'estimation-backend-next'
     const stageName = cfg.stageName ?? 'prod'
     const mode = cfg.mode === 'router' ? 'router' : 'fastapi'
+    const functionName = `${apiName}-${mode}-handler`
     const lambdaTimeoutSeconds = Number(cfg.timeoutSeconds ?? 60)
     const apiTimeoutSeconds = Number(cfg.apiTimeoutSeconds ?? 29)
     const normalizedLambdaTimeoutSeconds =
@@ -73,7 +74,7 @@ export class BackendLambdaStack extends Stack {
         )
       }
       handler = new lambda.Function(this, 'BackendNextHandler', {
-        functionName: `${apiName}-handler`,
+        functionName,
         runtime: lambda.Runtime.PYTHON_3_11,
         handler: 'index.handler',
         code: lambda.Code.fromAsset(path.join(__dirname, '..', 'lambda', 'backend-next')),
@@ -86,7 +87,7 @@ export class BackendLambdaStack extends Stack {
       })
     } else {
       handler = new lambda.DockerImageFunction(this, 'BackendNextHandler', {
-        functionName: `${apiName}-handler`,
+        functionName,
         code: lambda.DockerImageCode.fromImageAsset(path.join(__dirname, '..', '..', 'backend'), {
           file: 'Dockerfile.lambda',
         }),
@@ -100,7 +101,7 @@ export class BackendLambdaStack extends Stack {
       const selfInvokeArn = cdk.Stack.of(this).formatArn({
         service: 'lambda',
         resource: 'function',
-        resourceName: `${apiName}-handler`,
+        resourceName: functionName,
       })
       handler.addToRolePolicy(
         new iam.PolicyStatement({

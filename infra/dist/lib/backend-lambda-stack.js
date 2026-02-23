@@ -59,6 +59,7 @@ class BackendLambdaStack extends aws_cdk_lib_1.Stack {
         const apiName = cfg.apiName ?? 'estimation-backend-next';
         const stageName = cfg.stageName ?? 'prod';
         const mode = cfg.mode === 'router' ? 'router' : 'fastapi';
+        const functionName = `${apiName}-${mode}-handler`;
         const lambdaTimeoutSeconds = Number(cfg.timeoutSeconds ?? 60);
         const apiTimeoutSeconds = Number(cfg.apiTimeoutSeconds ?? 29);
         const normalizedLambdaTimeoutSeconds = Number.isFinite(lambdaTimeoutSeconds) && lambdaTimeoutSeconds > 0
@@ -89,7 +90,7 @@ class BackendLambdaStack extends aws_cdk_lib_1.Stack {
                     `-c backendLambda='{"mode":"router","legacyBackendUrl":"https://<app-runner-domain>"}'`);
             }
             handler = new lambda.Function(this, 'BackendNextHandler', {
-                functionName: `${apiName}-handler`,
+                functionName,
                 runtime: lambda.Runtime.PYTHON_3_11,
                 handler: 'index.handler',
                 code: lambda.Code.fromAsset(path.join(__dirname, '..', 'lambda', 'backend-next')),
@@ -103,7 +104,7 @@ class BackendLambdaStack extends aws_cdk_lib_1.Stack {
         }
         else {
             handler = new lambda.DockerImageFunction(this, 'BackendNextHandler', {
-                functionName: `${apiName}-handler`,
+                functionName,
                 code: lambda.DockerImageCode.fromImageAsset(path.join(__dirname, '..', '..', 'backend'), {
                     file: 'Dockerfile.lambda',
                 }),
@@ -116,7 +117,7 @@ class BackendLambdaStack extends aws_cdk_lib_1.Stack {
             const selfInvokeArn = cdk.Stack.of(this).formatArn({
                 service: 'lambda',
                 resource: 'function',
-                resourceName: `${apiName}-handler`,
+                resourceName: functionName,
             });
             handler.addToRolePolicy(new iam.PolicyStatement({
                 actions: ['lambda:InvokeFunction'],
