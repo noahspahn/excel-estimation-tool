@@ -427,6 +427,15 @@ class AIService:
             context["roi_summary"] = estimation_data["roi_summary"]
         if estimation_data.get("roi_horizon_years") is not None:
             context["roi_horizon_years"] = estimation_data["roi_horizon_years"]
+        for key in [
+            "scope_expansion",
+            "financial_bom",
+            "company_profile",
+            "maintenance_support_plan",
+            "compliance_warnings",
+        ]:
+            if estimation_data.get(key) is not None:
+                context[key] = estimation_data.get(key)
         if input_summary:
             context["input_summary"] = input_summary
         return context

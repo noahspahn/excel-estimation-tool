@@ -164,6 +164,28 @@ class ExportService:
             return self._format_money(low if low is not None else high)
         return f"${low:,.2f} - ${high:,.2f}"
 
+    def _has_text(self, value: Any) -> bool:
+        return value is not None and str(value).strip() != ""
+
+    def _line_total(self, item: Dict[str, Any], annualized: bool = False) -> float:
+        quantity = self._safe_float(item.get("quantity")) or 0.0
+        unit_cost = self._safe_float(item.get("unit_cost")) or 0.0
+        if annualized:
+            years = self._safe_float(item.get("years")) or 0.0
+            annual_cost = self._safe_float(item.get("annual_cost"))
+            if annual_cost is not None:
+                return annual_cost * years
+        if quantity and unit_cost:
+            return quantity * unit_cost
+        total = self._safe_float(item.get("total_cost"))
+        if total is not None:
+            return total
+        annual_cost = self._safe_float(item.get("annual_cost"))
+        if annual_cost is not None:
+            years = self._safe_float(item.get("years")) or (1.0 if annualized else 0.0)
+            return annual_cost * years if annualized else annual_cost
+        return 0.0
+
     def _compute_roi_summary(self, estimation_data: Dict[str, Any], total_cost: float) -> Optional[Dict[str, Any]]:
         roi_inputs = estimation_data.get("roi_inputs") or {}
         horizon_years = int(estimation_data.get("roi_horizon_years") or 5)
@@ -320,7 +342,7 @@ class ExportService:
                 assumptions_bits.append(f"CapEx interval: {roi_summary.get('capex_interval_months'):.0f} months")
             if roi_summary.get("current_availability") is not None and roi_summary.get("target_availability") is not None:
                 assumptions_bits.append(
-                    f"Availability: {roi_summary.get('current_availability'):.2f}% → {roi_summary.get('target_availability'):.2f}%"
+                    f"Availability: {roi_summary.get('current_availability'):.2f}% -> {roi_summary.get('target_availability'):.2f}%"
                 )
             if roi_summary.get("downtime_cost_per_hour") is not None:
                 assumptions_bits.append(f"Downtime cost: ${roi_summary.get('downtime_cost_per_hour'):,.2f}/hr")
@@ -343,6 +365,9 @@ class ExportService:
             add_pi('Project Name', 'project_name')
             add_pi('Government POC', 'government_poc')
             add_pi('Account Manager', 'account_manager')
+            add_pi('Account Manager Title', 'account_manager_title')
+            add_pi('Account Manager Phone', 'account_manager_phone')
+            add_pi('Account Manager Direct Email', 'account_manager_direct_email')
             add_pi('Service Delivery Mgr', 'service_delivery_mgr')
             add_pi('Service Delivery Exec', 'service_delivery_exec')
             add_pi('Site Location', 'site_location')
@@ -368,6 +393,118 @@ class ExportService:
                 story.append(pi_table)
                 story.append(Spacer(1, 16))
 
+        compliance_warnings = estimation_data.get("compliance_warnings") or []
+        if compliance_warnings:
+            story.append(Paragraph("Compliance Gaps Requiring Action", self.styles['SectionHeader']))
+            for warning in compliance_warnings:
+                story.append(Paragraph(f"- {escape(str(warning))}", self.styles['Normal']))
+            story.append(Spacer(1, 12))
+
+        scope_expansion = estimation_data.get("scope_expansion") or {}
+        scope_rows = [
+            ("Server Refresh and Virtualization", scope_expansion.get("server_virtualization")),
+            ("Primary Storage Upgrade (SAN/NAS)", scope_expansion.get("storage_upgrade")),
+            ("Backup & Disaster Recovery", scope_expansion.get("backup_disaster_recovery")),
+            ("Advanced Security Infrastructure", scope_expansion.get("advanced_security")),
+        ]
+        if any(self._has_text(text) for _, text in scope_rows):
+            story.append(Paragraph("Required Scope Expansion", self.styles['SectionHeader']))
+            expanded_rows = []
+            for label, value in scope_rows:
+                display = value if self._has_text(value) else "Not provided."
+                expanded_rows.append([
+                    Paragraph(escape(label), self.styles['ProjectInfoLabel']),
+                    Paragraph(escape(str(display)), self.styles['ProjectInfoValue']),
+                ])
+            scope_table = Table(expanded_rows, colWidths=[2.4*inch, 4.1*inch])
+            scope_table.setStyle(TableStyle([
+                ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
+                ('FONTSIZE', (0, 0), (-1, -1), 9),
+                ('BOTTOMPADDING', (0, 0), (-1, -1), 4),
+                ('GRID', (0, 0), (-1, -1), 0.25, colors.lightgrey),
+                ('VALIGN', (0, 0), (-1, -1), 'TOP'),
+                ('WORDWRAP', (0, 0), (-1, -1), 'CJK'),
+            ]))
+            story.append(scope_table)
+            story.append(Spacer(1, 16))
+
+        company_profile = estimation_data.get("company_profile") or {}
+        if company_profile and any(
+            self._has_text(company_profile.get(k))
+            for k in [
+                "company_history",
+                "company_mission",
+                "company_core_competencies",
+                "company_certifications",
+                "company_org_structure",
+            ]
+        ):
+            story.append(Paragraph("Company Profile", self.styles['SectionHeader']))
+            for label, key in [
+                ("History", "company_history"),
+                ("Mission", "company_mission"),
+                ("Core Competencies", "company_core_competencies"),
+                ("Certifications", "company_certifications"),
+                ("Organizational Structure", "company_org_structure"),
+            ]:
+                if self._has_text(company_profile.get(key)):
+                    story.append(Paragraph(f"<b>{escape(label)}:</b> {escape(str(company_profile.get(key)))}", self.styles['Normal']))
+                    story.append(Spacer(1, 4))
+
+            references = company_profile.get("reference_clients") or []
+            if references:
+                ref_rows = [["Organization", "Contact", "Title", "Phone", "Email"]]
+                for ref in references:
+                    ref_rows.append([
+                        str(ref.get("organization") or ""),
+                        str(ref.get("contact_name") or ""),
+                        str(ref.get("title") or ""),
+                        str(ref.get("phone") or ""),
+                        str(ref.get("email") or ""),
+                    ])
+                refs_table = Table(ref_rows, colWidths=[1.5*inch, 1.2*inch, 1.1*inch, 1.1*inch, 1.6*inch])
+                refs_table.setStyle(TableStyle([
+                    ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
+                    ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+                    ('FONTSIZE', (0, 0), (-1, -1), 8),
+                    ('BOTTOMPADDING', (0, 0), (-1, -1), 4),
+                    ('GRID', (0, 0), (-1, -1), 0.25, colors.lightgrey),
+                    ('VALIGN', (0, 0), (-1, -1), 'TOP'),
+                ]))
+                story.append(Spacer(1, 6))
+                story.append(Paragraph("Reference Clients", self.styles['SubsectionHeader']))
+                story.append(refs_table)
+                story.append(Spacer(1, 10))
+            story.append(Spacer(1, 6))
+
+        support_plan = estimation_data.get("maintenance_support_plan") or {}
+        if support_plan and any(self._has_text(v) for v in support_plan.values()):
+            story.append(Paragraph("Maintenance and Support Plan", self.styles['SectionHeader']))
+            support_rows = []
+            for label, key in [
+                ("SLA Response Times", "sla_response"),
+                ("SLA Resolution Times", "sla_resolution"),
+                ("Escalation Procedures", "escalation"),
+                ("Warranty Coverage", "warranty_coverage"),
+            ]:
+                if self._has_text(support_plan.get(key)):
+                    support_rows.append([
+                        Paragraph(escape(label), self.styles['ProjectInfoLabel']),
+                        Paragraph(escape(str(support_plan.get(key))), self.styles['ProjectInfoValue']),
+                    ])
+            if support_rows:
+                support_table = Table(support_rows, colWidths=[2.3*inch, 4.2*inch])
+                support_table.setStyle(TableStyle([
+                    ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
+                    ('FONTSIZE', (0, 0), (-1, -1), 9),
+                    ('BOTTOMPADDING', (0, 0), (-1, -1), 4),
+                    ('GRID', (0, 0), (-1, -1), 0.25, colors.lightgrey),
+                    ('VALIGN', (0, 0), (-1, -1), 'TOP'),
+                    ('WORDWRAP', (0, 0), (-1, -1), 'CJK'),
+                ]))
+                story.append(support_table)
+                story.append(Spacer(1, 16))
+
         # Optional scraped contract context (if provided)
         contract_src = estimation_data.get('contract_source') or {}
         if contract_src.get('url') or contract_src.get('excerpt'):
@@ -383,7 +520,7 @@ class ExportService:
 
         # Optional AI-generated narrative blocks
         if narrative_sections:
-            for key in ["assumptions", "risks", "next_steps"]:
+            for key in ["assumptions", "risks"]:
                 if narrative_sections.get(key):
                     title = key.replace('_', ' ').title()
                     story.append(Paragraph(title, self.styles['SectionHeader']))
@@ -507,6 +644,109 @@ class ExportService:
         
         story.append(cost_table)
         story.append(Spacer(1, 20))
+
+        financial_bom = estimation_data.get("financial_bom") or {}
+        hardware_items = financial_bom.get("hardware_bom_items") or []
+        software_items = financial_bom.get("software_licensing_items") or []
+        support_items = financial_bom.get("post_warranty_support_items") or []
+        if hardware_items or software_items or support_items:
+            story.append(Paragraph("Detailed Financial Breakdown (BOM)", self.styles['SectionHeader']))
+            procurement_total = 0.0
+
+            if hardware_items:
+                story.append(Paragraph("Hardware Procurement", self.styles['SubsectionHeader']))
+                hardware_rows = [["Category", "Item", "Qty", "Unit Cost", "Line Total"]]
+                hardware_total = 0.0
+                for item in hardware_items:
+                    line_total = self._line_total(item)
+                    hardware_total += line_total
+                    hardware_rows.append([
+                        str(item.get("category") or ""),
+                        str(item.get("item") or ""),
+                        f"{self._safe_float(item.get('quantity')) or 0:.0f}",
+                        self._format_money(self._safe_float(item.get("unit_cost")) or 0.0),
+                        self._format_money(line_total),
+                    ])
+                hardware_rows.append(["", "Hardware Total", "", "", self._format_money(hardware_total)])
+                hardware_table = Table(hardware_rows, colWidths=[1.2*inch, 2.2*inch, 0.6*inch, 1.1*inch, 1.4*inch])
+                hardware_table.setStyle(TableStyle([
+                    ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
+                    ('ALIGN', (2, 1), (-1, -1), 'RIGHT'),
+                    ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+                    ('FONTNAME', (0, -1), (-1, -1), 'Helvetica-Bold'),
+                    ('FONTSIZE', (0, 0), (-1, -1), 8),
+                    ('BOTTOMPADDING', (0, 0), (-1, -1), 4),
+                    ('GRID', (0, 0), (-1, -1), 0.25, colors.lightgrey),
+                ]))
+                story.append(hardware_table)
+                story.append(Spacer(1, 8))
+                procurement_total += hardware_total
+
+            if software_items:
+                story.append(Paragraph("Software Licensing", self.styles['SubsectionHeader']))
+                software_rows = [["License", "Duration", "Qty", "Unit Cost", "Line Total"]]
+                software_total = 0.0
+                for item in software_items:
+                    line_total = self._line_total(item)
+                    software_total += line_total
+                    software_rows.append([
+                        str(item.get("item") or ""),
+                        str(item.get("duration") or ""),
+                        f"{self._safe_float(item.get('quantity')) or 0:.0f}",
+                        self._format_money(self._safe_float(item.get("unit_cost")) or 0.0),
+                        self._format_money(line_total),
+                    ])
+                software_rows.append(["", "Software Total", "", "", self._format_money(software_total)])
+                software_table = Table(software_rows, colWidths=[2.0*inch, 1.2*inch, 0.6*inch, 1.1*inch, 1.6*inch])
+                software_table.setStyle(TableStyle([
+                    ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
+                    ('ALIGN', (2, 1), (-1, -1), 'RIGHT'),
+                    ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+                    ('FONTNAME', (0, -1), (-1, -1), 'Helvetica-Bold'),
+                    ('FONTSIZE', (0, 0), (-1, -1), 8),
+                    ('BOTTOMPADDING', (0, 0), (-1, -1), 4),
+                    ('GRID', (0, 0), (-1, -1), 0.25, colors.lightgrey),
+                ]))
+                story.append(software_table)
+                story.append(Spacer(1, 8))
+                procurement_total += software_total
+
+            if support_items:
+                story.append(Paragraph("Post-Warranty Support Contracts", self.styles['SubsectionHeader']))
+                support_rows = [["Vendor", "Service", "Annual Cost", "Years", "SLA", "Total"]]
+                support_total = 0.0
+                for item in support_items:
+                    line_total = self._line_total(item, annualized=True)
+                    support_total += line_total
+                    support_rows.append([
+                        str(item.get("vendor") or ""),
+                        str(item.get("service") or ""),
+                        self._format_money(self._safe_float(item.get("annual_cost")) or 0.0),
+                        f"{self._safe_float(item.get('years')) or 0:.0f}",
+                        str(item.get("sla") or ""),
+                        self._format_money(line_total),
+                    ])
+                support_rows.append(["", "Support Total", "", "", "", self._format_money(support_total)])
+                support_table = Table(support_rows, colWidths=[1.2*inch, 1.4*inch, 1.0*inch, 0.6*inch, 1.4*inch, 0.9*inch])
+                support_table.setStyle(TableStyle([
+                    ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
+                    ('ALIGN', (2, 1), (3, -1), 'RIGHT'),
+                    ('ALIGN', (5, 1), (5, -1), 'RIGHT'),
+                    ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+                    ('FONTNAME', (0, -1), (-1, -1), 'Helvetica-Bold'),
+                    ('FONTSIZE', (0, 0), (-1, -1), 8),
+                    ('BOTTOMPADDING', (0, 0), (-1, -1), 4),
+                    ('GRID', (0, 0), (-1, -1), 0.25, colors.lightgrey),
+                ]))
+                story.append(support_table)
+                story.append(Spacer(1, 8))
+                procurement_total += support_total
+
+            story.append(Paragraph(
+                f"Total External Procurement and Recurring Support: {self._format_money(procurement_total)}",
+                self.styles['Highlight']
+            ))
+            story.append(Spacer(1, 14))
 
         mr_total = float(result.get('risk_reserve', 0) or 0)
         if mr_total > 0:

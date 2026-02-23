@@ -250,6 +250,9 @@ class EstimationRequest(BaseModel):
     project_name: Optional[str] = None
     government_poc: Optional[str] = None
     account_manager: Optional[str] = None
+    account_manager_title: Optional[str] = None
+    account_manager_phone: Optional[str] = None
+    account_manager_direct_email: Optional[str] = None
     service_delivery_mgr: Optional[str] = None
     service_delivery_exec: Optional[str] = None
     site_location: Optional[str] = None
@@ -261,6 +264,23 @@ class EstimationRequest(BaseModel):
     security_protocols: Optional[str] = None
     compliance_frameworks: Optional[str] = None
     additional_assumptions: Optional[str] = None
+    scope_server_virtualization: Optional[str] = None
+    scope_storage_upgrade: Optional[str] = None
+    scope_backup_dr: Optional[str] = None
+    scope_security_infrastructure: Optional[str] = None
+    hardware_bom_items: Optional[List[Dict[str, Any]]] = None
+    software_licensing_items: Optional[List[Dict[str, Any]]] = None
+    post_warranty_support_items: Optional[List[Dict[str, Any]]] = None
+    company_history: Optional[str] = None
+    company_mission: Optional[str] = None
+    company_core_competencies: Optional[str] = None
+    company_certifications: Optional[str] = None
+    company_org_structure: Optional[str] = None
+    reference_clients: Optional[List[Dict[str, Any]]] = None
+    support_sla_response: Optional[str] = None
+    support_sla_resolution: Optional[str] = None
+    support_escalation: Optional[str] = None
+    support_warranty_coverage: Optional[str] = None
     # Site and schedule
     sites: int = 1
     overtime: bool = False
@@ -460,6 +480,126 @@ def _extract_roi_inputs_from_estimation_input(estimation_input: Dict[str, Any]) 
         "target_availability": estimation_input.get("roi_target_availability"),
         "legacy_support_savings_annual": estimation_input.get("roi_legacy_support_savings_annual"),
     }
+
+
+def _non_empty_text(value: Any) -> bool:
+    if value is None:
+        return False
+    return bool(str(value).strip())
+
+
+def _build_project_info(req: Any) -> Dict[str, Any]:
+    return {
+        "project_name": req.project_name,
+        "government_poc": req.government_poc,
+        "account_manager": req.account_manager,
+        "account_manager_title": req.account_manager_title,
+        "account_manager_phone": req.account_manager_phone,
+        "account_manager_direct_email": req.account_manager_direct_email,
+        "service_delivery_mgr": req.service_delivery_mgr,
+        "service_delivery_exec": req.service_delivery_exec,
+        "site_location": req.site_location,
+        "email": req.email,
+        "fy": req.fy,
+        "rap_number": req.rap_number,
+        "psi_code": req.psi_code,
+        "additional_comments": req.additional_comments,
+        "security_protocols": req.security_protocols,
+        "compliance_frameworks": req.compliance_frameworks,
+        "additional_assumptions": req.additional_assumptions,
+    }
+
+
+def _build_scope_expansion(req: Any) -> Dict[str, Any]:
+    return {
+        "server_virtualization": req.scope_server_virtualization,
+        "storage_upgrade": req.scope_storage_upgrade,
+        "backup_disaster_recovery": req.scope_backup_dr,
+        "advanced_security": req.scope_security_infrastructure,
+    }
+
+
+def _build_financial_bom(req: Any) -> Dict[str, Any]:
+    return {
+        "hardware_bom_items": req.hardware_bom_items or [],
+        "software_licensing_items": req.software_licensing_items or [],
+        "post_warranty_support_items": req.post_warranty_support_items or [],
+    }
+
+
+def _build_company_profile(req: Any) -> Dict[str, Any]:
+    return {
+        "company_history": req.company_history,
+        "company_mission": req.company_mission,
+        "company_core_competencies": req.company_core_competencies,
+        "company_certifications": req.company_certifications,
+        "company_org_structure": req.company_org_structure,
+        "reference_clients": req.reference_clients or [],
+    }
+
+
+def _build_support_plan(req: Any) -> Dict[str, Any]:
+    return {
+        "sla_response": req.support_sla_response,
+        "sla_resolution": req.support_sla_resolution,
+        "escalation": req.support_escalation,
+        "warranty_coverage": req.support_warranty_coverage,
+    }
+
+
+def _build_compliance_warnings(req: Any) -> List[str]:
+    warnings: List[str] = []
+
+    if not _non_empty_text(req.account_manager):
+        warnings.append("Project Information is missing Account Manager name.")
+    if not _non_empty_text(req.account_manager_title):
+        warnings.append("Project Information is missing Account Manager title.")
+    if not _non_empty_text(req.account_manager_phone):
+        warnings.append("Project Information is missing Account Manager phone.")
+    if not _non_empty_text(req.account_manager_direct_email):
+        warnings.append("Project Information is missing Account Manager direct email.")
+    if not _non_empty_text(req.fy):
+        warnings.append("Project Information is missing Fiscal Year.")
+
+    scope_sections = _build_scope_expansion(req)
+    for key, label in [
+        ("server_virtualization", "Server Refresh and Virtualization"),
+        ("storage_upgrade", "Primary Storage Upgrade"),
+        ("backup_disaster_recovery", "Backup and Disaster Recovery"),
+        ("advanced_security", "Advanced Security Infrastructure"),
+    ]:
+        if not _non_empty_text(scope_sections.get(key)):
+            warnings.append(f"Scope expansion section is missing: {label}.")
+
+    if not (req.hardware_bom_items or []):
+        warnings.append("Financial BOM is missing hardware procurement line items.")
+    if not (req.software_licensing_items or []):
+        warnings.append("Financial BOM is missing software licensing line items.")
+    if not (req.post_warranty_support_items or []):
+        warnings.append("Financial BOM is missing post-warranty support line items.")
+
+    refs = req.reference_clients or []
+    valid_refs = [
+        r for r in refs
+        if _non_empty_text(r.get("organization"))
+        and _non_empty_text(r.get("contact_name"))
+        and _non_empty_text(r.get("title"))
+        and _non_empty_text(r.get("phone"))
+        and _non_empty_text(r.get("email"))
+    ]
+    if len(valid_refs) < 3:
+        warnings.append("Company Profile should include at least 3 complete reference clients with contact details.")
+
+    if not _non_empty_text(req.support_sla_response):
+        warnings.append("Maintenance and Support Plan is missing SLA response commitments.")
+    if not _non_empty_text(req.support_sla_resolution):
+        warnings.append("Maintenance and Support Plan is missing SLA resolution commitments.")
+    if not _non_empty_text(req.support_escalation):
+        warnings.append("Maintenance and Support Plan is missing escalation procedures.")
+    if not _non_empty_text(req.support_warranty_coverage):
+        warnings.append("Maintenance and Support Plan is missing warranty coverage details.")
+
+    return warnings
 
 
 class ContractCreate(BaseModel):
@@ -808,6 +948,9 @@ def estimate(req: EstimationRequest):
         project_name=req.project_name,
         government_poc=req.government_poc,
         account_manager=req.account_manager,
+        account_manager_title=req.account_manager_title,
+        account_manager_phone=req.account_manager_phone,
+        account_manager_direct_email=req.account_manager_direct_email,
         service_delivery_mgr=req.service_delivery_mgr,
         service_delivery_exec=req.service_delivery_exec,
         site_location=req.site_location,
@@ -819,6 +962,23 @@ def estimate(req: EstimationRequest):
         security_protocols=req.security_protocols,
         compliance_frameworks=req.compliance_frameworks,
         additional_assumptions=req.additional_assumptions,
+        scope_server_virtualization=req.scope_server_virtualization,
+        scope_storage_upgrade=req.scope_storage_upgrade,
+        scope_backup_dr=req.scope_backup_dr,
+        scope_security_infrastructure=req.scope_security_infrastructure,
+        hardware_bom_items=req.hardware_bom_items or [],
+        software_licensing_items=req.software_licensing_items or [],
+        post_warranty_support_items=req.post_warranty_support_items or [],
+        company_history=req.company_history,
+        company_mission=req.company_mission,
+        company_core_competencies=req.company_core_competencies,
+        company_certifications=req.company_certifications,
+        company_org_structure=req.company_org_structure,
+        reference_clients=req.reference_clients or [],
+        support_sla_response=req.support_sla_response,
+        support_sla_resolution=req.support_sla_resolution,
+        support_escalation=req.support_escalation,
+        support_warranty_coverage=req.support_warranty_coverage,
         sites=req.sites,
         overtime=req.overtime,
         period_of_performance=req.period_of_performance,
@@ -832,27 +992,18 @@ def estimate(req: EstimationRequest):
     )
 
     warnings = calculation_service.validate_estimate(est_input)
+    compliance_warnings = _build_compliance_warnings(req)
     result = calculation_service.calculate_estimate(est_input)
 
     payload = {
-        "warnings": warnings,
+        "warnings": warnings + compliance_warnings,
+        "compliance_warnings": compliance_warnings,
         "estimation_result": asdict(result),
-        "project_info": {
-            "project_name": req.project_name,
-            "government_poc": req.government_poc,
-            "account_manager": req.account_manager,
-            "service_delivery_mgr": req.service_delivery_mgr,
-            "service_delivery_exec": req.service_delivery_exec,
-            "site_location": req.site_location,
-            "email": req.email,
-            "fy": req.fy,
-            "rap_number": req.rap_number,
-            "psi_code": req.psi_code,
-            "additional_comments": req.additional_comments,
-            "security_protocols": req.security_protocols,
-            "compliance_frameworks": req.compliance_frameworks,
-            "additional_assumptions": req.additional_assumptions,
-        },
+        "project_info": _build_project_info(req),
+        "scope_expansion": _build_scope_expansion(req),
+        "financial_bom": _build_financial_bom(req),
+        "company_profile": _build_company_profile(req),
+        "maintenance_support_plan": _build_support_plan(req),
         "odc_items": req.odc_items or [],
         "fixed_price_items": req.fixed_price_items or [],
         "hardware_subtotal": req.hardware_subtotal or 0.0,
@@ -887,6 +1038,9 @@ def generate_narrative(req: NarrativeRequest):
         project_name=req.project_name,
         government_poc=req.government_poc,
         account_manager=req.account_manager,
+        account_manager_title=req.account_manager_title,
+        account_manager_phone=req.account_manager_phone,
+        account_manager_direct_email=req.account_manager_direct_email,
         service_delivery_mgr=req.service_delivery_mgr,
         service_delivery_exec=req.service_delivery_exec,
         site_location=req.site_location,
@@ -898,6 +1052,23 @@ def generate_narrative(req: NarrativeRequest):
         security_protocols=req.security_protocols,
         compliance_frameworks=req.compliance_frameworks,
         additional_assumptions=req.additional_assumptions,
+        scope_server_virtualization=req.scope_server_virtualization,
+        scope_storage_upgrade=req.scope_storage_upgrade,
+        scope_backup_dr=req.scope_backup_dr,
+        scope_security_infrastructure=req.scope_security_infrastructure,
+        hardware_bom_items=req.hardware_bom_items or [],
+        software_licensing_items=req.software_licensing_items or [],
+        post_warranty_support_items=req.post_warranty_support_items or [],
+        company_history=req.company_history,
+        company_mission=req.company_mission,
+        company_core_competencies=req.company_core_competencies,
+        company_certifications=req.company_certifications,
+        company_org_structure=req.company_org_structure,
+        reference_clients=req.reference_clients or [],
+        support_sla_response=req.support_sla_response,
+        support_sla_resolution=req.support_sla_resolution,
+        support_escalation=req.support_escalation,
+        support_warranty_coverage=req.support_warranty_coverage,
         sites=req.sites,
         overtime=req.overtime,
         period_of_performance=req.period_of_performance,
@@ -912,24 +1083,24 @@ def generate_narrative(req: NarrativeRequest):
 
     result = calculation_service.calculate_estimate(est_input)
     estimation_data = {"estimation_result": asdict(result)}
-    project_info = {
-        "project_name": req.project_name,
-        "government_poc": req.government_poc,
-        "account_manager": req.account_manager,
-        "service_delivery_mgr": req.service_delivery_mgr,
-        "service_delivery_exec": req.service_delivery_exec,
-        "site_location": req.site_location,
-        "email": req.email,
-        "fy": req.fy,
-        "rap_number": req.rap_number,
-        "psi_code": req.psi_code,
-        "additional_comments": req.additional_comments,
-        "security_protocols": req.security_protocols,
-        "compliance_frameworks": req.compliance_frameworks,
-        "additional_assumptions": req.additional_assumptions,
-    }
+    project_info = _build_project_info(req)
     if any(v for v in project_info.values()):
         estimation_data["project_info"] = project_info
+    scope_expansion = _build_scope_expansion(req)
+    if any(v for v in scope_expansion.values()):
+        estimation_data["scope_expansion"] = scope_expansion
+    financial_bom = _build_financial_bom(req)
+    if any(financial_bom.get(k) for k in financial_bom):
+        estimation_data["financial_bom"] = financial_bom
+    company_profile = _build_company_profile(req)
+    if any(v for k, v in company_profile.items() if k != "reference_clients") or company_profile.get("reference_clients"):
+        estimation_data["company_profile"] = company_profile
+    support_plan = _build_support_plan(req)
+    if any(v for v in support_plan.values()):
+        estimation_data["maintenance_support_plan"] = support_plan
+    compliance_warnings = _build_compliance_warnings(req)
+    if compliance_warnings:
+        estimation_data["compliance_warnings"] = compliance_warnings
     if req.odc_items:
         estimation_data["odc_items"] = req.odc_items
     if req.fixed_price_items:
@@ -1307,6 +1478,9 @@ def _generate_report_artifact(
         project_name=req.project_name,
         government_poc=req.government_poc,
         account_manager=req.account_manager,
+        account_manager_title=req.account_manager_title,
+        account_manager_phone=req.account_manager_phone,
+        account_manager_direct_email=req.account_manager_direct_email,
         service_delivery_mgr=req.service_delivery_mgr,
         service_delivery_exec=req.service_delivery_exec,
         site_location=req.site_location,
@@ -1318,6 +1492,23 @@ def _generate_report_artifact(
         security_protocols=req.security_protocols,
         compliance_frameworks=req.compliance_frameworks,
         additional_assumptions=req.additional_assumptions,
+        scope_server_virtualization=req.scope_server_virtualization,
+        scope_storage_upgrade=req.scope_storage_upgrade,
+        scope_backup_dr=req.scope_backup_dr,
+        scope_security_infrastructure=req.scope_security_infrastructure,
+        hardware_bom_items=req.hardware_bom_items or [],
+        software_licensing_items=req.software_licensing_items or [],
+        post_warranty_support_items=req.post_warranty_support_items or [],
+        company_history=req.company_history,
+        company_mission=req.company_mission,
+        company_core_competencies=req.company_core_competencies,
+        company_certifications=req.company_certifications,
+        company_org_structure=req.company_org_structure,
+        reference_clients=req.reference_clients or [],
+        support_sla_response=req.support_sla_response,
+        support_sla_resolution=req.support_sla_resolution,
+        support_escalation=req.support_escalation,
+        support_warranty_coverage=req.support_warranty_coverage,
         sites=req.sites,
         overtime=req.overtime,
         period_of_performance=req.period_of_performance,
@@ -1336,22 +1527,12 @@ def _generate_report_artifact(
 
     estimation_data = {
         "estimation_result": asdict(result),
-        "project_info": {
-            "project_name": req.project_name,
-            "government_poc": req.government_poc,
-            "account_manager": req.account_manager,
-            "service_delivery_mgr": req.service_delivery_mgr,
-            "service_delivery_exec": req.service_delivery_exec,
-            "site_location": req.site_location,
-            "email": req.email,
-            "fy": req.fy,
-            "rap_number": req.rap_number,
-            "psi_code": req.psi_code,
-            "additional_comments": req.additional_comments,
-            "security_protocols": req.security_protocols,
-            "compliance_frameworks": req.compliance_frameworks,
-            "additional_assumptions": req.additional_assumptions,
-        },
+        "project_info": _build_project_info(req),
+        "scope_expansion": _build_scope_expansion(req),
+        "financial_bom": _build_financial_bom(req),
+        "company_profile": _build_company_profile(req),
+        "maintenance_support_plan": _build_support_plan(req),
+        "compliance_warnings": _build_compliance_warnings(req),
         "odc_items": req.odc_items or [],
         "fixed_price_items": req.fixed_price_items or [],
         "hardware_subtotal": req.hardware_subtotal or 0.0,

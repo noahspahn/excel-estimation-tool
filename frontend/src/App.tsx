@@ -46,6 +46,72 @@ const DEFAULT_ROADMAP_PHASES = [
   },
 ]
 
+type HardwareBomItem = {
+  category: string
+  item: string
+  quantity: number
+  unit_cost: number
+  notes: string
+}
+
+type SoftwareLicenseItem = {
+  item: string
+  duration: string
+  quantity: number
+  unit_cost: number
+  notes: string
+}
+
+type SupportContractItem = {
+  vendor: string
+  service: string
+  annual_cost: number
+  years: number
+  sla: string
+}
+
+type ReferenceClient = {
+  organization: string
+  contact_name: string
+  title: string
+  phone: string
+  email: string
+  scope: string
+}
+
+const emptyHardwareBomItem = (): HardwareBomItem => ({
+  category: '',
+  item: '',
+  quantity: 1,
+  unit_cost: 0,
+  notes: '',
+})
+
+const emptySoftwareLicenseItem = (): SoftwareLicenseItem => ({
+  item: '',
+  duration: '',
+  quantity: 1,
+  unit_cost: 0,
+  notes: '',
+})
+
+const emptySupportContractItem = (): SupportContractItem => ({
+  vendor: '',
+  service: '',
+  annual_cost: 0,
+  years: 5,
+  sla: '',
+})
+
+const emptyReferenceClient = (): ReferenceClient => ({
+  organization: '',
+  contact_name: '',
+  title: '',
+  phone: '',
+  email: '',
+  scope: '',
+})
+
 function App() {
   const appVersion = typeof __APP_VERSION__ !== 'undefined' ? __APP_VERSION__ : ''
   const [backendStatus, setBackendStatus] = useState('Checking...')
@@ -117,6 +183,9 @@ function App() {
   const [projectName, setProjectName] = useState('')
   const [governmentPOC, setGovernmentPOC] = useState('')
   const [accountManager, setAccountManager] = useState('')
+  const [accountManagerTitle, setAccountManagerTitle] = useState('')
+  const [accountManagerPhone, setAccountManagerPhone] = useState('')
+  const [accountManagerDirectEmail, setAccountManagerDirectEmail] = useState('')
   const [serviceDeliveryMgr, setServiceDeliveryMgr] = useState('')
   const [serviceDeliveryExec, setServiceDeliveryExec] = useState('')
   const [siteLocation, setSiteLocation] = useState('')
@@ -131,6 +200,10 @@ function App() {
   const [sites, setSites] = useState<number>(1)
   const [overtime, setOvertime] = useState<boolean>(false)
   const [periodOfPerformance, setPeriodOfPerformance] = useState('')
+  const [scopeServerVirtualization, setScopeServerVirtualization] = useState('')
+  const [scopeStorageUpgrade, setScopeStorageUpgrade] = useState('')
+  const [scopeBackupDr, setScopeBackupDr] = useState('')
+  const [scopeSecurityInfrastructure, setScopeSecurityInfrastructure] = useState('')
   const [estimatingMethod, setEstimatingMethod] = useState<'engineering' | 'historical'>('engineering')
   const [historicalEstimates, setHistoricalEstimates] = useState<{ name: string; actual_hours: string; actual_total_cost: string; selected: boolean }[]>([])
   const [raciMatrix, setRaciMatrix] = useState(() => DEFAULT_RACI_ROWS.map((row) => ({ ...row })))
@@ -144,9 +217,26 @@ function App() {
   const [roiLegacySupportAnnual, setRoiLegacySupportAnnual] = useState('')
   const [odcItems, setOdcItems] = useState<{ description: string; price: number }[]>([])
   const [fixedPriceItems, setFixedPriceItems] = useState<{ description: string; price: number }[]>([])
+  const [hardwareBomItems, setHardwareBomItems] = useState<HardwareBomItem[]>([])
+  const [softwareLicensingItems, setSoftwareLicensingItems] = useState<SoftwareLicenseItem[]>([])
+  const [postWarrantySupportItems, setPostWarrantySupportItems] = useState<SupportContractItem[]>([])
   const [hardwareSubtotal, setHardwareSubtotal] = useState<number>(0)
   const [warrantyMonths, setWarrantyMonths] = useState<number>(0)
   const [warrantyCost, setWarrantyCost] = useState<number>(0)
+  const [companyHistory, setCompanyHistory] = useState('')
+  const [companyMission, setCompanyMission] = useState('')
+  const [companyCoreCompetencies, setCompanyCoreCompetencies] = useState('')
+  const [companyCertifications, setCompanyCertifications] = useState('')
+  const [companyOrgStructure, setCompanyOrgStructure] = useState('')
+  const [referenceClients, setReferenceClients] = useState<ReferenceClient[]>([
+    emptyReferenceClient(),
+    emptyReferenceClient(),
+    emptyReferenceClient(),
+  ])
+  const [supportSlaResponse, setSupportSlaResponse] = useState('')
+  const [supportSlaResolution, setSupportSlaResolution] = useState('')
+  const [supportEscalation, setSupportEscalation] = useState('')
+  const [supportWarrantyCoverage, setSupportWarrantyCoverage] = useState('')
   const [subtaskPreview, setSubtaskPreview] = useState<any[] | null>(null)
   const [subtaskStatus, setSubtaskStatus] = useState<string | null>(null)
   const [subtaskError, setSubtaskError] = useState<string | null>(null)
@@ -160,6 +250,10 @@ function App() {
   const [securityError, setSecurityError] = useState<string | null>(null)
   const [complianceBusy, setComplianceBusy] = useState(false)
   const [complianceError, setComplianceError] = useState<string | null>(null)
+  const [complianceDialogOpen, setComplianceDialogOpen] = useState(false)
+  const [complianceWarnings, setComplianceWarnings] = useState<string[]>([])
+  const [complianceActionLabel, setComplianceActionLabel] = useState('continue')
+  const [pendingComplianceAction, setPendingComplianceAction] = useState<(() => Promise<void>) | null>(null)
 
   useEffect(() => {
     // Test backend connection
@@ -196,45 +290,7 @@ function App() {
         .then((data) => {
           const payload = data?.payload || {}
           const ei = payload.estimation_input || {}
-          setSelectedModules(ei.modules || [])
-          setComplexity(ei.complexity || 'M')
-          setProjectName(ei.project_name || '')
-          setGovernmentPOC(ei.government_poc || '')
-          setAccountManager(ei.account_manager || '')
-          setServiceDeliveryMgr(ei.service_delivery_mgr || '')
-          setServiceDeliveryExec(ei.service_delivery_exec || '')
-          setSiteLocation(ei.site_location || '')
-          setEmail(ei.email || '')
-          setFy(ei.fy || '')
-          setRapNumber(ei.rap_number || '')
-          setPsiCode(ei.psi_code || '')
-          setAdditionalComments(ei.additional_comments || '')
-          setSecurityProtocols(ei.security_protocols || '')
-          setComplianceFrameworks(ei.compliance_frameworks || '')
-          setAdditionalAssumptions(ei.additional_assumptions || '')
-          setSites(ei.sites || 1)
-          setOvertime(!!ei.overtime)
-          setPeriodOfPerformance(ei.period_of_performance || '')
-          setEstimatingMethod((ei.estimating_method as any) || 'engineering')
-          setHistoricalEstimates(normalizeHistoricalEstimates(ei.historical_estimates))
-          setRaciMatrix(Array.isArray(ei.raci_matrix) && ei.raci_matrix.length
-            ? ei.raci_matrix
-            : DEFAULT_RACI_ROWS.map((row) => ({ ...row })))
-          setRoadmapPhases(Array.isArray(ei.roadmap_phases) && ei.roadmap_phases.length
-            ? ei.roadmap_phases
-            : DEFAULT_ROADMAP_PHASES.map((row) => ({ ...row })))
-          setRoiCapexLow(ei.roi_capex_event_cost_low != null ? String(ei.roi_capex_event_cost_low) : '')
-          setRoiCapexHigh(ei.roi_capex_event_cost_high != null ? String(ei.roi_capex_event_cost_high) : '')
-          setRoiCapexIntervalMonths(ei.roi_capex_event_interval_months != null ? String(ei.roi_capex_event_interval_months) : '')
-          setRoiDowntimeCostPerHour(ei.roi_downtime_cost_per_hour != null ? String(ei.roi_downtime_cost_per_hour) : '')
-          setRoiCurrentAvailability(ei.roi_current_availability != null ? String(ei.roi_current_availability) : '')
-          setRoiTargetAvailability(ei.roi_target_availability != null ? String(ei.roi_target_availability) : '')
-          setRoiLegacySupportAnnual(ei.roi_legacy_support_savings_annual != null ? String(ei.roi_legacy_support_savings_annual) : '')
-          setOdcItems(ei.odc_items || [])
-          setFixedPriceItems(ei.fixed_price_items || [])
-          setHardwareSubtotal(ei.hardware_subtotal || 0)
-          setWarrantyMonths(ei.warranty_months || 0)
-          setWarrantyCost(ei.warranty_cost || 0)
+          applyEstimationInput(ei)
           setTone(payload.tone || 'professional')
           setStyleGuide(payload.style_guide || '')
           const narr = payload.narrative_sections || {}
@@ -885,48 +941,7 @@ function App() {
         method: 'POST',
         headers,
         body: JSON.stringify({
-          modules: selectedModules,
-          complexity,
-          environment: 'production',
-          integration_level: 'moderate_integration',
-          geography: 'dc_metro',
-          clearance_level: 'secret',
-          is_prime_contractor: true,
-          custom_role_overrides: {},
-          // extended fields
-          project_name: projectName,
-          government_poc: governmentPOC,
-          account_manager: accountManager,
-          service_delivery_mgr: serviceDeliveryMgr,
-          service_delivery_exec: serviceDeliveryExec,
-          site_location: siteLocation,
-          email,
-          fy,
-          rap_number: rapNumber,
-          psi_code: psiCode,
-          additional_comments: additionalComments,
-          security_protocols: securityProtocols,
-          compliance_frameworks: complianceFrameworks,
-          additional_assumptions: additionalAssumptions,
-          sites,
-          overtime,
-          period_of_performance: periodOfPerformance,
-          estimating_method: estimatingMethod,
-          historical_estimates: serializeHistoricalEstimates(),
-          raci_matrix: raciMatrix,
-          roadmap_phases: roadmapPhases,
-          odc_items: odcItems,
-          fixed_price_items: fixedPriceItems,
-          hardware_subtotal: hardwareSubtotal,
-          warranty_months: warrantyMonths,
-          warranty_cost: warrantyCost,
-          roi_capex_event_cost_low: asNumber(roiCapexLow),
-          roi_capex_event_cost_high: asNumber(roiCapexHigh),
-          roi_capex_event_interval_months: asNumber(roiCapexIntervalMonths),
-          roi_downtime_cost_per_hour: asNumber(roiDowntimeCostPerHour),
-          roi_current_availability: asNumber(roiCurrentAvailability),
-          roi_target_availability: asNumber(roiTargetAvailability),
-          roi_legacy_support_savings_annual: asNumber(roiLegacySupportAnnual),
+          ...buildEstimationInputPayload(),
           tool_version: appVersion || undefined,
           proposal_id: reportProposalId || undefined,
           proposal_version: versions?.length ? versions[versions.length - 1]?.version : undefined,
@@ -1006,47 +1021,7 @@ function App() {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          modules: selectedModules,
-          complexity,
-          environment: 'production',
-          integration_level: 'moderate_integration',
-          geography: 'dc_metro',
-          clearance_level: 'secret',
-          is_prime_contractor: true,
-          custom_role_overrides: {},
-          project_name: projectName || undefined,
-          government_poc: governmentPOC || undefined,
-          account_manager: accountManager || undefined,
-          service_delivery_mgr: serviceDeliveryMgr || undefined,
-          service_delivery_exec: serviceDeliveryExec || undefined,
-          site_location: siteLocation || undefined,
-          email: email || undefined,
-          fy: fy || undefined,
-          rap_number: rapNumber || undefined,
-          psi_code: psiCode || undefined,
-          additional_comments: additionalComments || undefined,
-          security_protocols: securityProtocols || undefined,
-          compliance_frameworks: complianceFrameworks || undefined,
-          additional_assumptions: additionalAssumptions || undefined,
-          sites,
-          overtime,
-          period_of_performance: periodOfPerformance || undefined,
-          estimating_method: estimatingMethod,
-          historical_estimates: serializeHistoricalEstimates(),
-          raci_matrix: raciMatrix,
-          roadmap_phases: roadmapPhases,
-          odc_items: odcItems,
-          fixed_price_items: fixedPriceItems,
-          hardware_subtotal: hardwareSubtotal,
-          warranty_months: warrantyMonths,
-          warranty_cost: warrantyCost,
-          roi_capex_event_cost_low: asNumber(roiCapexLow),
-          roi_capex_event_cost_high: asNumber(roiCapexHigh),
-          roi_capex_event_interval_months: asNumber(roiCapexIntervalMonths),
-          roi_downtime_cost_per_hour: asNumber(roiDowntimeCostPerHour),
-          roi_current_availability: asNumber(roiCurrentAvailability),
-          roi_target_availability: asNumber(roiTargetAvailability),
-          roi_legacy_support_savings_annual: asNumber(roiLegacySupportAnnual),
+          ...buildEstimationInputPayload(),
           contract_url: contractUrl,
           contract_excerpt: contractExcerpt,
           style_guide: styleGuide || undefined,
@@ -1088,49 +1063,7 @@ function App() {
         const estRes = await fetch(`${API}/api/v1/estimate`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            modules: selectedModules,
-            complexity,
-            environment: 'production',
-            integration_level: 'moderate_integration',
-            geography: 'dc_metro',
-            clearance_level: 'secret',
-            is_prime_contractor: true,
-            custom_role_overrides: {},
-            project_name: projectName,
-            government_poc: governmentPOC,
-            account_manager: accountManager,
-            service_delivery_mgr: serviceDeliveryMgr,
-            service_delivery_exec: serviceDeliveryExec,
-            site_location: siteLocation,
-            email,
-            fy,
-            rap_number: rapNumber,
-            psi_code: psiCode,
-            additional_comments: additionalComments,
-            security_protocols: securityProtocols,
-            compliance_frameworks: complianceFrameworks,
-            additional_assumptions: additionalAssumptions,
-            sites,
-            overtime,
-            period_of_performance: periodOfPerformance,
-            estimating_method: estimatingMethod,
-            historical_estimates: serializeHistoricalEstimates(),
-            raci_matrix: raciMatrix,
-            roadmap_phases: roadmapPhases,
-            odc_items: odcItems,
-            fixed_price_items: fixedPriceItems,
-            hardware_subtotal: hardwareSubtotal,
-            warranty_months: warrantyMonths,
-            warranty_cost: warrantyCost,
-            roi_capex_event_cost_low: asNumber(roiCapexLow),
-            roi_capex_event_cost_high: asNumber(roiCapexHigh),
-            roi_capex_event_interval_months: asNumber(roiCapexIntervalMonths),
-            roi_downtime_cost_per_hour: asNumber(roiDowntimeCostPerHour),
-            roi_current_availability: asNumber(roiCurrentAvailability),
-            roi_target_availability: asNumber(roiTargetAvailability),
-            roi_legacy_support_savings_annual: asNumber(roiLegacySupportAnnual),
-          })
+          body: JSON.stringify(buildEstimationInputPayload())
         })
         if (!estRes.ok) throw new Error('Failed to calculate estimate')
         const estData = await estRes.json()
@@ -1140,49 +1073,7 @@ function App() {
 
       const contractUrl = scrapeResult?.success ? (scrapeResult.final_url || scrapeResult.url) : undefined
       const contractExcerpt = scrapeResult?.success ? (scrapeResult.text_excerpt || '') : undefined
-      const estimationInput = {
-        modules: selectedModules,
-        complexity,
-        environment: 'production',
-        integration_level: 'moderate_integration',
-        geography: 'dc_metro',
-        clearance_level: 'secret',
-        is_prime_contractor: true,
-        custom_role_overrides: {},
-        project_name: projectName,
-        government_poc: governmentPOC,
-        account_manager: accountManager,
-        service_delivery_mgr: serviceDeliveryMgr,
-        service_delivery_exec: serviceDeliveryExec,
-        site_location: siteLocation,
-        email,
-        fy,
-        rap_number: rapNumber,
-        psi_code: psiCode,
-        additional_comments: additionalComments,
-        security_protocols: securityProtocols,
-        compliance_frameworks: complianceFrameworks,
-        additional_assumptions: additionalAssumptions,
-        sites,
-        overtime,
-        period_of_performance: periodOfPerformance,
-        estimating_method: estimatingMethod,
-        historical_estimates: serializeHistoricalEstimates(),
-        raci_matrix: raciMatrix,
-        roadmap_phases: roadmapPhases,
-        odc_items: odcItems,
-        fixed_price_items: fixedPriceItems,
-        hardware_subtotal: hardwareSubtotal,
-        warranty_months: warrantyMonths,
-        warranty_cost: warrantyCost,
-        roi_capex_event_cost_low: asNumber(roiCapexLow),
-        roi_capex_event_cost_high: asNumber(roiCapexHigh),
-        roi_capex_event_interval_months: asNumber(roiCapexIntervalMonths),
-        roi_downtime_cost_per_hour: asNumber(roiDowntimeCostPerHour),
-        roi_current_availability: asNumber(roiCurrentAvailability),
-        roi_target_availability: asNumber(roiTargetAvailability),
-        roi_legacy_support_savings_annual: asNumber(roiLegacySupportAnnual),
-      }
+      const estimationInput = buildEstimationInputPayload()
       const estimationData: any = {
         estimation_result: estimationResult || {},
         estimation_input: estimationInput,
@@ -1190,6 +1081,9 @@ function App() {
           project_name: projectName,
           government_poc: governmentPOC,
           account_manager: accountManager,
+          account_manager_title: accountManagerTitle,
+          account_manager_phone: accountManagerPhone,
+          account_manager_direct_email: accountManagerDirectEmail,
           service_delivery_mgr: serviceDeliveryMgr,
           service_delivery_exec: serviceDeliveryExec,
           site_location: siteLocation,
@@ -1220,6 +1114,7 @@ function App() {
         raci_matrix: raciMatrix,
         roadmap_phases: roadmapPhases,
         narrative_sections: editableNarrative,
+        ...buildCompliancePayload(),
       }
       if (contractUrl || contractExcerpt) {
         estimationData.contract_source = {
@@ -1286,47 +1181,7 @@ function App() {
         method: 'POST',
         headers,
         body: JSON.stringify({
-          modules: selectedModules,
-          complexity,
-          environment: 'production',
-          integration_level: 'moderate_integration',
-          geography: 'dc_metro',
-          clearance_level: 'secret',
-          is_prime_contractor: true,
-          custom_role_overrides: {},
-          project_name: projectName || undefined,
-          government_poc: governmentPOC || undefined,
-          account_manager: accountManager || undefined,
-          service_delivery_mgr: serviceDeliveryMgr || undefined,
-          service_delivery_exec: serviceDeliveryExec || undefined,
-          site_location: siteLocation || undefined,
-          email: email || undefined,
-          fy: fy || undefined,
-          rap_number: rapNumber || undefined,
-          psi_code: psiCode || undefined,
-          additional_comments: additionalComments || undefined,
-          security_protocols: securityProtocols || undefined,
-          compliance_frameworks: complianceFrameworks || undefined,
-          additional_assumptions: additionalAssumptions || undefined,
-          sites,
-          overtime,
-          period_of_performance: periodOfPerformance || undefined,
-          estimating_method: estimatingMethod,
-          historical_estimates: serializeHistoricalEstimates(),
-          raci_matrix: raciMatrix,
-          roadmap_phases: roadmapPhases,
-          odc_items: odcItems,
-          fixed_price_items: fixedPriceItems,
-          hardware_subtotal: hardwareSubtotal,
-          warranty_months: warrantyMonths,
-          warranty_cost: warrantyCost,
-          roi_capex_event_cost_low: asNumber(roiCapexLow),
-          roi_capex_event_cost_high: asNumber(roiCapexHigh),
-          roi_capex_event_interval_months: asNumber(roiCapexIntervalMonths),
-          roi_downtime_cost_per_hour: asNumber(roiDowntimeCostPerHour),
-          roi_current_availability: asNumber(roiCurrentAvailability),
-          roi_target_availability: asNumber(roiTargetAvailability),
-          roi_legacy_support_savings_annual: asNumber(roiLegacySupportAnnual),
+          ...buildEstimationInputPayload(),
           contract_url: contractUrl,
           contract_excerpt: contractExcerpt,
           use_ai_subtasks: includeAI,
@@ -1404,12 +1259,64 @@ function App() {
     setHistoricalEstimates((prev) => prev.filter((_, i) => i !== idx))
   }
 
+  const updateHardwareBomItem = (idx: number, patch: Partial<HardwareBomItem>) => {
+    setHardwareBomItems((prev) => prev.map((row, i) => (i === idx ? { ...row, ...patch } : row)))
+  }
+
+  const addHardwareBomItem = () => {
+    setHardwareBomItems((prev) => [...prev, emptyHardwareBomItem()])
+  }
+
+  const removeHardwareBomItem = (idx: number) => {
+    setHardwareBomItems((prev) => prev.filter((_, i) => i !== idx))
+  }
+
+  const updateSoftwareLicensingItem = (idx: number, patch: Partial<SoftwareLicenseItem>) => {
+    setSoftwareLicensingItems((prev) => prev.map((row, i) => (i === idx ? { ...row, ...patch } : row)))
+  }
+
+  const addSoftwareLicensingItem = () => {
+    setSoftwareLicensingItems((prev) => [...prev, emptySoftwareLicenseItem()])
+  }
+
+  const removeSoftwareLicensingItem = (idx: number) => {
+    setSoftwareLicensingItems((prev) => prev.filter((_, i) => i !== idx))
+  }
+
+  const updateSupportContractItem = (idx: number, patch: Partial<SupportContractItem>) => {
+    setPostWarrantySupportItems((prev) => prev.map((row, i) => (i === idx ? { ...row, ...patch } : row)))
+  }
+
+  const addSupportContractItem = () => {
+    setPostWarrantySupportItems((prev) => [...prev, emptySupportContractItem()])
+  }
+
+  const removeSupportContractItem = (idx: number) => {
+    setPostWarrantySupportItems((prev) => prev.filter((_, i) => i !== idx))
+  }
+
+  const updateReferenceClient = (idx: number, patch: Partial<ReferenceClient>) => {
+    setReferenceClients((prev) => prev.map((row, i) => (i === idx ? { ...row, ...patch } : row)))
+  }
+
+  const addReferenceClient = () => {
+    setReferenceClients((prev) => [...prev, emptyReferenceClient()])
+  }
+
+  const removeReferenceClient = (idx: number) => {
+    setReferenceClients((prev) => prev.filter((_, i) => i !== idx))
+  }
+
   const countWords = (s: string) => (s || '').trim().split(/\s+/).filter(Boolean).length
   const asNumber = (value: string) => {
     const trimmed = (value || '').trim()
     if (!trimmed) return undefined
     const num = Number(trimmed)
     return Number.isFinite(num) ? num : undefined
+  }
+  const toNumber = (value: any, fallback = 0) => {
+    const num = Number(value)
+    return Number.isFinite(num) ? num : fallback
   }
   const serializeHistoricalEstimates = (items = historicalEstimates) => (
     items.map((item) => ({
@@ -1433,6 +1340,51 @@ function App() {
         }))
       : []
   )
+  const normalizeHardwareBomItems = (items: any): HardwareBomItem[] => (
+    Array.isArray(items)
+      ? items.map((item) => ({
+          category: String(item?.category || ''),
+          item: String(item?.item || ''),
+          quantity: Math.max(0, toNumber(item?.quantity, 0)),
+          unit_cost: Math.max(0, toNumber(item?.unit_cost, 0)),
+          notes: String(item?.notes || ''),
+        }))
+      : []
+  )
+  const normalizeSoftwareLicensingItems = (items: any): SoftwareLicenseItem[] => (
+    Array.isArray(items)
+      ? items.map((item) => ({
+          item: String(item?.item || ''),
+          duration: String(item?.duration || ''),
+          quantity: Math.max(0, toNumber(item?.quantity, 0)),
+          unit_cost: Math.max(0, toNumber(item?.unit_cost, 0)),
+          notes: String(item?.notes || ''),
+        }))
+      : []
+  )
+  const normalizeSupportContractItems = (items: any): SupportContractItem[] => (
+    Array.isArray(items)
+      ? items.map((item) => ({
+          vendor: String(item?.vendor || ''),
+          service: String(item?.service || ''),
+          annual_cost: Math.max(0, toNumber(item?.annual_cost, 0)),
+          years: Math.max(0, toNumber(item?.years, 0)),
+          sla: String(item?.sla || ''),
+        }))
+      : []
+  )
+  const normalizeReferenceClients = (items: any): ReferenceClient[] => (
+    Array.isArray(items)
+      ? items.map((item) => ({
+          organization: String(item?.organization || ''),
+          contact_name: String(item?.contact_name || ''),
+          title: String(item?.title || ''),
+          phone: String(item?.phone || ''),
+          email: String(item?.email || ''),
+          scope: String(item?.scope || ''),
+        }))
+      : []
+  )
   const formatBytes = (bytes?: number) => {
     if (bytes == null || !Number.isFinite(bytes)) return '-'
     if (bytes === 0) return '0 B'
@@ -1442,51 +1394,230 @@ function App() {
     return `${value.toFixed(value >= 10 || idx === 0 ? 0 : 1)} ${units[idx]}`
   }
 
+  const buildCompliancePayload = () => ({
+    account_manager_title: accountManagerTitle || undefined,
+    account_manager_phone: accountManagerPhone || undefined,
+    account_manager_direct_email: accountManagerDirectEmail || undefined,
+    scope_server_virtualization: scopeServerVirtualization || undefined,
+    scope_storage_upgrade: scopeStorageUpgrade || undefined,
+    scope_backup_dr: scopeBackupDr || undefined,
+    scope_security_infrastructure: scopeSecurityInfrastructure || undefined,
+    hardware_bom_items: hardwareBomItems,
+    software_licensing_items: softwareLicensingItems,
+    post_warranty_support_items: postWarrantySupportItems,
+    company_history: companyHistory || undefined,
+    company_mission: companyMission || undefined,
+    company_core_competencies: companyCoreCompetencies || undefined,
+    company_certifications: companyCertifications || undefined,
+    company_org_structure: companyOrgStructure || undefined,
+    reference_clients: referenceClients,
+    support_sla_response: supportSlaResponse || undefined,
+    support_sla_resolution: supportSlaResolution || undefined,
+    support_escalation: supportEscalation || undefined,
+    support_warranty_coverage: supportWarrantyCoverage || undefined,
+  })
+
+  const buildEstimationInputPayload = () => ({
+    modules: selectedModules,
+    complexity,
+    environment: 'production',
+    integration_level: 'moderate_integration',
+    geography: 'dc_metro',
+    clearance_level: 'secret',
+    is_prime_contractor: true,
+    custom_role_overrides: {},
+    project_name: projectName || undefined,
+    government_poc: governmentPOC || undefined,
+    account_manager: accountManager || undefined,
+    service_delivery_mgr: serviceDeliveryMgr || undefined,
+    service_delivery_exec: serviceDeliveryExec || undefined,
+    site_location: siteLocation || undefined,
+    email: email || undefined,
+    fy: fy || undefined,
+    rap_number: rapNumber || undefined,
+    psi_code: psiCode || undefined,
+    additional_comments: additionalComments || undefined,
+    security_protocols: securityProtocols || undefined,
+    compliance_frameworks: complianceFrameworks || undefined,
+    additional_assumptions: additionalAssumptions || undefined,
+    sites,
+    overtime,
+    period_of_performance: periodOfPerformance || undefined,
+    estimating_method: estimatingMethod,
+    historical_estimates: serializeHistoricalEstimates(),
+    raci_matrix: raciMatrix,
+    roadmap_phases: roadmapPhases,
+    odc_items: odcItems,
+    fixed_price_items: fixedPriceItems,
+    hardware_subtotal: hardwareSubtotal,
+    warranty_months: warrantyMonths,
+    warranty_cost: warrantyCost,
+    roi_capex_event_cost_low: asNumber(roiCapexLow),
+    roi_capex_event_cost_high: asNumber(roiCapexHigh),
+    roi_capex_event_interval_months: asNumber(roiCapexIntervalMonths),
+    roi_downtime_cost_per_hour: asNumber(roiDowntimeCostPerHour),
+    roi_current_availability: asNumber(roiCurrentAvailability),
+    roi_target_availability: asNumber(roiTargetAvailability),
+    roi_legacy_support_savings_annual: asNumber(roiLegacySupportAnnual),
+    ...buildCompliancePayload(),
+  })
+
+  const applyEstimationInput = (ei: any) => {
+    setSelectedModules(ei.modules || [])
+    setComplexity(ei.complexity || 'M')
+    setProjectName(ei.project_name || '')
+    setGovernmentPOC(ei.government_poc || '')
+    setAccountManager(ei.account_manager || '')
+    setAccountManagerTitle(ei.account_manager_title || '')
+    setAccountManagerPhone(ei.account_manager_phone || '')
+    setAccountManagerDirectEmail(ei.account_manager_direct_email || '')
+    setServiceDeliveryMgr(ei.service_delivery_mgr || '')
+    setServiceDeliveryExec(ei.service_delivery_exec || '')
+    setSiteLocation(ei.site_location || '')
+    setEmail(ei.email || '')
+    setFy(ei.fy || '')
+    setRapNumber(ei.rap_number || '')
+    setPsiCode(ei.psi_code || '')
+    setAdditionalComments(ei.additional_comments || '')
+    setSecurityProtocols(ei.security_protocols || '')
+    setComplianceFrameworks(ei.compliance_frameworks || '')
+    setAdditionalAssumptions(ei.additional_assumptions || '')
+    setSites(ei.sites || 1)
+    setOvertime(!!ei.overtime)
+    setPeriodOfPerformance(ei.period_of_performance || '')
+    setScopeServerVirtualization(ei.scope_server_virtualization || '')
+    setScopeStorageUpgrade(ei.scope_storage_upgrade || '')
+    setScopeBackupDr(ei.scope_backup_dr || '')
+    setScopeSecurityInfrastructure(ei.scope_security_infrastructure || '')
+    setEstimatingMethod((ei.estimating_method as any) || 'engineering')
+    setHistoricalEstimates(normalizeHistoricalEstimates(ei.historical_estimates))
+    setRaciMatrix(Array.isArray(ei.raci_matrix) && ei.raci_matrix.length
+      ? ei.raci_matrix
+      : DEFAULT_RACI_ROWS.map((row) => ({ ...row })))
+    setRoadmapPhases(Array.isArray(ei.roadmap_phases) && ei.roadmap_phases.length
+      ? ei.roadmap_phases
+      : DEFAULT_ROADMAP_PHASES.map((row) => ({ ...row })))
+    setRoiCapexLow(ei.roi_capex_event_cost_low != null ? String(ei.roi_capex_event_cost_low) : '')
+    setRoiCapexHigh(ei.roi_capex_event_cost_high != null ? String(ei.roi_capex_event_cost_high) : '')
+    setRoiCapexIntervalMonths(ei.roi_capex_event_interval_months != null ? String(ei.roi_capex_event_interval_months) : '')
+    setRoiDowntimeCostPerHour(ei.roi_downtime_cost_per_hour != null ? String(ei.roi_downtime_cost_per_hour) : '')
+    setRoiCurrentAvailability(ei.roi_current_availability != null ? String(ei.roi_current_availability) : '')
+    setRoiTargetAvailability(ei.roi_target_availability != null ? String(ei.roi_target_availability) : '')
+    setRoiLegacySupportAnnual(ei.roi_legacy_support_savings_annual != null ? String(ei.roi_legacy_support_savings_annual) : '')
+    setOdcItems(ei.odc_items || [])
+    setFixedPriceItems(ei.fixed_price_items || [])
+    setHardwareBomItems(normalizeHardwareBomItems(ei.hardware_bom_items))
+    setSoftwareLicensingItems(normalizeSoftwareLicensingItems(ei.software_licensing_items))
+    setPostWarrantySupportItems(normalizeSupportContractItems(ei.post_warranty_support_items))
+    setHardwareSubtotal(ei.hardware_subtotal || 0)
+    setWarrantyMonths(ei.warranty_months || 0)
+    setWarrantyCost(ei.warranty_cost || 0)
+    setCompanyHistory(ei.company_history || '')
+    setCompanyMission(ei.company_mission || '')
+    setCompanyCoreCompetencies(ei.company_core_competencies || '')
+    setCompanyCertifications(ei.company_certifications || '')
+    setCompanyOrgStructure(ei.company_org_structure || '')
+    const refs = normalizeReferenceClients(ei.reference_clients)
+    while (refs.length < 3) refs.push(emptyReferenceClient())
+    setReferenceClients(refs)
+    setSupportSlaResponse(ei.support_sla_response || '')
+    setSupportSlaResolution(ei.support_sla_resolution || '')
+    setSupportEscalation(ei.support_escalation || '')
+    setSupportWarrantyCoverage(ei.support_warranty_coverage || '')
+  }
+
+  const getCriticalComplianceWarnings = () => {
+    const warnings: string[] = []
+    const hasText = (value: string) => !!value?.trim()
+
+    const missingAccountContact: string[] = []
+    if (!hasText(accountManager)) missingAccountContact.push('name')
+    if (!hasText(accountManagerTitle)) missingAccountContact.push('title')
+    if (!hasText(accountManagerPhone)) missingAccountContact.push('phone')
+    if (!hasText(accountManagerDirectEmail)) missingAccountContact.push('direct email')
+    if (missingAccountContact.length > 0) {
+      warnings.push(`Account Manager contact: include ${missingAccountContact.join(', ')}.`)
+    }
+
+    if (!hasText(fy)) {
+      warnings.push('Fiscal Year: include the governing fiscal year (for example, FY2027).')
+    }
+
+    if (!hasText(scopeServerVirtualization)) {
+      warnings.push('Scope Expansion - Server/Virtualization: include server model choices, licensing, and migration/cutover strategy.')
+    }
+    if (!hasText(scopeStorageUpgrade)) {
+      warnings.push('Scope Expansion - Storage: include SAN/NAS design, performance targets, and migration approach.')
+    }
+    if (!hasText(scopeBackupDr)) {
+      warnings.push('Scope Expansion - Backup/DR: include tooling, replication model, and RTO/RPO commitments.')
+    }
+    if (!hasText(scopeSecurityInfrastructure)) {
+      warnings.push('Scope Expansion - Security: include NGFW/UTM, EDR, SIEM, and vulnerability management cadence.')
+    }
+
+    if (hardwareBomItems.length === 0) {
+      warnings.push('Financial BOM: add hardware procurement line items (qty, unit cost, total).')
+    }
+    if (softwareLicensingItems.length === 0) {
+      warnings.push('Financial BOM: add software licensing line items for required term coverage.')
+    }
+    if (postWarrantySupportItems.length === 0) {
+      warnings.push('Financial BOM: add post-warranty support contracts with annual cost and SLA details.')
+    }
+
+    const completeReferences = referenceClients.filter((ref) =>
+      hasText(ref.organization) &&
+      hasText(ref.contact_name) &&
+      hasText(ref.title) &&
+      hasText(ref.phone) &&
+      hasText(ref.email)
+    ).length
+    if (completeReferences < 3) {
+      warnings.push(`Reference Clients: provide at least 3 complete references (${completeReferences}/3 complete).`)
+    }
+
+    if (!hasText(supportSlaResponse)) warnings.push('Maintenance & Support: include SLA response times.')
+    if (!hasText(supportSlaResolution)) warnings.push('Maintenance & Support: include SLA resolution times.')
+    if (!hasText(supportEscalation)) warnings.push('Maintenance & Support: include tiered escalation procedures.')
+    if (!hasText(supportWarrantyCoverage)) warnings.push('Maintenance & Support: include warranty coverage and duration.')
+
+    return warnings
+  }
+
+  const runWithComplianceDialog = async (action: () => Promise<void>, actionLabel: string) => {
+    const warnings = getCriticalComplianceWarnings()
+    if (warnings.length === 0) {
+      await action()
+      return
+    }
+    setComplianceWarnings(warnings)
+    setComplianceActionLabel(actionLabel)
+    setPendingComplianceAction(() => action)
+    setComplianceDialogOpen(true)
+  }
+
+  const closeComplianceDialog = () => {
+    setComplianceDialogOpen(false)
+    setPendingComplianceAction(null)
+  }
+
+  const proceedComplianceDialog = async () => {
+    const action = pendingComplianceAction
+    setComplianceDialogOpen(false)
+    setPendingComplianceAction(null)
+    if (action) {
+      await action()
+    }
+  }
+
+  const handlePreviewReportClick = async () => runWithComplianceDialog(previewReport, 'preview this report')
+  const handleSaveReportClick = async () => runWithComplianceDialog(saveReportToServer, 'save this report')
+  const handlePreviewNarrativeClick = async () => runWithComplianceDialog(previewNarrative, 'generate narrative')
+
   // Draft helpers
   const buildDraft = () => ({
-    estimation_input: {
-      modules: selectedModules,
-      complexity,
-      environment: 'production',
-      integration_level: 'moderate_integration',
-      geography: 'dc_metro',
-      clearance_level: 'secret',
-      is_prime_contractor: true,
-      custom_role_overrides: {},
-      project_name: projectName,
-      government_poc: governmentPOC,
-      account_manager: accountManager,
-      service_delivery_mgr: serviceDeliveryMgr,
-      service_delivery_exec: serviceDeliveryExec,
-      site_location: siteLocation,
-      email,
-      fy,
-      rap_number: rapNumber,
-      psi_code: psiCode,
-      additional_comments: additionalComments,
-      security_protocols: securityProtocols,
-      compliance_frameworks: complianceFrameworks,
-      additional_assumptions: additionalAssumptions,
-      sites,
-      overtime,
-      period_of_performance: periodOfPerformance,
-      estimating_method: estimatingMethod,
-      historical_estimates: serializeHistoricalEstimates(),
-      raci_matrix: raciMatrix,
-      roadmap_phases: roadmapPhases,
-      odc_items: odcItems,
-      fixed_price_items: fixedPriceItems,
-      hardware_subtotal: hardwareSubtotal,
-      warranty_months: warrantyMonths,
-      warranty_cost: warrantyCost,
-      roi_capex_event_cost_low: asNumber(roiCapexLow),
-      roi_capex_event_cost_high: asNumber(roiCapexHigh),
-      roi_capex_event_interval_months: asNumber(roiCapexIntervalMonths),
-      roi_downtime_cost_per_hour: asNumber(roiDowntimeCostPerHour),
-      roi_current_availability: asNumber(roiCurrentAvailability),
-      roi_target_availability: asNumber(roiTargetAvailability),
-      roi_legacy_support_savings_annual: asNumber(roiLegacySupportAnnual),
-    },
+    estimation_input: buildEstimationInputPayload(),
     narrative_sections: editableNarrative,
     estimation_result: estimate,
     tone,
@@ -1506,45 +1637,7 @@ function App() {
     try {
       const d = JSON.parse(raw)
       const ei = d.estimation_input || {}
-      setSelectedModules(ei.modules || [])
-      setComplexity(ei.complexity || 'M')
-      setProjectName(ei.project_name || '')
-      setGovernmentPOC(ei.government_poc || '')
-      setAccountManager(ei.account_manager || '')
-      setServiceDeliveryMgr(ei.service_delivery_mgr || '')
-      setServiceDeliveryExec(ei.service_delivery_exec || '')
-      setSiteLocation(ei.site_location || '')
-      setEmail(ei.email || '')
-      setFy(ei.fy || '')
-      setRapNumber(ei.rap_number || '')
-      setPsiCode(ei.psi_code || '')
-      setAdditionalComments(ei.additional_comments || '')
-      setSecurityProtocols(ei.security_protocols || '')
-      setComplianceFrameworks(ei.compliance_frameworks || '')
-      setAdditionalAssumptions(ei.additional_assumptions || '')
-      setSites(ei.sites || 1)
-      setOvertime(!!ei.overtime)
-      setPeriodOfPerformance(ei.period_of_performance || '')
-      setEstimatingMethod((ei.estimating_method as any) || 'engineering')
-      setHistoricalEstimates(normalizeHistoricalEstimates(ei.historical_estimates))
-      setRaciMatrix(Array.isArray(ei.raci_matrix) && ei.raci_matrix.length
-        ? ei.raci_matrix
-        : DEFAULT_RACI_ROWS.map((row) => ({ ...row })))
-      setRoadmapPhases(Array.isArray(ei.roadmap_phases) && ei.roadmap_phases.length
-        ? ei.roadmap_phases
-        : DEFAULT_ROADMAP_PHASES.map((row) => ({ ...row })))
-      setRoiCapexLow(ei.roi_capex_event_cost_low != null ? String(ei.roi_capex_event_cost_low) : '')
-      setRoiCapexHigh(ei.roi_capex_event_cost_high != null ? String(ei.roi_capex_event_cost_high) : '')
-      setRoiCapexIntervalMonths(ei.roi_capex_event_interval_months != null ? String(ei.roi_capex_event_interval_months) : '')
-      setRoiDowntimeCostPerHour(ei.roi_downtime_cost_per_hour != null ? String(ei.roi_downtime_cost_per_hour) : '')
-      setRoiCurrentAvailability(ei.roi_current_availability != null ? String(ei.roi_current_availability) : '')
-      setRoiTargetAvailability(ei.roi_target_availability != null ? String(ei.roi_target_availability) : '')
-      setRoiLegacySupportAnnual(ei.roi_legacy_support_savings_annual != null ? String(ei.roi_legacy_support_savings_annual) : '')
-      setOdcItems(ei.odc_items || [])
-      setFixedPriceItems(ei.fixed_price_items || [])
-      setHardwareSubtotal(ei.hardware_subtotal || 0)
-      setWarrantyMonths(ei.warranty_months || 0)
-      setWarrantyCost(ei.warranty_cost || 0)
+      applyEstimationInput(ei)
       setTone(d.tone || 'professional')
       setStyleGuide(d.style_guide || '')
       const narr = d.narrative_sections || {}
@@ -1577,45 +1670,7 @@ function App() {
       try {
         const d = JSON.parse(String(reader.result))
         const ei = d.estimation_input || {}
-        setSelectedModules(ei.modules || [])
-        setComplexity(ei.complexity || 'M')
-        setProjectName(ei.project_name || '')
-        setGovernmentPOC(ei.government_poc || '')
-        setAccountManager(ei.account_manager || '')
-        setServiceDeliveryMgr(ei.service_delivery_mgr || '')
-        setServiceDeliveryExec(ei.service_delivery_exec || '')
-        setSiteLocation(ei.site_location || '')
-        setEmail(ei.email || '')
-        setFy(ei.fy || '')
-        setRapNumber(ei.rap_number || '')
-        setPsiCode(ei.psi_code || '')
-        setAdditionalComments(ei.additional_comments || '')
-        setSecurityProtocols(ei.security_protocols || '')
-        setComplianceFrameworks(ei.compliance_frameworks || '')
-        setAdditionalAssumptions(ei.additional_assumptions || '')
-        setSites(ei.sites || 1)
-        setOvertime(!!ei.overtime)
-        setPeriodOfPerformance(ei.period_of_performance || '')
-        setEstimatingMethod((ei.estimating_method as any) || 'engineering')
-        setHistoricalEstimates(normalizeHistoricalEstimates(ei.historical_estimates))
-        setRaciMatrix(Array.isArray(ei.raci_matrix) && ei.raci_matrix.length
-          ? ei.raci_matrix
-          : DEFAULT_RACI_ROWS.map((row) => ({ ...row })))
-        setRoadmapPhases(Array.isArray(ei.roadmap_phases) && ei.roadmap_phases.length
-          ? ei.roadmap_phases
-          : DEFAULT_ROADMAP_PHASES.map((row) => ({ ...row })))
-        setRoiCapexLow(ei.roi_capex_event_cost_low != null ? String(ei.roi_capex_event_cost_low) : '')
-        setRoiCapexHigh(ei.roi_capex_event_cost_high != null ? String(ei.roi_capex_event_cost_high) : '')
-        setRoiCapexIntervalMonths(ei.roi_capex_event_interval_months != null ? String(ei.roi_capex_event_interval_months) : '')
-        setRoiDowntimeCostPerHour(ei.roi_downtime_cost_per_hour != null ? String(ei.roi_downtime_cost_per_hour) : '')
-        setRoiCurrentAvailability(ei.roi_current_availability != null ? String(ei.roi_current_availability) : '')
-        setRoiTargetAvailability(ei.roi_target_availability != null ? String(ei.roi_target_availability) : '')
-        setRoiLegacySupportAnnual(ei.roi_legacy_support_savings_annual != null ? String(ei.roi_legacy_support_savings_annual) : '')
-        setOdcItems(ei.odc_items || [])
-        setFixedPriceItems(ei.fixed_price_items || [])
-        setHardwareSubtotal(ei.hardware_subtotal || 0)
-        setWarrantyMonths(ei.warranty_months || 0)
-        setWarrantyCost(ei.warranty_cost || 0)
+        applyEstimationInput(ei)
         setTone(d.tone || 'professional')
         setStyleGuide(d.style_guide || '')
         const narr = d.narrative_sections || {}
@@ -1807,45 +1862,7 @@ function App() {
 
   const applyPayloadToEditor = (payload: any) => {
     const ei = payload?.estimation_input || {}
-    setSelectedModules(ei.modules || [])
-    setComplexity(ei.complexity || 'M')
-    setProjectName(ei.project_name || '')
-    setGovernmentPOC(ei.government_poc || '')
-    setAccountManager(ei.account_manager || '')
-    setServiceDeliveryMgr(ei.service_delivery_mgr || '')
-    setServiceDeliveryExec(ei.service_delivery_exec || '')
-    setSiteLocation(ei.site_location || '')
-    setEmail(ei.email || '')
-    setFy(ei.fy || '')
-    setRapNumber(ei.rap_number || '')
-    setPsiCode(ei.psi_code || '')
-    setAdditionalComments(ei.additional_comments || '')
-    setSecurityProtocols(ei.security_protocols || '')
-    setComplianceFrameworks(ei.compliance_frameworks || '')
-    setAdditionalAssumptions(ei.additional_assumptions || '')
-    setSites(ei.sites || 1)
-    setOvertime(!!ei.overtime)
-    setPeriodOfPerformance(ei.period_of_performance || '')
-    setEstimatingMethod((ei.estimating_method as any) || 'engineering')
-    setHistoricalEstimates(normalizeHistoricalEstimates(ei.historical_estimates))
-    setRaciMatrix(Array.isArray(ei.raci_matrix) && ei.raci_matrix.length
-      ? ei.raci_matrix
-      : DEFAULT_RACI_ROWS.map((row) => ({ ...row })))
-    setRoadmapPhases(Array.isArray(ei.roadmap_phases) && ei.roadmap_phases.length
-      ? ei.roadmap_phases
-      : DEFAULT_ROADMAP_PHASES.map((row) => ({ ...row })))
-    setRoiCapexLow(ei.roi_capex_event_cost_low != null ? String(ei.roi_capex_event_cost_low) : '')
-    setRoiCapexHigh(ei.roi_capex_event_cost_high != null ? String(ei.roi_capex_event_cost_high) : '')
-    setRoiCapexIntervalMonths(ei.roi_capex_event_interval_months != null ? String(ei.roi_capex_event_interval_months) : '')
-    setRoiDowntimeCostPerHour(ei.roi_downtime_cost_per_hour != null ? String(ei.roi_downtime_cost_per_hour) : '')
-    setRoiCurrentAvailability(ei.roi_current_availability != null ? String(ei.roi_current_availability) : '')
-    setRoiTargetAvailability(ei.roi_target_availability != null ? String(ei.roi_target_availability) : '')
-    setRoiLegacySupportAnnual(ei.roi_legacy_support_savings_annual != null ? String(ei.roi_legacy_support_savings_annual) : '')
-    setOdcItems(ei.odc_items || [])
-    setFixedPriceItems(ei.fixed_price_items || [])
-    setHardwareSubtotal(ei.hardware_subtotal || 0)
-    setWarrantyMonths(ei.warranty_months || 0)
-    setWarrantyCost(ei.warranty_cost || 0)
+    applyEstimationInput(ei)
     setStyleGuide(payload?.style_guide || '')
     const narr = payload?.narrative_sections || {}
     setNarrative(narr)
@@ -1937,49 +1954,7 @@ function App() {
       const estRes = await fetch(`${API}/api/v1/estimate`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          modules: selectedModules,
-          complexity,
-          environment: 'production',
-          integration_level: 'moderate_integration',
-          geography: 'dc_metro',
-          clearance_level: 'secret',
-          is_prime_contractor: true,
-          custom_role_overrides: {},
-          project_name: projectName,
-          government_poc: governmentPOC,
-          account_manager: accountManager,
-          service_delivery_mgr: serviceDeliveryMgr,
-          service_delivery_exec: serviceDeliveryExec,
-          site_location: siteLocation,
-          email,
-          fy,
-          rap_number: rapNumber,
-          psi_code: psiCode,
-          additional_comments: additionalComments,
-          security_protocols: securityProtocols,
-          compliance_frameworks: complianceFrameworks,
-          additional_assumptions: additionalAssumptions,
-          sites,
-          overtime,
-          period_of_performance: periodOfPerformance,
-          estimating_method: estimatingMethod,
-          historical_estimates: serializeHistoricalEstimates(),
-          raci_matrix: raciMatrix,
-          roadmap_phases: roadmapPhases,
-          odc_items: odcItems,
-          fixed_price_items: fixedPriceItems,
-          hardware_subtotal: hardwareSubtotal,
-          warranty_months: warrantyMonths,
-          warranty_cost: warrantyCost,
-          roi_capex_event_cost_low: asNumber(roiCapexLow),
-          roi_capex_event_cost_high: asNumber(roiCapexHigh),
-          roi_capex_event_interval_months: asNumber(roiCapexIntervalMonths),
-          roi_downtime_cost_per_hour: asNumber(roiDowntimeCostPerHour),
-          roi_current_availability: asNumber(roiCurrentAvailability),
-          roi_target_availability: asNumber(roiTargetAvailability),
-          roi_legacy_support_savings_annual: asNumber(roiLegacySupportAnnual),
-        })
+        body: JSON.stringify(buildEstimationInputPayload())
       })
       if (!estRes.ok) throw new Error('Failed to calculate estimate')
       const estData = await estRes.json()
@@ -1993,47 +1968,7 @@ function App() {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
-            modules: selectedModules,
-            complexity,
-            environment: 'production',
-            integration_level: 'moderate_integration',
-            geography: 'dc_metro',
-            clearance_level: 'secret',
-            is_prime_contractor: true,
-            custom_role_overrides: {},
-            project_name: projectName,
-            government_poc: governmentPOC,
-            account_manager: accountManager,
-            service_delivery_mgr: serviceDeliveryMgr,
-            service_delivery_exec: serviceDeliveryExec,
-            site_location: siteLocation,
-            email,
-            fy,
-            rap_number: rapNumber,
-            psi_code: psiCode,
-            additional_comments: additionalComments,
-            security_protocols: securityProtocols,
-            compliance_frameworks: complianceFrameworks,
-            additional_assumptions: additionalAssumptions,
-            sites,
-            overtime,
-            period_of_performance: periodOfPerformance,
-            estimating_method: estimatingMethod,
-            historical_estimates: serializeHistoricalEstimates(),
-            raci_matrix: raciMatrix,
-            roadmap_phases: roadmapPhases,
-            odc_items: odcItems,
-            fixed_price_items: fixedPriceItems,
-            hardware_subtotal: hardwareSubtotal,
-            warranty_months: warrantyMonths,
-            warranty_cost: warrantyCost,
-            roi_capex_event_cost_low: asNumber(roiCapexLow),
-            roi_capex_event_cost_high: asNumber(roiCapexHigh),
-            roi_capex_event_interval_months: asNumber(roiCapexIntervalMonths),
-            roi_downtime_cost_per_hour: asNumber(roiDowntimeCostPerHour),
-            roi_current_availability: asNumber(roiCurrentAvailability),
-            roi_target_availability: asNumber(roiTargetAvailability),
-            roi_legacy_support_savings_annual: asNumber(roiLegacySupportAnnual),
+            ...buildEstimationInputPayload(),
             contract_url: contractUrl,
             contract_excerpt: contractExcerpt,
             style_guide: styleGuide || undefined,
@@ -2085,6 +2020,9 @@ function App() {
     setProjectName('')
     setGovernmentPOC('')
     setAccountManager('')
+    setAccountManagerTitle('')
+    setAccountManagerPhone('')
+    setAccountManagerDirectEmail('')
     setServiceDeliveryMgr('')
     setServiceDeliveryExec('')
     setSiteLocation('')
@@ -2099,6 +2037,10 @@ function App() {
     setSites(1)
     setOvertime(false)
     setPeriodOfPerformance('')
+    setScopeServerVirtualization('')
+    setScopeStorageUpgrade('')
+    setScopeBackupDr('')
+    setScopeSecurityInfrastructure('')
     setEstimatingMethod('engineering')
     setHistoricalEstimates([])
     setRaciMatrix(DEFAULT_RACI_ROWS.map((row) => ({ ...row })))
@@ -2112,9 +2054,22 @@ function App() {
     setRoiLegacySupportAnnual('')
     setOdcItems([])
     setFixedPriceItems([])
+    setHardwareBomItems([])
+    setSoftwareLicensingItems([])
+    setPostWarrantySupportItems([])
     setHardwareSubtotal(0)
     setWarrantyMonths(0)
     setWarrantyCost(0)
+    setCompanyHistory('')
+    setCompanyMission('')
+    setCompanyCoreCompetencies('')
+    setCompanyCertifications('')
+    setCompanyOrgStructure('')
+    setReferenceClients([emptyReferenceClient(), emptyReferenceClient(), emptyReferenceClient()])
+    setSupportSlaResponse('')
+    setSupportSlaResolution('')
+    setSupportEscalation('')
+    setSupportWarrantyCoverage('')
     setNarrativeSectionBusy(null)
     setNarrativeSectionError(null)
     setAssumptionsBusy(false)
@@ -2382,6 +2337,9 @@ function App() {
       </section>
 
       <h2 style={{ marginTop: 24 }}>Project Information</h2>
+      <div style={{ fontSize: 12, color: '#666', marginBottom: 6 }}>
+        Fill Account Manager and Fiscal Year fields completely to avoid compliance gaps.
+      </div>
       <div className="form-grid">
         <label>Project Name
           <input value={projectName} onChange={(e) => setProjectName(e.target.value)} style={{ width: '100%' }} disabled={readOnly} />
@@ -2397,6 +2355,15 @@ function App() {
         </label>
         <label>Account Manager
           <input value={accountManager} onChange={(e) => setAccountManager(e.target.value)} style={{ width: '100%' }} disabled={readOnly} />
+        </label>
+        <label>Account Manager Title
+          <input value={accountManagerTitle} onChange={(e) => setAccountManagerTitle(e.target.value)} style={{ width: '100%' }} disabled={readOnly} />
+        </label>
+        <label>Account Manager Phone
+          <input value={accountManagerPhone} onChange={(e) => setAccountManagerPhone(e.target.value)} style={{ width: '100%' }} disabled={readOnly} />
+        </label>
+        <label>Account Manager Direct Email
+          <input value={accountManagerDirectEmail} onChange={(e) => setAccountManagerDirectEmail(e.target.value)} style={{ width: '100%' }} disabled={readOnly} />
         </label>
         <label>Service Delivery Mgr
           <input value={serviceDeliveryMgr} onChange={(e) => setServiceDeliveryMgr(e.target.value)} style={{ width: '100%' }} disabled={readOnly} />
@@ -2630,6 +2597,53 @@ function App() {
         </label>
       </div>
 
+      <h2 style={{ marginTop: 24 }}>Required Scope Expansion</h2>
+      <div style={{ fontSize: 12, color: '#666', marginBottom: 6 }}>
+        These four narratives map directly to mandatory modernization scope areas in the feedback.
+      </div>
+      <div style={{ display: 'grid', gap: 10 }}>
+        <label>Server Refresh &amp; Virtualization
+          <textarea
+            value={scopeServerVirtualization}
+            onChange={(e) => setScopeServerVirtualization(e.target.value)}
+            rows={3}
+            style={{ width: '100%' }}
+            disabled={readOnly}
+            placeholder="Server models, virtualization licensing/capacity, migration strategy, cutover windows, rollback procedures."
+          />
+        </label>
+        <label>Primary Storage Upgrade (SAN/NAS)
+          <textarea
+            value={scopeStorageUpgrade}
+            onChange={(e) => setScopeStorageUpgrade(e.target.value)}
+            rows={3}
+            style={{ width: '100%' }}
+            disabled={readOnly}
+            placeholder="All-flash vs hybrid rationale, IOPS/latency targets, tiering strategy, and migration approach."
+          />
+        </label>
+        <label>Backup &amp; Disaster Recovery (B&amp;DR)
+          <textarea
+            value={scopeBackupDr}
+            onChange={(e) => setScopeBackupDr(e.target.value)}
+            rows={3}
+            style={{ width: '100%' }}
+            disabled={readOnly}
+            placeholder="Software licensing, appliance procurement, offsite replication, RTO/RPO commitments."
+          />
+        </label>
+        <label>Advanced Security Infrastructure
+          <textarea
+            value={scopeSecurityInfrastructure}
+            onChange={(e) => setScopeSecurityInfrastructure(e.target.value)}
+            rows={3}
+            style={{ width: '100%' }}
+            disabled={readOnly}
+            placeholder="NGFW/UTM deployment, EDR, SIEM integration, vulnerability management and patch cadence."
+          />
+        </label>
+      </div>
+
       <h2 style={{ marginTop: 24 }}>Subtask Estimating Method</h2>
       <div style={{ display: 'flex', gap: 16, alignItems: 'center', flexWrap: 'wrap' }}>
         <label style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
@@ -2709,6 +2723,70 @@ function App() {
         </div>
       )}
 
+      <h2 style={{ marginTop: 24 }}>Financial BOM &amp; External Costs</h2>
+      <div style={{ fontSize: 12, color: '#666', marginBottom: 6 }}>
+        Itemize procurement and recurring support costs required by the RFP.
+      </div>
+      <div style={{ marginTop: 8 }}>
+        <h3>Hardware Bill of Materials</h3>
+        {hardwareBomItems.length === 0 && (
+          <div style={{ fontSize: 12, color: '#666', marginBottom: 6 }}>No hardware BOM items added.</div>
+        )}
+        {hardwareBomItems.map((item, idx) => (
+          <div key={idx} style={{ display: 'grid', gap: 8, gridTemplateColumns: '1fr 1.4fr 90px 120px 1.6fr auto', marginBottom: 6 }}>
+            <input placeholder="Category" value={item.category} onChange={(e) => updateHardwareBomItem(idx, { category: e.target.value })} disabled={readOnly} />
+            <input placeholder="Item / Model" value={item.item} onChange={(e) => updateHardwareBomItem(idx, { item: e.target.value })} disabled={readOnly} />
+            <input type="number" min={0} placeholder="Qty" value={item.quantity} onChange={(e) => updateHardwareBomItem(idx, { quantity: Math.max(0, Number(e.target.value || 0)) })} disabled={readOnly} />
+            <input type="number" min={0} placeholder="Unit Cost" value={item.unit_cost} onChange={(e) => updateHardwareBomItem(idx, { unit_cost: Math.max(0, Number(e.target.value || 0)) })} disabled={readOnly} />
+            <input placeholder="Notes" value={item.notes} onChange={(e) => updateHardwareBomItem(idx, { notes: e.target.value })} disabled={readOnly} />
+            {!readOnly && <button className="btn" onClick={() => removeHardwareBomItem(idx)}>Remove</button>}
+          </div>
+        ))}
+        {!readOnly && (
+          <button className="btn" onClick={addHardwareBomItem}>Add Hardware BOM Item</button>
+        )}
+      </div>
+
+      <div style={{ marginTop: 12 }}>
+        <h3>Software Licensing Schedule</h3>
+        {softwareLicensingItems.length === 0 && (
+          <div style={{ fontSize: 12, color: '#666', marginBottom: 6 }}>No software licensing items added.</div>
+        )}
+        {softwareLicensingItems.map((item, idx) => (
+          <div key={idx} style={{ display: 'grid', gap: 8, gridTemplateColumns: '1.4fr 1fr 90px 120px 1.4fr auto', marginBottom: 6 }}>
+            <input placeholder="License / Subscription" value={item.item} onChange={(e) => updateSoftwareLicensingItem(idx, { item: e.target.value })} disabled={readOnly} />
+            <input placeholder="Duration" value={item.duration} onChange={(e) => updateSoftwareLicensingItem(idx, { duration: e.target.value })} disabled={readOnly} />
+            <input type="number" min={0} placeholder="Qty" value={item.quantity} onChange={(e) => updateSoftwareLicensingItem(idx, { quantity: Math.max(0, Number(e.target.value || 0)) })} disabled={readOnly} />
+            <input type="number" min={0} placeholder="Unit Cost" value={item.unit_cost} onChange={(e) => updateSoftwareLicensingItem(idx, { unit_cost: Math.max(0, Number(e.target.value || 0)) })} disabled={readOnly} />
+            <input placeholder="Notes" value={item.notes} onChange={(e) => updateSoftwareLicensingItem(idx, { notes: e.target.value })} disabled={readOnly} />
+            {!readOnly && <button className="btn" onClick={() => removeSoftwareLicensingItem(idx)}>Remove</button>}
+          </div>
+        ))}
+        {!readOnly && (
+          <button className="btn" onClick={addSoftwareLicensingItem}>Add Software License</button>
+        )}
+      </div>
+
+      <div style={{ marginTop: 12 }}>
+        <h3>Post-Warranty Support Contracts</h3>
+        {postWarrantySupportItems.length === 0 && (
+          <div style={{ fontSize: 12, color: '#666', marginBottom: 6 }}>No post-warranty support items added.</div>
+        )}
+        {postWarrantySupportItems.map((item, idx) => (
+          <div key={idx} style={{ display: 'grid', gap: 8, gridTemplateColumns: '1fr 1.2fr 140px 90px 1.4fr auto', marginBottom: 6 }}>
+            <input placeholder="Vendor" value={item.vendor} onChange={(e) => updateSupportContractItem(idx, { vendor: e.target.value })} disabled={readOnly} />
+            <input placeholder="Service" value={item.service} onChange={(e) => updateSupportContractItem(idx, { service: e.target.value })} disabled={readOnly} />
+            <input type="number" min={0} placeholder="Annual Cost" value={item.annual_cost} onChange={(e) => updateSupportContractItem(idx, { annual_cost: Math.max(0, Number(e.target.value || 0)) })} disabled={readOnly} />
+            <input type="number" min={0} placeholder="Years" value={item.years} onChange={(e) => updateSupportContractItem(idx, { years: Math.max(0, Number(e.target.value || 0)) })} disabled={readOnly} />
+            <input placeholder="SLA (e.g., 4hr parts)" value={item.sla} onChange={(e) => updateSupportContractItem(idx, { sla: e.target.value })} disabled={readOnly} />
+            {!readOnly && <button className="btn" onClick={() => removeSupportContractItem(idx)}>Remove</button>}
+          </div>
+        ))}
+        {!readOnly && (
+          <button className="btn" onClick={addSupportContractItem}>Add Support Contract</button>
+        )}
+      </div>
+
       <h2 style={{ marginTop: 24 }}>Other Costs</h2>
       <div className="form-grid">
         <label>Hardware Subtotal ($)
@@ -2773,6 +2851,69 @@ function App() {
             Add Fixed-Price Item
           </button>
         )}
+      </div>
+
+      <h2 style={{ marginTop: 24 }}>Company Profile</h2>
+      <div style={{ display: 'grid', gap: 10 }}>
+        <label>Company History
+          <textarea value={companyHistory} onChange={(e) => setCompanyHistory(e.target.value)} rows={2} style={{ width: '100%' }} disabled={readOnly} />
+        </label>
+        <label>Mission &amp; Core Competencies
+          <textarea value={companyMission} onChange={(e) => setCompanyMission(e.target.value)} rows={2} style={{ width: '100%' }} disabled={readOnly} />
+        </label>
+        <label>Core Competencies (Delivery-Relevant)
+          <textarea value={companyCoreCompetencies} onChange={(e) => setCompanyCoreCompetencies(e.target.value)} rows={2} style={{ width: '100%' }} disabled={readOnly} />
+        </label>
+        <label>Certifications / Partner Status
+          <textarea value={companyCertifications} onChange={(e) => setCompanyCertifications(e.target.value)} rows={2} style={{ width: '100%' }} disabled={readOnly} placeholder="ISO, vendor partner levels, cleared facilities, etc." />
+        </label>
+        <label>Organizational Structure (Project-Relevant)
+          <textarea value={companyOrgStructure} onChange={(e) => setCompanyOrgStructure(e.target.value)} rows={2} style={{ width: '100%' }} disabled={readOnly} />
+        </label>
+      </div>
+      <div style={{ marginTop: 12 }}>
+        <h3>Reference Clients</h3>
+        <div style={{ fontSize: 12, color: '#666', marginBottom: 6 }}>
+          Provide at least three references with full contact details.
+        </div>
+        {referenceClients.map((client, idx) => (
+          <div key={idx} style={{ border: '1px solid #eee', borderRadius: 8, padding: 8, marginBottom: 8 }}>
+            <div style={{ display: 'grid', gap: 8, gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))' }}>
+              <input placeholder="Organization" value={client.organization} onChange={(e) => updateReferenceClient(idx, { organization: e.target.value })} disabled={readOnly} />
+              <input placeholder="Contact Name" value={client.contact_name} onChange={(e) => updateReferenceClient(idx, { contact_name: e.target.value })} disabled={readOnly} />
+              <input placeholder="Title" value={client.title} onChange={(e) => updateReferenceClient(idx, { title: e.target.value })} disabled={readOnly} />
+              <input placeholder="Phone" value={client.phone} onChange={(e) => updateReferenceClient(idx, { phone: e.target.value })} disabled={readOnly} />
+              <input placeholder="Email" value={client.email} onChange={(e) => updateReferenceClient(idx, { email: e.target.value })} disabled={readOnly} />
+            </div>
+            <label style={{ marginTop: 8, display: 'block' }}>Similar Scope Delivered
+              <textarea value={client.scope} onChange={(e) => updateReferenceClient(idx, { scope: e.target.value })} rows={2} style={{ width: '100%' }} disabled={readOnly} />
+            </label>
+            {!readOnly && (
+              <button className="btn" style={{ marginTop: 6 }} onClick={() => removeReferenceClient(idx)}>
+                Remove Reference
+              </button>
+            )}
+          </div>
+        ))}
+        {!readOnly && (
+          <button className="btn" onClick={addReferenceClient}>Add Reference Client</button>
+        )}
+      </div>
+
+      <h2 style={{ marginTop: 24 }}>Maintenance &amp; Support Plan</h2>
+      <div style={{ display: 'grid', gap: 10 }}>
+        <label>SLA Response Times
+          <textarea value={supportSlaResponse} onChange={(e) => setSupportSlaResponse(e.target.value)} rows={2} style={{ width: '100%' }} disabled={readOnly} placeholder="Tiered response commitments (Tier 1/Tier 2/Tier 3)." />
+        </label>
+        <label>SLA Resolution Times
+          <textarea value={supportSlaResolution} onChange={(e) => setSupportSlaResolution(e.target.value)} rows={2} style={{ width: '100%' }} disabled={readOnly} />
+        </label>
+        <label>Escalation Procedures
+          <textarea value={supportEscalation} onChange={(e) => setSupportEscalation(e.target.value)} rows={2} style={{ width: '100%' }} disabled={readOnly} />
+        </label>
+        <label>Warranty Coverage
+          <textarea value={supportWarrantyCoverage} onChange={(e) => setSupportWarrantyCoverage(e.target.value)} rows={2} style={{ width: '100%' }} disabled={readOnly} placeholder="Manufacturer, labor, and integration warranties including duration and scope." />
+        </label>
       </div>
 
       <h2>Quick Test Calculation</h2>
@@ -2914,13 +3055,13 @@ function App() {
       </div>
 
       <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
-        <button className="btn btn-primary" onClick={previewReport} disabled={previewLoading || readOnly}>
+        <button className="btn btn-primary" onClick={handlePreviewReportClick} disabled={previewLoading || readOnly}>
           {previewLoading ? 'Building Preview...' : 'Preview Report'}
         </button>
-        <button className="btn btn-primary" onClick={saveReportToServer} disabled={downloading}>
+        <button className="btn btn-primary" onClick={handleSaveReportClick} disabled={downloading}>
           {downloading ? 'Saving...' : 'Save Report to Server'}
         </button>
-        <button className="btn" onClick={previewNarrative} disabled={loadingNarrative}>
+        <button className="btn" onClick={handlePreviewNarrativeClick} disabled={loadingNarrative}>
           {loadingNarrative ? 'Regenerating Narrative...' : 'Regenerate Narrative'}
         </button>
         <button className="btn" onClick={previewSubtasks} disabled={subtaskLoading}>
@@ -3001,7 +3142,7 @@ function App() {
       <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 8 }}>
         <button
           className="btn btn-primary"
-          onClick={previewNarrative}
+          onClick={handlePreviewNarrativeClick}
           disabled={loadingNarrative || readOnly}
         >
           {loadingNarrative ? 'Generating...' : 'Generate Narrative'}
@@ -3333,6 +3474,42 @@ function App() {
               </tbody>
             </table>
           )}
+        </div>
+      )}
+      {complianceDialogOpen && (
+        <div
+          style={{
+            position: 'fixed',
+            inset: 0,
+            background: 'rgba(0, 0, 0, 0.45)',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            zIndex: 1000,
+            padding: 16,
+          }}
+        >
+          <div style={{ background: '#fff', borderRadius: 8, maxWidth: 760, width: '100%', padding: 16, boxShadow: '0 12px 32px rgba(0,0,0,0.25)' }}>
+            <h3 style={{ marginTop: 0 }}>Critical Compliance Fields Are Missing</h3>
+            <p style={{ marginTop: 0 }}>
+              You can still {complianceActionLabel}, but you may want to fill these fields first:
+            </p>
+            <div style={{ maxHeight: 260, overflowY: 'auto', border: '1px solid #eee', borderRadius: 6, padding: 10, background: '#fafafa' }}>
+              <ul style={{ margin: 0, paddingLeft: 18 }}>
+                {complianceWarnings.map((warning, idx) => (
+                  <li key={idx} style={{ marginBottom: 6, fontSize: 13 }}>{warning}</li>
+                ))}
+              </ul>
+            </div>
+            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, marginTop: 12 }}>
+              <button className="btn" onClick={closeComplianceDialog}>
+                Review Fields
+              </button>
+              <button className="btn btn-primary" onClick={proceedComplianceDialog}>
+                Proceed Anyway
+              </button>
+            </div>
+          </div>
         </div>
       )}
     </div>
