@@ -164,15 +164,24 @@ function App() {
   useEffect(() => {
     // Test backend connection
     fetch(`${API}/api/health`)
-      .then(res => res.json())
+      .then(res => {
+        if (!res.ok) throw new Error(`health ${res.status}`)
+        return res.json()
+      })
       .then(data => setBackendStatus(data.status || 'Connected'))
       .catch(() => setBackendStatus('Backend not connected'))
 
     // Fetch modules
     fetch(`${API}/api/v1/modules`)
-      .then(res => res.json())
-      .then(data => setModules(data || []))
-      .catch(err => console.error('Failed to fetch modules:', err))
+      .then(res => {
+        if (!res.ok) throw new Error(`modules ${res.status}`)
+        return res.json()
+      })
+      .then(data => setModules(Array.isArray(data) ? data : []))
+      .catch(err => {
+        setModules([])
+        console.error('Failed to fetch modules:', err)
+      })
 
     // Load shared read-only proposal if ?share= param
     const sp = new URLSearchParams(window.location.search)
@@ -821,6 +830,10 @@ function App() {
 
   // Recompute prerequisite warnings when selection or modules change
   useEffect(() => {
+    if (!Array.isArray(modules)) {
+      setPrereqWarnings([])
+      return
+    }
     const modMap: Record<string, any> = {}
     modules.forEach(m => { modMap[m.id] = m })
     const missing: string[] = []

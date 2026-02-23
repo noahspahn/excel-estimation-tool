@@ -1,9 +1,11 @@
 import * as cdk from 'aws-cdk-lib'
 import { CfnOutput, Stack, StackProps } from 'aws-cdk-lib'
 import * as apigateway from 'aws-cdk-lib/aws-apigateway'
+import * as dynamodb from 'aws-cdk-lib/aws-dynamodb'
 import * as iam from 'aws-cdk-lib/aws-iam'
 import * as lambda from 'aws-cdk-lib/aws-lambda'
 import * as logs from 'aws-cdk-lib/aws-logs'
+import * as s3 from 'aws-cdk-lib/aws-s3'
 import * as path from 'path'
 
 type BackendLambdaContext = {
@@ -109,6 +111,21 @@ export class BackendLambdaStack extends Stack {
           resources: [selfInvokeArn],
         }),
       )
+    }
+    const reportsTableName = (envVars.REPORTS_TABLE_NAME || '').trim()
+    if (reportsTableName) {
+      const reportsTable = dynamodb.Table.fromTableName(this, 'ReportsTableRef', reportsTableName)
+      reportsTable.grantReadWriteData(handler)
+    }
+
+    const bucketNames = new Set(
+      [envVars.S3_REPORT_BUCKET, envVars.S3_BUCKET].map((v) => String(v || '').trim()).filter(Boolean),
+    )
+    let bucketRefIdx = 0
+    for (const bucketName of bucketNames) {
+      const bucket = s3.Bucket.fromBucketName(this, `ReportsBucketRef${bucketRefIdx}`, bucketName)
+      bucket.grantReadWrite(handler)
+      bucketRefIdx += 1
     }
 
     const accessLogs = new logs.LogGroup(this, 'BackendNextApiAccessLogs', {

@@ -20,6 +20,7 @@ try {
 } catch {}
 
 const appVersion = `${baseVersion}+g${gitHash}`
+const devBackendOrigin = process.env.VITE_DEV_BACKEND_ORIGIN || 'http://127.0.0.1:8000'
 
 export default defineConfig({
   plugins: [react()],
@@ -27,6 +28,18 @@ export default defineConfig({
     __APP_VERSION__: JSON.stringify(appVersion),
   },
   server: {
+    host: '127.0.0.1',
     port: 3000,
+    proxy: {
+      '/api-next': {
+        target: devBackendOrigin,
+        changeOrigin: true,
+        rewrite: (path) => path.replace(/^\/api-next/, ''),
+      },
+      '/api': {
+        target: devBackendOrigin,
+        changeOrigin: true,
+      },
+    },
   },
 })
