@@ -197,6 +197,13 @@ def get_modules():
         for module in modules.values()
     ]
 
+
+@app.get("/api/v1/auth/me")
+def get_current_identity(current_user: str = Depends(get_current_user)):
+    """Lightweight auth validation endpoint for frontend token checks."""
+    return {"email": current_user}
+
+
 @app.get("/api/v1/roles")
 def get_roles():
     """Get all available roles"""

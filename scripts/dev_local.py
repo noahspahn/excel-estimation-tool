@@ -89,12 +89,6 @@ def main() -> int:
     parser.add_argument("--backend-port", type=int, default=8000)
     parser.add_argument("--frontend-port", type=int, default=3000)
     parser.add_argument(
-        "--backend-target",
-        choices=["legacy", "next"],
-        default="next",
-        help="Frontend backend target (legacy|next).",
-    )
-    parser.add_argument(
         "--frontend-install",
         action="store_true",
         help="Run npm ci in frontend before starting dev server.",
@@ -145,7 +139,6 @@ def main() -> int:
     frontend_env.update(
         {
             "VITE_API_URL": f"http://{args.host}:{args.frontend_port}",
-            "VITE_BACKEND_TARGET": args.backend_target,
             "VITE_DISABLE_AUTH": "true",
             "VITE_APP_ENV": "local",
             "VITE_COGNITO_REGION": "",

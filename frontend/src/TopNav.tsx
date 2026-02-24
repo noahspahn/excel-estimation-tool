@@ -1,7 +1,5 @@
-import { useState } from 'react'
 import { NavLink } from 'react-router-dom'
 import './App.css'
-import { getBackendTarget, setBackendTarget, type BackendTarget } from './apiConfig'
 
 const NAV_ITEMS = [
   { to: '/', label: 'Estimator', end: true },
@@ -11,7 +9,6 @@ const NAV_ITEMS = [
 ]
 
 export default function TopNav() {
-  const [backendTarget, setBackendTargetState] = useState<BackendTarget>(getBackendTarget())
   const appVersion =
     typeof __APP_VERSION__ !== 'undefined' && __APP_VERSION__ ? __APP_VERSION__ : ''
   const rawEnv = String((import.meta as any).env?.VITE_APP_ENV ?? '').trim().toLowerCase()
@@ -25,12 +22,6 @@ export default function TopNav() {
   })()
   const showBadge = normalizedEnv === 'dev' || normalizedEnv === 'stage'
   const badgeLabel = normalizedEnv === 'stage' ? 'Stage' : 'Dev'
-
-  const onBackendTargetChange = (target: BackendTarget) => {
-    setBackendTarget(target)
-    setBackendTargetState(target)
-    window.location.reload()
-  }
 
   return (
     <nav className="top-nav">
@@ -47,17 +38,6 @@ export default function TopNav() {
         ))}
       </div>
       <div className="top-nav__meta">
-        <label className="backend-target">
-          <span className="backend-target__label">Backend</span>
-          <select
-            className="backend-target__select"
-            value={backendTarget}
-            onChange={(e) => onBackendTargetChange(e.target.value as BackendTarget)}
-          >
-            <option value="legacy">Legacy</option>
-            <option value="next">API Next</option>
-          </select>
-        </label>
         {showBadge && (
           <span className={`env-badge env-badge--${normalizedEnv}`}>
             {badgeLabel}

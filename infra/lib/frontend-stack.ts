@@ -13,9 +13,6 @@ type FrontendContext = {
   apiDomain?: string
   apiUrl?: string
   apiProtocol?: 'http' | 'https'
-  nextApiDomain?: string
-  nextApiUrl?: string
-  nextApiProtocol?: 'http' | 'https'
 }
 
 type ApiOriginConfig = {
@@ -91,23 +88,6 @@ export class FrontendStack extends Stack {
               ? cloudfront.OriginProtocolPolicy.HTTP_ONLY
               : cloudfront.OriginProtocolPolicy.HTTPS_ONLY,
           originPath: apiOrigin.originPath,
-        }),
-        allowedMethods: cloudfront.AllowedMethods.ALLOW_ALL,
-        cachePolicy: cloudfront.CachePolicy.CACHING_DISABLED,
-        originRequestPolicy: cloudfront.OriginRequestPolicy.ALL_VIEWER_EXCEPT_HOST_HEADER,
-        viewerProtocolPolicy: cloudfront.ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
-      }
-    }
-
-    const nextApiOrigin = resolveApiOrigin(cfg.nextApiDomain, cfg.nextApiUrl, cfg.nextApiProtocol)
-    if (nextApiOrigin) {
-      additionalBehaviors['api-next/*'] = {
-        origin: new origins.HttpOrigin(nextApiOrigin.domain, {
-          protocolPolicy:
-            nextApiOrigin.protocol === 'http'
-              ? cloudfront.OriginProtocolPolicy.HTTP_ONLY
-              : cloudfront.OriginProtocolPolicy.HTTPS_ONLY,
-          originPath: nextApiOrigin.originPath,
         }),
         allowedMethods: cloudfront.AllowedMethods.ALLOW_ALL,
         cachePolicy: cloudfront.CachePolicy.CACHING_DISABLED,

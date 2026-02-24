@@ -11,8 +11,6 @@ import * as path from 'path'
 type BackendLambdaContext = {
   apiName?: string
   stageName?: string
-  mode?: 'fastapi' | 'router'
-  legacyBackendUrl?: string
   timeoutSeconds?: number | string
   apiTimeoutSeconds?: number | string
   memorySize?: number | string
@@ -37,8 +35,7 @@ export class BackendLambdaStack extends Stack {
 
     const apiName = cfg.apiName ?? 'estimation-backend-next'
     const stageName = cfg.stageName ?? 'prod'
-    const mode = cfg.mode === 'router' ? 'router' : 'fastapi'
-    const functionName = `${apiName}-${mode}-handler`
+    const functionName = `${apiName}-handler`
     const lambdaTimeoutSeconds = Number(cfg.timeoutSeconds ?? 60)
     const apiTimeoutSeconds = Number(cfg.apiTimeoutSeconds ?? 29)
     const normalizedLambdaTimeoutSeconds =
@@ -49,7 +46,6 @@ export class BackendLambdaStack extends Stack {
       Number.isFinite(apiTimeoutSeconds) && apiTimeoutSeconds > 0 ? Math.floor(apiTimeoutSeconds) : 29
     const effectiveApiTimeoutSeconds = Math.min(normalizedApiTimeoutSeconds, normalizedLambdaTimeoutSeconds)
     const memorySize = Number(cfg.memorySize ?? 512)
-    const legacyBackendUrl = String(cfg.legacyBackendUrl ?? '').trim().replace(/\/+$/, '')
     const reservedLambdaEnvKeys = new Set(['AWS_REGION', 'AWS_DEFAULT_REGION'])
     const droppedKeys: string[] = []
     const envVars: Record<string, string> = {}
@@ -60,58 +56,34 @@ export class BackendLambdaStack extends Stack {
       }
       envVars[key] = value
     }
-    envVars.BACKEND_MODE = 'api-next'
+    envVars.BACKEND_MODE = 'lambda'
     if (droppedKeys.length > 0) {
       cdk.Annotations.of(this).addWarning(
         `Ignoring reserved Lambda environment variable(s): ${droppedKeys.join(', ')}`,
       )
     }
 
-    let handler: lambda.IFunction
-    if (mode === 'router') {
-      if (!legacyBackendUrl) {
-        throw new Error(
-          'backendLambda.legacyBackendUrl is required in router mode. Example: ' +
-            `-c backendLambda='{"mode":"router","legacyBackendUrl":"https://<app-runner-domain>"}'`,
-        )
-      }
-      handler = new lambda.Function(this, 'BackendNextHandler', {
-        functionName,
-        runtime: lambda.Runtime.PYTHON_3_11,
-        handler: 'index.handler',
-        code: lambda.Code.fromAsset(path.join(__dirname, '..', 'lambda', 'backend-next')),
-        timeout: cdk.Duration.seconds(normalizedLambdaTimeoutSeconds),
-        memorySize,
-        environment: {
-          LEGACY_BASE_URL: legacyBackendUrl,
-          ...envVars,
-        },
-      })
-    } else {
-      handler = new lambda.DockerImageFunction(this, 'BackendNextHandler', {
-        functionName,
-        code: lambda.DockerImageCode.fromImageAsset(path.join(__dirname, '..', '..', 'backend'), {
-          file: 'Dockerfile.lambda',
-        }),
-        timeout: cdk.Duration.seconds(normalizedLambdaTimeoutSeconds),
-        memorySize,
-        environment: envVars,
-      })
-    }
+    const handler = new lambda.DockerImageFunction(this, 'BackendNextHandler', {
+      functionName,
+      code: lambda.DockerImageCode.fromImageAsset(path.join(__dirname, '..', '..', 'backend'), {
+        file: 'Dockerfile.lambda',
+      }),
+      timeout: cdk.Duration.seconds(normalizedLambdaTimeoutSeconds),
+      memorySize,
+      environment: envVars,
+    })
 
-    if (mode === 'fastapi' && handler instanceof lambda.Function) {
-      const selfInvokeArn = cdk.Stack.of(this).formatArn({
-        service: 'lambda',
-        resource: 'function',
-        resourceName: functionName,
-      })
-      handler.addToRolePolicy(
-        new iam.PolicyStatement({
-          actions: ['lambda:InvokeFunction'],
-          resources: [selfInvokeArn],
-        }),
-      )
-    }
+    const selfInvokeArn = cdk.Stack.of(this).formatArn({
+      service: 'lambda',
+      resource: 'function',
+      resourceName: functionName,
+    })
+    handler.addToRolePolicy(
+      new iam.PolicyStatement({
+        actions: ['lambda:InvokeFunction'],
+        resources: [selfInvokeArn],
+      }),
+    )
     const reportsTableName = (envVars.REPORTS_TABLE_NAME || '').trim()
     if (reportsTableName) {
       const reportsTable = dynamodb.Table.fromTableName(this, 'ReportsTableRef', reportsTableName)
@@ -178,9 +150,6 @@ export class BackendLambdaStack extends Stack {
     })
     new CfnOutput(this, 'BackendNextHandlerName', {
       value: handler.functionName,
-    })
-    new CfnOutput(this, 'BackendLambdaMode', {
-      value: mode,
     })
     new CfnOutput(this, 'BackendLambdaApiTimeoutSeconds', {
       value: String(effectiveApiTimeoutSeconds),

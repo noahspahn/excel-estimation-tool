@@ -11,7 +11,11 @@ const env = {
   region: process.env.CDK_DEFAULT_REGION,
 }
 
-new BackendStack(app, 'EstimationBackendStack', { env })
+const legacyBackendEnabled =
+  String(app.node.tryGetContext('legacyBackendEnabled') ?? 'false').toLowerCase() === 'true'
+if (legacyBackendEnabled) {
+  new BackendStack(app, 'EstimationBackendStack', { env })
+}
 
 const backendLambdaEnabled =
   String(app.node.tryGetContext('backendLambdaEnabled') ?? 'true').toLowerCase() !== 'false'

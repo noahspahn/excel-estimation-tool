@@ -1,11 +1,10 @@
-# AWS deployment (CDK + App Runner primary)
+# AWS deployment (CDK + Lambda API primary)
 
 ## Primary path (CDK)
 
 The recommended deployment path is now the CDK app in `infra/`:
 
-- **Backend**: App Runner + ECR + Cognito + RDS (auth enabled, DB prewired)
-- **Backend Next (stage 1 migration)**: API Gateway + Lambda (full FastAPI in Lambda by default), routed behind CloudFront at `/api-next/*`
+- **Backend**: API Gateway + Lambda (full FastAPI in Lambda)
 - **Report persistence**: S3 + DynamoDB (PDF storage + report metadata/payload)
 - **Frontend**: S3 + CloudFront (HTTPS)
 
@@ -15,7 +14,6 @@ Start here:
 cd infra
 npm install
 npx cdk bootstrap
-npx cdk deploy EstimationBackendStack
 npx cdk deploy EstimationBackendLambdaStack
 npx cdk deploy EstimationFrontendStack
 ```
@@ -23,28 +21,41 @@ npx cdk deploy EstimationFrontendStack
 Use the stack outputs to set:
 
 - Backend env: `COGNITO_REGION`, `COGNITO_USER_POOL_ID`, `COGNITO_CLIENT_ID`
-- Frontend build env: `VITE_API_URL=/`, `VITE_COGNITO_REGION`, `VITE_COGNITO_CLIENT_ID`, `VITE_DISABLE_AUTH=false`, `VITE_BACKEND_TARGET=legacy|next`
+- Frontend build env: `VITE_API_URL=/`, `VITE_COGNITO_REGION`, `VITE_COGNITO_CLIENT_ID`, `VITE_DISABLE_AUTH=false`
 
 If you are using GitHub Actions for CDK deploys, these optional GitHub
-Environment variables control API Next timeout behavior:
+Environment variables control backend timeout behavior:
 
 - `BACKEND_LAMBDA_TIMEOUT_SECONDS` (Lambda timeout, default `60`)
 - `BACKEND_LAMBDA_API_TIMEOUT_SECONDS` (API Gateway integration timeout, default `29`)
 
 See `infra/README.md` for full details.
 
-If you're at the App Runner service limit, reuse an existing service and
-deploy only Cognito + ECR with:
+### Remove unused legacy resources
 
-```
-npx cdk deploy EstimationBackendStack -c backend='{"existingRepoName":"estimation-backend","createService":false}'
+After CloudFront `/api/*` is pointing to API Gateway and the app is stable,
+remove App Runner/ECR resources you no longer use:
+
+```bash
+cd infra
+npx cdk destroy EstimationBackendStack -c legacyBackendEnabled=true --force
 ```
 
-To eliminate CORS permanently, deploy the frontend stack with an App Runner
+Then verify what still exists:
+
+```bash
+aws apprunner list-services --region <region>
+aws ecr describe-repositories --region <region>
+```
+
+Delete any leftover legacy App Runner service or ECR repo that is no longer
+referenced by deployments.
+
+To eliminate CORS permanently, deploy the frontend stack with the Lambda API
 origin so CloudFront proxies `/api/*`:
 
 ```
-npx cdk deploy EstimationFrontendStack -c frontend='{"apiDomain":"<your-apprunner-domain>"}'
+npx cdk deploy EstimationFrontendStack -c frontend='{"apiUrl":"https://<api-id>.execute-api.<region>.amazonaws.com/prod/"}'
 ```
 
 ---

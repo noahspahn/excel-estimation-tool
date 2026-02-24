@@ -19,6 +19,25 @@ const IS_LOCALHOST =
 const DEV_STUB_EMAIL = (import.meta as any).env?.VITE_DEV_STUB_EMAIL || 'noahspahn@gmail.com'
 const AUTH_DISABLED = String((import.meta as any).env?.VITE_DISABLE_AUTH ?? 'false').toLowerCase() === 'true'
 
+type JwtClaims = {
+  exp?: number | string
+  email?: string
+  [key: string]: unknown
+}
+
+const parseJwtClaims = (token: string): JwtClaims | null => {
+  try {
+    const [, payloadRaw] = token.split('.')
+    if (!payloadRaw) return null
+    const normalized = payloadRaw.replace(/-/g, '+').replace(/_/g, '/')
+    const padded = normalized + '='.repeat((4 - (normalized.length % 4)) % 4)
+    const decoded = atob(padded)
+    return JSON.parse(decoded) as JwtClaims
+  } catch {
+    return null
+  }
+}
+
 const DEFAULT_RACI_ROWS = [
   { milestone: 'SIT sign-off', responsible: '', accountable: '', consulted: '', informed: '' },
   { milestone: 'UAT data validation', responsible: '', accountable: '', consulted: '', informed: '' },
@@ -160,6 +179,12 @@ function App() {
   const [signupBusy, setSignupBusy] = useState(false)
   const [awaitingVerification, setAwaitingVerification] = useState(false)
   const [devLoginBusy, setDevLoginBusy] = useState(false)
+  const clearAuthSession = () => {
+    localStorage.removeItem('auth_token')
+    localStorage.removeItem('auth_email')
+    setAuthToken(null)
+    setAuthEmail(null)
+  }
   const isAuthenticated = AUTH_DISABLED || (!!authToken && !!authEmail)
   const shouldEnforceAuth = !AUTH_DISABLED
 
@@ -336,11 +361,79 @@ function App() {
   }, [])
 
   useEffect(() => {
-    const t = localStorage.getItem('auth_token')
-    const e = localStorage.getItem('auth_email')
-    if (t) setAuthToken(t)
-    if (e) setAuthEmail(e)
-    setAuthChecked(true)
+    let cancelled = false
+
+    const applyLoggedOutState = () => {
+      localStorage.removeItem('auth_token')
+      localStorage.removeItem('auth_email')
+      if (!cancelled) {
+        setAuthToken(null)
+        setAuthEmail(null)
+      }
+    }
+
+    const validateStoredToken = async () => {
+      if (AUTH_DISABLED) {
+        if (!cancelled) setAuthChecked(true)
+        return
+      }
+
+      const token = localStorage.getItem('auth_token')
+      const storedEmail = localStorage.getItem('auth_email')
+      if (!token) {
+        applyLoggedOutState()
+        if (!cancelled) setAuthChecked(true)
+        return
+      }
+
+      const claims = parseJwtClaims(token)
+      const exp =
+        typeof claims?.exp === 'number'
+          ? claims.exp
+          : typeof claims?.exp === 'string'
+            ? Number(claims.exp)
+            : NaN
+
+      if (!claims || !Number.isFinite(exp) || exp <= Math.floor(Date.now() / 1000)) {
+        applyLoggedOutState()
+        if (!cancelled) setAuthChecked(true)
+        return
+      }
+
+      const emailFromToken = typeof claims.email === 'string' ? claims.email.trim() : ''
+      const resolvedEmail = emailFromToken || (storedEmail || '')
+      if (resolvedEmail) {
+        localStorage.setItem('auth_email', resolvedEmail)
+      }
+
+      try {
+        const res = await fetch(`${API}/api/v1/auth/me`, {
+          headers: { Authorization: `Bearer ${token}` },
+        })
+        if (res.status === 401 || res.status === 403) {
+          applyLoggedOutState()
+          if (!cancelled) setAuthChecked(true)
+          return
+        }
+        if (!cancelled) {
+          setAuthToken(token)
+          setAuthEmail(resolvedEmail || null)
+        }
+      } catch {
+        // Keep the local session on transient network failures.
+        if (!cancelled) {
+          setAuthToken(token)
+          setAuthEmail(resolvedEmail || null)
+        }
+      } finally {
+        if (!cancelled) setAuthChecked(true)
+      }
+    }
+
+    validateStoredToken()
+    return () => {
+      cancelled = true
+    }
   }, [])
 
   useEffect(() => {
@@ -2253,12 +2346,7 @@ function App() {
               {!AUTH_DISABLED && authEmail && (
                 <button
                   className="btn"
-                  onClick={() => {
-                    localStorage.removeItem('auth_token')
-                    localStorage.removeItem('auth_email')
-                    setAuthToken(null)
-                    setAuthEmail(null)
-                  }}
+                  onClick={clearAuthSession}
                 >
                   Sign out
                 </button>
