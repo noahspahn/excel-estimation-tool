@@ -2730,6 +2730,13 @@ def list_reports(
             docs.append(report_registry_service.to_api_row(item, presigned_url=url))
         return docs
 
+    # Lambda deployments should rely on DynamoDB/S3 registry storage, not the SQL fallback.
+    if os.getenv("AWS_LAMBDA_FUNCTION_NAME"):
+        raise HTTPException(
+            status_code=503,
+            detail="Report registry is not configured. Set REPORTS_TABLE_NAME and S3_REPORT_BUCKET, then redeploy.",
+        )
+
     with get_session() as session:
         query = (
             session.query(ProposalDocument, Proposal)
