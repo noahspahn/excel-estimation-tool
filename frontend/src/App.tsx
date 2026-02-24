@@ -907,7 +907,12 @@ function App() {
       })
       if (!res.ok) {
         if (res.status === 401) {
-          setScrapeError('Unauthorized. Please sign in again.')
+          if (AUTH_DISABLED) {
+            setScrapeError('Unauthorized. Frontend auth is disabled while backend auth is required. Set VITE_DISABLE_AUTH=false and sign in.')
+          } else {
+            clearAuthSession()
+            setScrapeError('Unauthorized. Please sign in again.')
+          }
         } else {
           const text = await res.text()
           setScrapeError(`Scrape failed (${res.status}): ${text || 'Unknown error'}`)

@@ -27,9 +27,9 @@ jobs:
       DATABASE_URL: ${{ vars.DATABASE_URL || '' }}
       ALLOWED_ORIGINS: ${{ vars.ALLOWED_ORIGINS || '' }}
       AUTH_REQUIRED: ${{ vars.AUTH_REQUIRED || 'true' }}
-      COGNITO_REGION: ${{ vars.COGNITO_REGION || '' }}
+      COGNITO_REGION: ${{ vars.COGNITO_REGION || vars.VITE_COGNITO_REGION || '' }}
       COGNITO_USER_POOL_ID: ${{ vars.COGNITO_USER_POOL_ID || '' }}
-      COGNITO_CLIENT_ID: ${{ vars.COGNITO_CLIENT_ID || '' }}
+      COGNITO_CLIENT_ID: ${{ vars.COGNITO_CLIENT_ID || vars.VITE_COGNITO_CLIENT_ID || '' }}
       REPORTS_TABLE_NAME: ${{ vars.REPORTS_TABLE_NAME || '' }}
       S3_REPORT_BUCKET: ${{ vars.S3_REPORT_BUCKET || '' }}
       SAM_API_KEY: ${{ secrets.SAM_API_KEY || '' }}
@@ -57,6 +57,31 @@ jobs:
           set -euo pipefail
           if [ -z "${S3_BUCKET}" ]; then
             echo "S3_BUCKET not set (will use Frontend stack output)."
+          fi
+          AUTH_REQUIRED_LC=$(echo "${AUTH_REQUIRED}" | tr '[:upper:]' '[:lower:]')
+          VITE_DISABLE_AUTH_LC=$(echo "${VITE_DISABLE_AUTH}" | tr '[:upper:]' '[:lower:]')
+
+          if [ "${AUTH_REQUIRED_LC}" = "true" ] && [ "${VITE_DISABLE_AUTH_LC}" = "true" ]; then
+            echo "Invalid config: AUTH_REQUIRED=true but VITE_DISABLE_AUTH=true."
+            echo "Set VITE_DISABLE_AUTH=false (or unset it) when backend auth is required."
+            exit 1
+          fi
+
+          if [ "${AUTH_REQUIRED_LC}" = "true" ]; then
+            for key in COGNITO_REGION COGNITO_USER_POOL_ID COGNITO_CLIENT_ID VITE_COGNITO_REGION VITE_COGNITO_CLIENT_ID; do
+              if [ -z "${!key}" ]; then
+                echo "Missing required auth variable: ${key}"
+                exit 1
+              fi
+            done
+            if [ "${COGNITO_REGION}" != "${VITE_COGNITO_REGION}" ]; then
+              echo "COGNITO_REGION (${COGNITO_REGION}) does not match VITE_COGNITO_REGION (${VITE_COGNITO_REGION})."
+              exit 1
+            fi
+            if [ "${COGNITO_CLIENT_ID}" != "${VITE_COGNITO_CLIENT_ID}" ]; then
+              echo "COGNITO_CLIENT_ID does not match VITE_COGNITO_CLIENT_ID."
+              exit 1
+            fi
           fi
 
       - name: Setup Node
