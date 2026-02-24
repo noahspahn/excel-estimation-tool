@@ -342,11 +342,13 @@ function App() {
       const idToken = params.get('id_token')
       if (idToken) {
         try {
-          const payloadRaw = idToken.split('.')[1] || ''
-          const padded = payloadRaw.replace(/-/g, '+').replace(/_/g, '/')
-          const jsonStr = atob(padded)
-          const payload = JSON.parse(jsonStr)
-          const email = typeof payload?.email === 'string' ? payload.email : null
+          const payload = parseJwtClaims(idToken)
+          if (!payload) throw new Error('Unable to parse id_token')
+          const emailCandidate =
+            (typeof payload?.email === 'string' && payload.email) ||
+            (typeof payload?.['cognito:username'] === 'string' && String(payload['cognito:username'])) ||
+            ''
+          const email = emailCandidate || null
           localStorage.setItem('auth_token', idToken)
           if (email) localStorage.setItem('auth_email', email)
           setAuthToken(idToken)
@@ -363,12 +365,13 @@ function App() {
   useEffect(() => {
     let cancelled = false
 
-    const applyLoggedOutState = () => {
+    const applyLoggedOutState = (reason?: string) => {
       localStorage.removeItem('auth_token')
       localStorage.removeItem('auth_email')
       if (!cancelled) {
         setAuthToken(null)
         setAuthEmail(null)
+        if (reason) setLoginError(reason)
       }
     }
 
@@ -395,12 +398,14 @@ function App() {
             : NaN
 
       if (!claims || !Number.isFinite(exp) || exp <= Math.floor(Date.now() / 1000)) {
-        applyLoggedOutState()
+        applyLoggedOutState('Session expired. Please sign in again.')
         if (!cancelled) setAuthChecked(true)
         return
       }
 
-      const emailFromToken = typeof claims.email === 'string' ? claims.email.trim() : ''
+      const emailFromToken =
+        (typeof claims.email === 'string' ? claims.email.trim() : '') ||
+        (typeof claims?.['cognito:username'] === 'string' ? String(claims['cognito:username']).trim() : '')
       const resolvedEmail = emailFromToken || (storedEmail || '')
       if (resolvedEmail) {
         localStorage.setItem('auth_email', resolvedEmail)
@@ -411,7 +416,14 @@ function App() {
           headers: { Authorization: `Bearer ${token}` },
         })
         if (res.status === 401 || res.status === 403) {
-          applyLoggedOutState()
+          const err = await res.json().catch(() => ({}))
+          const detail = typeof err?.detail === 'string' ? err.detail : 'Invalid or expired session.'
+          if (!cancelled) {
+            // Debug mode behavior: keep the current session data so we can inspect failing requests.
+            setAuthToken(token)
+            setAuthEmail(resolvedEmail || null)
+            setLoginError(`${detail} (debug: session retained)`)
+          }
           if (!cancelled) setAuthChecked(true)
           return
         }
@@ -491,11 +503,14 @@ function App() {
         return
       }
       try {
-        const payloadRaw = idToken.split('.')[1] || ''
-        const jsonStr = atob(payloadRaw.replace(/-/g, '+').replace(/_/g, '/'))
-        const payload = JSON.parse(jsonStr)
+        const payload = parseJwtClaims(idToken)
+        if (!payload) {
+          throw new Error('Unable to parse id_token')
+        }
         const emailClaim =
-          typeof payload?.email === 'string' ? payload.email : email
+          (typeof payload?.email === 'string' ? payload.email : '') ||
+          (typeof payload?.['cognito:username'] === 'string' ? String(payload['cognito:username']) : '') ||
+          email
         localStorage.setItem('auth_token', idToken)
         if (emailClaim) localStorage.setItem('auth_email', emailClaim)
         setAuthToken(idToken)
@@ -907,11 +922,12 @@ function App() {
       })
       if (!res.ok) {
         if (res.status === 401) {
+          const err = await res.json().catch(() => ({}))
+          const detail = typeof err?.detail === 'string' ? err.detail : 'Unauthorized request.'
           if (AUTH_DISABLED) {
-            setScrapeError('Unauthorized. Frontend auth is disabled while backend auth is required. Set VITE_DISABLE_AUTH=false and sign in.')
+            setScrapeError(`${detail} Frontend auth is disabled while backend auth is required. Set VITE_DISABLE_AUTH=false and sign in.`)
           } else {
-            clearAuthSession()
-            setScrapeError('Unauthorized. Please sign in again.')
+            setScrapeError(`${detail} (debug: session retained)`)
           }
         } else {
           const text = await res.text()

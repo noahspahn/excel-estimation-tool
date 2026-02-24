@@ -141,7 +141,12 @@ def get_current_user(authorization: str | None = Header(default=None)) -> str:
     token = authorization.split(" ", 1)[1].strip()
     try:
         return _verify_cognito_token(token)
+    except HTTPException:
+        if AUTH_REQUIRED:
+            raise
+        return default_user
     except Exception:
+        logger.exception("Token verification failed")
         if AUTH_REQUIRED:
             raise HTTPException(status_code=401, detail="Invalid or expired token")
         return default_user
@@ -2894,6 +2899,7 @@ AUTH_ALLOWED = os.getenv("ALLOWED_AUTH_DOMAINS", "*")
 COGNITO_REGION = os.getenv("COGNITO_REGION")
 COGNITO_USER_POOL_ID = os.getenv("COGNITO_USER_POOL_ID")
 COGNITO_CLIENT_ID = os.getenv("COGNITO_CLIENT_ID")
+COGNITO_CLIENT_IDS = [c.strip() for c in (COGNITO_CLIENT_ID or "").split(",") if c.strip()]
 try:
     COGNITO_JWKS_TIMEOUT_SECONDS = max(1.0, float(os.getenv("COGNITO_JWKS_TIMEOUT_SECONDS", "5")))
 except Exception:
@@ -2969,7 +2975,7 @@ def _verify_cognito_token(raw: str) -> str:
 
     If Cognito is not configured, fall back to local dev tokens.
     """
-    if not (COGNITO_REGION and COGNITO_USER_POOL_ID and COGNITO_CLIENT_ID and COGNITO_ISS):
+    if not (COGNITO_REGION and COGNITO_USER_POOL_ID and COGNITO_CLIENT_IDS and COGNITO_ISS):
         # Dev / local mode: use legacy HS256 access tokens
         return _verify_token(raw, purpose="access")
 
@@ -3005,16 +3011,22 @@ def _verify_cognito_token(raw: str) -> str:
         raise HTTPException(status_code=401, detail="Invalid token issuer")
 
     aud = claims.get("aud") or claims.get("client_id")
-    if aud != COGNITO_CLIENT_ID:
+    if str(aud) not in COGNITO_CLIENT_IDS:
         raise HTTPException(status_code=401, detail="Invalid token audience")
 
     if claims.get("exp", 0) < time.time():
         raise HTTPException(status_code=401, detail="Token expired")
 
-    email = claims.get("email")
-    if not email:
-        raise HTTPException(status_code=401, detail="Token missing email claim")
-    return str(email)
+    # Prefer email for ownership keys; fall back to stable Cognito identity claims.
+    identity = (
+        claims.get("email")
+        or claims.get("cognito:username")
+        or claims.get("username")
+        or claims.get("sub")
+    )
+    if not identity:
+        raise HTTPException(status_code=401, detail="Token missing usable identity claim")
+    return str(identity)
 
 
 class AuthRequest(BaseModel):
