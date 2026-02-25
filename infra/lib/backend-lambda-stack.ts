@@ -208,6 +208,7 @@ export class BackendLambdaStack extends Stack {
       service: 'lambda',
       resource: 'function',
       resourceName: functionName,
+      arnFormat: cdk.ArnFormat.COLON_RESOURCE_NAME,
     })
     handler.addToRolePolicy(
       new iam.PolicyStatement({
