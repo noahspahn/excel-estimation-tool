@@ -11,7 +11,6 @@ import json
 import time
 import threading
 import logging
-import secrets
 import urllib.request
 from collections import Counter
 from pathlib import Path
@@ -41,6 +40,7 @@ from .services.data_service import DataService
 from .services.web_scraper_service import WebScraperService, ScrapeRequest
 from .services.storage_service import StorageService
 from .services.report_registry_service import ReportRegistryService
+from .services.report_job_service import ReportJobService
 from .models import ComplexityLevel, EstimationInput
 from .db import engine, get_session
 from .db_models import (
@@ -50,7 +50,6 @@ from .db_models import (
     ProposalDocument,
     ContractOpportunity,
     ContractSyncState,
-    ReportJob,
 )
 from .services.sam_contract_service import (
     fetch_sam_opportunities,
@@ -95,6 +94,7 @@ data_service = DataService()
 web_scraper_service = WebScraperService()
 storage_service = StorageService()
 report_registry_service = ReportRegistryService()
+report_job_service = ReportJobService()
 # Note: ExportService (and ReportLab) are imported lazily in the report endpoint
 REPORT_JOB_WORKERS = max(1, int(os.getenv("REPORT_JOB_WORKERS", "2")))
 REPORT_JOB_SELF_INVOKE = os.getenv("REPORT_JOB_SELF_INVOKE", "true").lower() in ("1", "true", "yes")
@@ -1816,20 +1816,20 @@ def generate_report(req: ReportRequest, include_ai: bool = False, tone: str = "p
 
 
 def _new_report_job_id() -> str:
-    return f"job_{secrets.token_urlsafe(8)}"
+    return report_job_service.new_job_id()
 
 
-def _report_job_to_api(job: ReportJob) -> Dict[str, Any]:
+def _report_job_to_api(job: Dict[str, Any]) -> Dict[str, Any]:
     return {
-        "id": job.id,
-        "job_kind": job.job_kind,
-        "status": job.status,
-        "error": job.error,
-        "result": job.result_payload or {},
-        "created_at": _dt_to_str(job.created_at),
-        "started_at": _dt_to_str(job.started_at),
-        "finished_at": _dt_to_str(job.finished_at),
-        "updated_at": _dt_to_str(job.updated_at),
+        "id": job.get("job_id"),
+        "job_kind": job.get("job_kind"),
+        "status": job.get("status"),
+        "error": job.get("error"),
+        "result": job.get("result_payload") or {},
+        "created_at": str(job.get("created_at") or ""),
+        "started_at": str(job.get("started_at") or "") or None,
+        "finished_at": str(job.get("finished_at") or "") or None,
+        "updated_at": str(job.get("updated_at") or ""),
     }
 
 
@@ -1841,21 +1841,17 @@ def _create_report_job(
 ) -> str:
     if job_kind not in REPORT_JOB_ALLOWED_KINDS:
         raise RuntimeError(f"Unsupported report job kind: {job_kind}")
-    now = datetime.utcnow()
-    job_id = _new_report_job_id()
-    with get_session() as session:
-        job = ReportJob(
-            id=job_id,
-            owner_email=owner_email,
-            job_kind=job_kind,
-            status="queued",
-            request_payload=request_payload,
-            created_at=now,
-            updated_at=now,
+    if not report_job_service.is_configured():
+        raise RuntimeError(
+            "Report jobs are not configured. Set REPORT_JOBS_TABLE_NAME and redeploy."
         )
-        session.add(job)
-        session.flush()
-    return job_id
+    created = report_job_service.create_job(
+        owner_email=owner_email,
+        job_kind=job_kind,
+        request_payload=request_payload,
+        job_id=_new_report_job_id(),
+    )
+    return str(created["job_id"])
 
 
 def _invoke_self_lambda_job(owner_email: str, job_id: str) -> bool:
@@ -1890,62 +1886,31 @@ def _dispatch_report_job(owner_email: str, job_id: str) -> None:
     if in_lambda:
         if _invoke_self_lambda_job(owner_email, job_id):
             return
-        with get_session() as session:
-            job = (
-                session.query(ReportJob)
-                .filter(ReportJob.id == job_id, ReportJob.owner_email == owner_email)
-                .one_or_none()
+        job = report_job_service.get_job(job_id)
+        if job and str(job.get("owner_email")) == owner_email:
+            report_job_service.update_status(
+                job_id=job_id,
+                status="failed",
+                error="Unable to dispatch async job in Lambda. Check invoke permission.",
             )
-            if job:
-                _set_report_job_status(
-                    job,
-                    status="failed",
-                    error="Unable to dispatch async job in Lambda. Check invoke permission.",
-                )
-                session.flush()
         return
     if _invoke_self_lambda_job(owner_email, job_id):
         return
     _report_job_executor.submit(_run_report_job_by_id, owner_email, job_id)
 
-
-def _set_report_job_status(
-    job: ReportJob,
-    *,
-    status: str,
-    error: Optional[str] = None,
-    result_payload: Optional[Dict[str, Any]] = None,
-) -> None:
-    now = datetime.utcnow()
-    job.status = status
-    job.updated_at = now
-    if status == "running" and not job.started_at:
-        job.started_at = now
-    if status in ("completed", "failed"):
-        job.finished_at = now
-    if error is not None:
-        job.error = error
-    if result_payload is not None:
-        job.result_payload = result_payload
-
-
 def _run_report_job_by_id(owner_email: str, job_id: str) -> None:
     request_payload: Dict[str, Any] = {}
     job_kind = "report"
-    with get_session() as session:
-        job = (
-            session.query(ReportJob)
-            .filter(ReportJob.id == job_id, ReportJob.owner_email == owner_email)
-            .one_or_none()
-        )
-        if not job:
-            return
-        if job.status not in ("queued", "running"):
-            return
-        _set_report_job_status(job, status="running")
-        request_payload = dict(job.request_payload or {})
-        job_kind = str(job.job_kind or "report")
-        session.flush()
+    job = report_job_service.get_job(job_id)
+    if not job:
+        return
+    if str(job.get("owner_email")) != owner_email:
+        return
+    if str(job.get("status") or "") not in ("queued", "running"):
+        return
+    report_job_service.update_status(job_id=job_id, status="running")
+    request_payload = dict(job.get("request_payload") or {})
+    job_kind = str(job.get("job_kind") or "report")
 
     try:
         request_data = request_payload.get("request") or {}
@@ -1978,39 +1943,29 @@ def _run_report_job_by_id(owner_email: str, job_id: str) -> None:
         else:
             raise RuntimeError(f"Unsupported report job kind: {job_kind}")
 
-        with get_session() as session:
-            job = (
-                session.query(ReportJob)
-                .filter(ReportJob.id == job_id, ReportJob.owner_email == owner_email)
-                .one_or_none()
-            )
-            if not job:
-                return
-            _set_report_job_status(job, status="completed", result_payload=result_payload)
-            session.flush()
+        report_job_service.update_status(
+            job_id=job_id,
+            status="completed",
+            result_payload=result_payload,
+        )
     except Exception as exc:
         logger.exception("report_job_failed owner=%s job=%s kind=%s", owner_email, job_id, job_kind)
-        with get_session() as session:
-            job = (
-                session.query(ReportJob)
-                .filter(ReportJob.id == job_id, ReportJob.owner_email == owner_email)
-                .one_or_none()
-            )
-            if not job:
-                return
-            _set_report_job_status(job, status="failed", error=str(exc)[:2000])
-            session.flush()
+        report_job_service.update_status(
+            job_id=job_id,
+            status="failed",
+            error=str(exc)[:2000],
+        )
 
 
 def run_report_job_now(job_id: str, owner_email: Optional[str] = None) -> None:
-    with get_session() as session:
-        query = session.query(ReportJob).filter(ReportJob.id == job_id)
-        if owner_email:
-            query = query.filter(ReportJob.owner_email == owner_email)
-        job = query.one_or_none()
-        if not job:
-            return
-        owner = str(job.owner_email)
+    job = report_job_service.get_job(job_id)
+    if not job:
+        return
+    owner = str(job.get("owner_email") or "")
+    if owner_email and owner != owner_email:
+        return
+    if not owner:
+        return
     _run_report_job_by_id(owner, job_id)
 
 
@@ -2021,6 +1976,11 @@ def queue_report_job(
     tone: str = "professional",
     current_user: str = Depends(get_current_user),
 ):
+    if not report_job_service.is_configured():
+        raise HTTPException(
+            status_code=503,
+            detail="Report jobs are not configured. Set REPORT_JOBS_TABLE_NAME and redeploy.",
+        )
     payload = {
         "request": req.model_dump(),
         "include_ai": include_ai,
@@ -2037,15 +1997,15 @@ def queue_report_job(
 
 @app.get("/api/v1/report/jobs/{job_id}")
 def get_report_job(job_id: str, current_user: str = Depends(get_current_user)):
-    with get_session() as session:
-        job = (
-            session.query(ReportJob)
-            .filter(ReportJob.id == job_id, ReportJob.owner_email == current_user)
-            .one_or_none()
+    if not report_job_service.is_configured():
+        raise HTTPException(
+            status_code=503,
+            detail="Report jobs are not configured. Set REPORT_JOBS_TABLE_NAME and redeploy.",
         )
-        if not job:
-            raise HTTPException(status_code=404, detail="Report job not found")
-        return _report_job_to_api(job)
+    job = report_job_service.get_job(job_id)
+    if not job or str(job.get("owner_email") or "") != current_user:
+        raise HTTPException(status_code=404, detail="Report job not found")
+    return _report_job_to_api(job)
 
 # -----------------------------
 # -----------------------------
@@ -2409,6 +2369,11 @@ def queue_subtasks_preview_job(
     debug: bool = False,
     current_user: str = Depends(get_current_user),
 ):
+    if not report_job_service.is_configured():
+        raise HTTPException(
+            status_code=503,
+            detail="Report jobs are not configured. Set REPORT_JOBS_TABLE_NAME and redeploy.",
+        )
     payload = {
         "request": req.model_dump(),
         "include_ai": False,
@@ -2426,19 +2391,19 @@ def queue_subtasks_preview_job(
 
 @app.get("/api/v1/subtasks/preview/jobs/{job_id}")
 def get_subtasks_preview_job(job_id: str, current_user: str = Depends(get_current_user)):
-    with get_session() as session:
-        job = (
-            session.query(ReportJob)
-            .filter(
-                ReportJob.id == job_id,
-                ReportJob.owner_email == current_user,
-                ReportJob.job_kind == "subtasks_preview",
-            )
-            .one_or_none()
+    if not report_job_service.is_configured():
+        raise HTTPException(
+            status_code=503,
+            detail="Report jobs are not configured. Set REPORT_JOBS_TABLE_NAME and redeploy.",
         )
-        if not job:
-            raise HTTPException(status_code=404, detail="Subtask preview job not found")
-        return _report_job_to_api(job)
+    job = report_job_service.get_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Subtask preview job not found")
+    if str(job.get("owner_email") or "") != current_user:
+        raise HTTPException(status_code=404, detail="Subtask preview job not found")
+    if str(job.get("job_kind") or "") != "subtasks_preview":
+        raise HTTPException(status_code=404, detail="Subtask preview job not found")
+    return _report_job_to_api(job)
 
 
 class ProposalCreate(BaseModel):

@@ -41,6 +41,7 @@ Outputs include:
 
 - `BackendLambdaApiUrl`
 - `BackendLambdaApiDomain`
+- `ReportJobsTableName` (DynamoDB table for async report/subtask jobs)
 
 ## Cognito outputs
 

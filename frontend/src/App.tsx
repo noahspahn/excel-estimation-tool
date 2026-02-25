@@ -1035,14 +1035,8 @@ function App() {
     }
     setDownloading(true)
     try {
-      let reportProposalId = proposalId
-      if (!reportProposalId) {
-        reportProposalId = await initializeProposal()
-      }
-      if (!reportProposalId) {
-        alert('Unable to initialize a proposal. Report was not generated.')
-        return
-      }
+      // Proposal linkage is optional; save report even when no proposal exists.
+      const reportProposalId = proposalId || undefined
       const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
       // If the user has edited narrative, pass it through and skip server-side AI
       const hasCustomNarrative = Object.keys(editableNarrative || {}).length > 0

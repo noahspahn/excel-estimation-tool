@@ -1,6 +1,7 @@
 name: Deploy
 
 on:
+  workflow_dispatch:
   push:
     branches:
       - main
@@ -31,6 +32,7 @@ jobs:
       COGNITO_USER_POOL_ID: ${{ vars.COGNITO_USER_POOL_ID || '' }}
       COGNITO_CLIENT_ID: ${{ vars.COGNITO_CLIENT_ID || vars.VITE_COGNITO_CLIENT_ID || '' }}
       REPORTS_TABLE_NAME: ${{ vars.REPORTS_TABLE_NAME || '' }}
+      REPORT_JOBS_TABLE_NAME: ${{ vars.REPORT_JOBS_TABLE_NAME || '' }}
       S3_REPORT_BUCKET: ${{ vars.S3_REPORT_BUCKET || '' }}
       SAM_API_KEY: ${{ secrets.SAM_API_KEY || '' }}
       OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY || '' }}
@@ -104,6 +106,7 @@ jobs:
             --arg cognitoPoolId "${COGNITO_USER_POOL_ID}" \
             --arg cognitoClientId "${COGNITO_CLIENT_ID}" \
             --arg reportsTable "${REPORTS_TABLE_NAME}" \
+            --arg reportJobsTable "${REPORT_JOBS_TABLE_NAME}" \
             --arg reportsBucket "${S3_REPORT_BUCKET}" \
             --arg samApiKey "${SAM_API_KEY}" \
             --arg openaiApiKey "${OPENAI_API_KEY}" \
@@ -119,6 +122,7 @@ jobs:
               COGNITO_USER_POOL_ID: $cognitoPoolId,
               COGNITO_CLIENT_ID: $cognitoClientId,
               REPORTS_TABLE_NAME: $reportsTable,
+              REPORT_JOBS_TABLE_NAME: $reportJobsTable,
               S3_REPORT_BUCKET: $reportsBucket,
               SAM_API_KEY: $samApiKey,
               OPENAI_API_KEY: $openaiApiKey,

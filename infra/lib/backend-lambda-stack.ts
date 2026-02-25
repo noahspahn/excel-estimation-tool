@@ -56,6 +56,26 @@ export class BackendLambdaStack extends Stack {
       }
       envVars[key] = value
     }
+    const configuredReportJobsTableName = (envVars.REPORT_JOBS_TABLE_NAME || '').trim()
+    let reportJobsTable: dynamodb.ITable
+    let reportJobsTableName = configuredReportJobsTableName
+    if (configuredReportJobsTableName) {
+      reportJobsTable = dynamodb.Table.fromTableName(
+        this,
+        'ReportJobsTableRef',
+        configuredReportJobsTableName,
+      )
+    } else {
+      const createdReportJobsTable = new dynamodb.Table(this, 'ReportJobsTable', {
+        partitionKey: { name: 'job_id', type: dynamodb.AttributeType.STRING },
+        billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+        pointInTimeRecovery: true,
+        removalPolicy: cdk.RemovalPolicy.RETAIN,
+      })
+      reportJobsTable = createdReportJobsTable
+      reportJobsTableName = createdReportJobsTable.tableName
+      envVars.REPORT_JOBS_TABLE_NAME = reportJobsTableName
+    }
     envVars.BACKEND_MODE = 'lambda'
     if (droppedKeys.length > 0) {
       cdk.Annotations.of(this).addWarning(
@@ -84,6 +104,7 @@ export class BackendLambdaStack extends Stack {
         resources: [selfInvokeArn],
       }),
     )
+    reportJobsTable.grantReadWriteData(handler)
     const reportsTableName = (envVars.REPORTS_TABLE_NAME || '').trim()
     if (reportsTableName) {
       const reportsTable = dynamodb.Table.fromTableName(this, 'ReportsTableRef', reportsTableName)
@@ -150,6 +171,9 @@ export class BackendLambdaStack extends Stack {
     })
     new CfnOutput(this, 'BackendNextHandlerName', {
       value: handler.functionName,
+    })
+    new CfnOutput(this, 'ReportJobsTableName', {
+      value: reportJobsTableName,
     })
     new CfnOutput(this, 'BackendLambdaApiTimeoutSeconds', {
       value: String(effectiveApiTimeoutSeconds),
