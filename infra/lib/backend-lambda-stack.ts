@@ -204,12 +204,16 @@ export class BackendLambdaStack extends Stack {
       environment: envVars,
     })
 
+    const selfInvokeArn = cdk.Stack.of(this).formatArn({
+      service: 'lambda',
+      resource: 'function',
+      resourceName: functionName,
+    })
     handler.addToRolePolicy(
       new iam.PolicyStatement({
         actions: ['lambda:InvokeFunction'],
-        // Include qualified and unqualified function ARNs so self-invoke works
-        // regardless of whether Lambda resolves to $LATEST or a versioned ARN.
-        resources: [handler.functionArn, `${handler.functionArn}:*`],
+        // Use static ARN strings to avoid introducing CFN dependency cycles.
+        resources: [selfInvokeArn, `${selfInvokeArn}:*`],
       }),
     )
     reportJobsTable.grantReadWriteData(handler)
