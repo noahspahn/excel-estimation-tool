@@ -1055,7 +1055,9 @@ function App() {
           : `Report ${reportId} saved to server. Download from the Reports table below.`
         : reportStatus === 'storage_not_configured'
           ? 'Report generated, but storage is not configured on the backend.'
-          : 'Report generated. Refresh Reports to download.'
+          : reportStatus && reportStatus !== 'not_saved'
+            ? `Report generated, but save status is "${reportStatus}".`
+            : 'Report generated. Refresh Reports to download.'
     )
     await loadReportDocs()
   }

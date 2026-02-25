@@ -1639,8 +1639,13 @@ def _generate_report_artifact(
                 subtask_status = "ai_disabled"
             _record_timing("ai_subtasks", ai_subtasks_started)
         except Exception as e:
-            subtask_status = "ai_failed"
-            subtask_error = str(e)
+            if _is_ai_timeout_error(e):
+                # Keep deterministic subtasks and continue cleanly on AI latency spikes.
+                subtask_status = "ai_timeout_fallback"
+                subtask_error = None
+            else:
+                subtask_status = "ai_failed"
+                subtask_error = str(e)
             timings_ms["ai_subtasks"] = round((time.perf_counter() - ai_subtasks_started) * 1000.0, 2)
     estimation_data["module_subtasks"] = module_subtasks
     estimation_data["subtask_generation_status"] = subtask_status
@@ -1874,6 +1879,15 @@ def _report_job_to_api(job: Dict[str, Any]) -> Dict[str, Any]:
         "finished_at": str(job.get("finished_at") or "") or None,
         "updated_at": str(job.get("updated_at") or ""),
     }
+
+
+def _is_ai_timeout_error(exc: Exception) -> bool:
+    text = str(exc or "").lower()
+    return (
+        "timed out" in text
+        or "timeout" in text
+        or "deadline exceeded" in text
+    )
 
 
 def _create_report_job(
@@ -2367,8 +2381,13 @@ def _build_subtasks_preview_payload(
                 status = "ai_disabled"
             _record_timing("ai_subtasks", ai_subtasks_started)
         except Exception as e:
-            status = "ai_failed"
-            error = str(e)
+            if _is_ai_timeout_error(e):
+                # Fall back to deterministic subtasks when AI rewrite times out.
+                status = "ai_timeout_fallback"
+                error = None
+            else:
+                status = "ai_failed"
+                error = str(e)
             timings_ms["ai_subtasks"] = round((time.perf_counter() - ai_subtasks_started) * 1000.0, 2)
     if debug:
         try:
