@@ -1704,24 +1704,30 @@ def _generate_report_artifact(
             }
             if req.proposal_id:
                 if not proposal_store_service.is_configured():
-                    raise HTTPException(
-                        status_code=503,
-                        detail=(
-                            "Proposal store is not configured. Set PROPOSALS_TABLE_NAME, "
-                            "PROPOSAL_VERSIONS_TABLE_NAME, and PROPOSAL_DOCUMENTS_TABLE_NAME."
-                        ),
+                    # Proposal linkage is optional for report persistence.
+                    logger.warning(
+                        "proposal_store_unconfigured_for_report_save user=%s proposal_id=%s",
+                        current_user,
+                        req.proposal_id,
                     )
-                prop = proposal_store_service.get_owned_proposal(
-                    proposal_id=req.proposal_id,
-                    owner_email=current_user,
-                )
-                if not prop:
-                    raise HTTPException(status_code=404, detail="Proposal not found for current user")
-                proposal_meta = {
-                    "proposal_id": str(prop.get("proposal_id")),
-                    "proposal_title": prop.get("title"),
-                    "proposal_public_id": str(prop.get("public_id") or ""),
-                }
+                else:
+                    prop = proposal_store_service.get_owned_proposal(
+                        proposal_id=req.proposal_id,
+                        owner_email=current_user,
+                    )
+                    if prop:
+                        proposal_meta = {
+                            "proposal_id": str(prop.get("proposal_id")),
+                            "proposal_title": prop.get("title"),
+                            "proposal_public_id": str(prop.get("public_id") or ""),
+                        }
+                    else:
+                        # Do not block report save when proposal records were not migrated yet.
+                        logger.warning(
+                            "proposal_not_found_for_report_save user=%s proposal_id=%s",
+                            current_user,
+                            req.proposal_id,
+                        )
 
             existing_item = None
             if req.overwrite_report_id:
@@ -2006,6 +2012,25 @@ def _run_report_job_by_id(owner_email: str, job_id: str) -> None:
             job_id=job_id,
             status="completed",
             result_payload=result_payload,
+        )
+    except HTTPException as exc:
+        detail = getattr(exc, "detail", None)
+        if isinstance(detail, (dict, list)):
+            msg = json.dumps(detail, ensure_ascii=True)
+        else:
+            msg = str(detail or f"HTTP {getattr(exc, 'status_code', 'error')}")
+        logger.warning(
+            "report_job_failed_http owner=%s job=%s kind=%s status=%s detail=%s",
+            owner_email,
+            job_id,
+            job_kind,
+            getattr(exc, "status_code", "unknown"),
+            msg,
+        )
+        report_job_service.update_status(
+            job_id=job_id,
+            status="failed",
+            error=msg[:2000],
         )
     except Exception as exc:
         logger.exception("report_job_failed owner=%s job=%s kind=%s", owner_email, job_id, job_kind)
