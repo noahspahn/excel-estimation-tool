@@ -1021,6 +1021,45 @@ function App() {
     setPrereqWarnings(Array.from(new Set(missing)))
   }, [selectedModules, modules])
 
+  const isAsyncDispatchError = (message: unknown): boolean => {
+    const text = String(message || '').toLowerCase()
+    return (
+      text.includes('unable to dispatch async job in lambda') ||
+      text.includes('invoke permission') ||
+      text.includes('self invoke')
+    )
+  }
+
+  const runDirectReportSave = async (
+    headers: Record<string, string>,
+    qs: string,
+    payload: Record<string, unknown>,
+  ) => {
+    const directRes = await fetch(`${API}/api/v1/report${qs}`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify(payload),
+    })
+    if (!directRes.ok) {
+      const err = await directRes.json().catch(() => ({}))
+      throw new Error(err?.detail || 'Direct report save failed')
+    }
+    await directRes.arrayBuffer()
+    const reportId = directRes.headers.get('X-Report-Id')
+    const reportStatus = directRes.headers.get('X-Report-Status') || ''
+    if (reportId) setOverwriteReportId(reportId)
+    setReportLoadNotice(
+      reportId
+        ? reportStatus === 'overwritten'
+          ? `Report ${reportId} overwritten and saved to server. Download from the Reports table below.`
+          : `Report ${reportId} saved to server. Download from the Reports table below.`
+        : reportStatus === 'storage_not_configured'
+          ? 'Report generated, but storage is not configured on the backend.'
+          : 'Report generated. Refresh Reports to download.'
+    )
+    await loadReportDocs()
+  }
+
   const saveReportToServer = async () => {
     if (selectedModules.length === 0) {
       alert('Please select at least one module.')
@@ -1045,25 +1084,35 @@ function App() {
       const contractExcerpt = scrapeResult?.success ? (scrapeResult.text_excerpt || '') : undefined
       const headers: Record<string, string> = { 'Content-Type': 'application/json' }
       if (!AUTH_DISABLED && authToken) headers.Authorization = `Bearer ${authToken}`
+      const reportPayload: Record<string, unknown> = {
+        ...buildEstimationInputPayload(),
+        tool_version: appVersion || undefined,
+        proposal_id: reportProposalId || undefined,
+        proposal_version: versions?.length ? versions[versions.length - 1]?.version : undefined,
+        save_report: true,
+        overwrite_report_id: overwriteReportId || undefined,
+        report_label: projectName || undefined,
+        use_ai_subtasks: includeAI,
+        narrative_sections: hasCustomNarrative ? editableNarrative : undefined,
+        contract_url: contractUrl,
+        contract_excerpt: contractExcerpt,
+        style_guide: styleGuide || undefined,
+      }
       const res = await fetch(`${API}/api/v1/report/jobs${qs}`, {
         method: 'POST',
         headers,
-        body: JSON.stringify({
-          ...buildEstimationInputPayload(),
-          tool_version: appVersion || undefined,
-          proposal_id: reportProposalId || undefined,
-          proposal_version: versions?.length ? versions[versions.length - 1]?.version : undefined,
-          save_report: true,
-          overwrite_report_id: overwriteReportId || undefined,
-          report_label: projectName || undefined,
-          use_ai_subtasks: includeAI,
-          narrative_sections: hasCustomNarrative ? editableNarrative : undefined,
-          contract_url: contractUrl,
-          contract_excerpt: contractExcerpt,
-          style_guide: styleGuide || undefined,
-        })
+        body: JSON.stringify(reportPayload)
       })
-      if (!res.ok) throw new Error('Failed to queue report save job')
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}))
+        const detail = err?.detail || 'Failed to queue report save job'
+        if (isAsyncDispatchError(detail)) {
+          setReportLoadNotice('Async queue unavailable. Running direct save...')
+          await runDirectReportSave(headers, qs, reportPayload)
+          return
+        }
+        throw new Error(detail)
+      }
       const queued = await res.json().catch(() => ({}))
       const jobId = queued?.job_id
       if (!jobId) throw new Error('Report job id was not returned by the API')
@@ -1082,7 +1131,14 @@ function App() {
           continue
         }
         if (status === 'failed') {
-          throw new Error(statusData?.error || 'Report save job failed')
+          const detail = statusData?.error || 'Report save job failed'
+          if (isAsyncDispatchError(detail)) {
+            setReportLoadNotice('Async queue unavailable. Running direct save...')
+            await runDirectReportSave(headers, qs, reportPayload)
+            done = true
+            break
+          }
+          throw new Error(detail)
         }
         if (status === 'completed') {
           const result = statusData?.result || {}
@@ -1103,9 +1159,9 @@ function App() {
       if (!done) {
         throw new Error('Report save job timed out while waiting for completion')
       }
-    } catch (err) {
+    } catch (err: any) {
       console.error(err)
-      alert('Report save failed')
+      alert(err?.message || 'Report save failed')
     } finally {
       setDownloading(false)
     }
@@ -1285,19 +1341,40 @@ function App() {
         'Content-Type': 'application/json',
         ...(!AUTH_DISABLED && authToken ? { Authorization: `Bearer ${authToken}` } : {}),
       }
+      const payload = {
+        ...buildEstimationInputPayload(),
+        contract_url: contractUrl,
+        contract_excerpt: contractExcerpt,
+        use_ai_subtasks: includeAI,
+      }
+      const runDirectPreview = async () => {
+        const directRes = await fetch(`${API}/api/v1/subtasks/preview?tone=${encodeURIComponent(tone)}`, {
+          method: 'POST',
+          headers,
+          body: JSON.stringify(payload),
+        })
+        if (!directRes.ok) {
+          const directErr = await directRes.json().catch(() => ({}))
+          throw new Error(directErr?.detail || 'Failed to generate subtask preview')
+        }
+        const data = await directRes.json().catch(() => ({}))
+        setSubtaskPreview(data?.module_subtasks || [])
+        setSubtaskStatus(data?.status || null)
+        setSubtaskRaw(data?.raw_ai_response || null)
+        if (data?.error) setSubtaskError(data.error)
+      }
       const res = await fetch(`${API}/api/v1/subtasks/preview/jobs`, {
         method: 'POST',
         headers,
-        body: JSON.stringify({
-          ...buildEstimationInputPayload(),
-          contract_url: contractUrl,
-          contract_excerpt: contractExcerpt,
-          use_ai_subtasks: includeAI,
-        }),
+        body: JSON.stringify(payload),
       })
       if (!res.ok) {
         const err = await res.json().catch(() => ({}))
         const detail = err?.detail || 'Failed to queue subtask preview'
+        if (isAsyncDispatchError(detail)) {
+          await runDirectPreview()
+          return
+        }
         throw new Error(detail)
       }
       const queued = await res.json().catch(() => ({}))
@@ -1313,7 +1390,15 @@ function App() {
         const statusData = await statusRes.json().catch(() => ({}))
         const status = statusData?.status
         if (status === 'queued' || status === 'running') continue
-        if (status === 'failed') throw new Error(statusData?.error || 'Subtask preview failed')
+        if (status === 'failed') {
+          const detail = statusData?.error || 'Subtask preview failed'
+          if (isAsyncDispatchError(detail)) {
+            await runDirectPreview()
+            done = true
+            break
+          }
+          throw new Error(detail)
+        }
         if (status === 'completed') {
           const data = statusData?.result || {}
           console.debug('Subtask preview response', data)

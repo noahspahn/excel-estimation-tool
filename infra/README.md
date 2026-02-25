@@ -3,6 +3,7 @@
 This CDK app provisions:
 
 - **Backend API**: API Gateway + Lambda (FastAPI in Lambda).
+- **Data tables**: DynamoDB tables for report jobs, proposals/versions/documents, and contracts.
 - **Cognito**: User pool + app client for auth.
 - **Frontend (optional)**: S3 + CloudFront distribution for HTTPS hosting.
 
@@ -42,6 +43,18 @@ Outputs include:
 - `BackendLambdaApiUrl`
 - `BackendLambdaApiDomain`
 - `ReportJobsTableName` (DynamoDB table for async report/subtask jobs)
+- `ProposalsTableName`
+- `ProposalVersionsTableName`
+- `ProposalDocumentsTableName`
+- `ContractsTableName`
+- `ContractSyncTableName`
+
+If you want those table names persisted as GitHub Environment variables for the
+deploy workflow, run from repo root:
+
+```
+python scripts/sync_backend_table_vars.py --repo noahspahn/excel-estimation-tool --env dev --region us-east-1
+```
 
 ## Cognito outputs
 

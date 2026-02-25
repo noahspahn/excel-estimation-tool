@@ -18,7 +18,6 @@ from dotenv import load_dotenv, find_dotenv
 from jose import jwt, JWTError, jwk
 from jose.utils import base64url_decode
 from datetime import datetime, timedelta, timezone
-from sqlalchemy import or_, func
 
 # Load environment variables from a local .env if present
 # 1) Try auto-discovery up the directory tree
@@ -41,15 +40,14 @@ from .services.web_scraper_service import WebScraperService, ScrapeRequest
 from .services.storage_service import StorageService
 from .services.report_registry_service import ReportRegistryService
 from .services.report_job_service import ReportJobService
+from .services.proposal_store_service import ProposalStoreService
+from .services.contract_store_service import ContractStoreService
 from .models import ComplexityLevel, EstimationInput
 from .db import engine, get_session
 from .db_models import (
     Base,
     Proposal,
-    ProposalVersion,
     ProposalDocument,
-    ContractOpportunity,
-    ContractSyncState,
 )
 from .services.sam_contract_service import (
     fetch_sam_opportunities,
@@ -95,6 +93,8 @@ web_scraper_service = WebScraperService()
 storage_service = StorageService()
 report_registry_service = ReportRegistryService()
 report_job_service = ReportJobService()
+proposal_store_service = ProposalStoreService()
+contract_store_service = ContractStoreService()
 # Note: ExportService (and ReportLab) are imported lazily in the report endpoint
 REPORT_JOB_WORKERS = max(1, int(os.getenv("REPORT_JOB_WORKERS", "2")))
 REPORT_JOB_SELF_INVOKE = os.getenv("REPORT_JOB_SELF_INVOKE", "true").lower() in ("1", "true", "yes")
@@ -151,13 +151,6 @@ def get_current_user(authorization: str | None = Header(default=None)) -> str:
             raise HTTPException(status_code=401, detail="Invalid or expired token")
         return default_user
 
-
-def _get_owned_proposal(session, proposal_id: str, owner_email: str) -> Optional[Proposal]:
-    return (
-        session.query(Proposal)
-        .filter(Proposal.id == proposal_id, Proposal.owner_email == owner_email)
-        .one_or_none()
-    )
 
 # Ensure DB tables exist (lightweight, safe on startup)
 try:
@@ -685,74 +678,103 @@ def _normalize_contract_status(raw: Optional[str]) -> Optional[str]:
     return val
 
 
-def _dt_to_str(value: Optional[datetime]) -> Optional[str]:
+def _dt_to_str(value: Optional[Any]) -> Optional[str]:
     if not value:
         return None
+    if isinstance(value, str):
+        raw = value.strip()
+        return raw or None
     if value.tzinfo:
         value = value.astimezone(timezone.utc).replace(tzinfo=None)
     return value.isoformat()
 
 
-def _contract_to_dict(contract: ContractOpportunity, include_raw: bool = False) -> Dict[str, Any]:
+def _str_to_dt(value: Optional[Any]) -> Optional[datetime]:
+    if not value:
+        return None
+    if isinstance(value, datetime):
+        if value.tzinfo:
+            return value.astimezone(timezone.utc).replace(tzinfo=None)
+        return value
+    raw = str(value).strip()
+    if not raw:
+        return None
+    try:
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        if parsed.tzinfo:
+            parsed = parsed.astimezone(timezone.utc).replace(tzinfo=None)
+        return parsed
+    except Exception:
+        return None
+
+
+def _contract_to_dict(contract: Any, include_raw: bool = False) -> Dict[str, Any]:
+    getter = contract.get if isinstance(contract, dict) else lambda k: getattr(contract, k, None)
     data = {
-        "id": contract.id,
-        "source": contract.source,
-        "source_id": contract.source_id,
-        "title": contract.title,
-        "agency": contract.agency,
-        "sub_agency": contract.sub_agency,
-        "office": contract.office,
-        "naics": contract.naics,
-        "psc": contract.psc,
-        "set_aside": contract.set_aside,
-        "posted_at": _dt_to_str(contract.posted_at),
-        "due_at": _dt_to_str(contract.due_at),
-        "value": contract.value,
-        "location": contract.location,
-        "url": contract.url,
-        "synopsis": contract.synopsis,
-        "contract_excerpt": contract.contract_excerpt,
-        "status": contract.status,
-        "proposal_id": contract.proposal_id,
-        "report_submitted_at": _dt_to_str(contract.report_submitted_at),
-        "decision_date": _dt_to_str(contract.decision_date),
-        "awardee_name": contract.awardee_name,
-        "award_value": contract.award_value,
-        "award_notes": contract.award_notes,
-        "win_factors": contract.win_factors,
-        "loss_factors": contract.loss_factors,
-        "analysis_notes": contract.analysis_notes,
-        "tags": contract.tags or [],
-        "last_seen_at": _dt_to_str(contract.last_seen_at),
-        "created_at": _dt_to_str(contract.created_at),
-        "updated_at": _dt_to_str(contract.updated_at),
+        "id": getter("contract_id") or getter("id"),
+        "source": getter("source"),
+        "source_id": getter("source_id"),
+        "title": getter("title"),
+        "agency": getter("agency"),
+        "sub_agency": getter("sub_agency"),
+        "office": getter("office"),
+        "naics": getter("naics"),
+        "psc": getter("psc"),
+        "set_aside": getter("set_aside"),
+        "posted_at": _dt_to_str(getter("posted_at")),
+        "due_at": _dt_to_str(getter("due_at")),
+        "value": getter("value"),
+        "location": getter("location"),
+        "url": getter("url"),
+        "synopsis": getter("synopsis"),
+        "contract_excerpt": getter("contract_excerpt"),
+        "status": getter("status"),
+        "proposal_id": getter("proposal_id"),
+        "report_submitted_at": _dt_to_str(getter("report_submitted_at")),
+        "decision_date": _dt_to_str(getter("decision_date")),
+        "awardee_name": getter("awardee_name"),
+        "award_value": getter("award_value"),
+        "award_notes": getter("award_notes"),
+        "win_factors": getter("win_factors"),
+        "loss_factors": getter("loss_factors"),
+        "analysis_notes": getter("analysis_notes"),
+        "tags": getter("tags") or [],
+        "last_seen_at": _dt_to_str(getter("last_seen_at")),
+        "created_at": _dt_to_str(getter("created_at")),
+        "updated_at": _dt_to_str(getter("updated_at")),
     }
     if include_raw:
-        data["raw_payload"] = contract.raw_payload
+        data["raw_payload"] = getter("raw_payload")
     return data
 
 
-def _get_sync_state(session) -> ContractSyncState:
-    state = (
-        session.query(ContractSyncState)
-        .filter(ContractSyncState.source == SAM_SYNC_SOURCE)
-        .one_or_none()
-    )
-    if not state:
-        state = ContractSyncState(source=SAM_SYNC_SOURCE, requests_today=0)
-        session.add(state)
-        session.flush()
+def _get_sync_state() -> Dict[str, Any]:
+    state = contract_store_service.get_sync_state(SAM_SYNC_SOURCE)
+    if state:
+        return state
+    state = {
+        "source": SAM_SYNC_SOURCE,
+        "requests_today": 0,
+        "requests_today_date": None,
+        "last_run_at": None,
+        "last_error": None,
+        "last_status": None,
+        "last_result": None,
+        "created_at": _dt_to_str(datetime.utcnow()),
+        "updated_at": _dt_to_str(datetime.utcnow()),
+    }
+    contract_store_service.save_sync_state(state)
     return state
 
 
-def _reset_daily_budget(state: ContractSyncState, now: datetime) -> None:
+def _reset_daily_budget(state: Dict[str, Any], now: datetime) -> None:
     today = now.strftime("%Y-%m-%d")
-    if state.requests_today_date != today:
-        state.requests_today_date = today
-        state.requests_today = 0
+    if state.get("requests_today_date") != today:
+        state["requests_today_date"] = today
+        state["requests_today"] = 0
 
 
-def _update_contract_from_source(contract: ContractOpportunity, payload: Dict[str, Any], now: datetime) -> None:
+def _update_contract_from_source(contract: Dict[str, Any], payload: Dict[str, Any], now: datetime) -> None:
     for field in [
         "title",
         "agency",
@@ -774,13 +796,23 @@ def _update_contract_from_source(contract: ContractOpportunity, payload: Dict[st
             continue
         if isinstance(val, str) and not val.strip():
             continue
-        setattr(contract, field, val)
-    contract.raw_payload = payload.get("raw_payload") or contract.raw_payload
-    contract.last_seen_at = now
-    contract.updated_at = now
+        contract[field] = val
+    contract["raw_payload"] = payload.get("raw_payload") or contract.get("raw_payload")
+    contract["last_seen_at"] = _dt_to_str(now)
+    contract["updated_at"] = _dt_to_str(now)
 
 
 def _sync_sam_contracts(trigger: str = "manual") -> Dict[str, Any]:
+    if not contract_store_service.is_configured():
+        result = {"status": "skipped", "reason": "contract_store_not_configured"}
+        SAM_SYNC_STATE.update(
+            {
+                "last_run": _dt_to_str(datetime.utcnow()),
+                "last_error": "contract_store_not_configured",
+                "last_result": result,
+            }
+        )
+        return result
     if not SAM_API_KEY:
         result = {"status": "skipped", "reason": "missing_api_key"}
         SAM_SYNC_STATE.update({"last_run": _dt_to_str(datetime.utcnow()), "last_error": "missing_api_key", "last_result": result})
@@ -797,122 +829,127 @@ def _sync_sam_contracts(trigger: str = "manual") -> Dict[str, Any]:
         updated = 0
         seen: set[str] = set()
         request_count = 0
-        with get_session() as session:
-            state = _get_sync_state(session)
-            _reset_daily_budget(state, now)
+        state = _get_sync_state()
+        _reset_daily_budget(state, now)
 
-            if trigger == "scheduled" and state.last_run_at:
-                delta = (now - state.last_run_at).total_seconds()
-                if delta < max(0, SAM_SYNC_MIN_INTERVAL_MINUTES) * 60:
-                    result = {
-                        "status": "skipped",
-                        "reason": "min_interval",
-                        "seconds_since_last_run": round(delta, 1),
+        last_run_at = _str_to_dt(state.get("last_run_at"))
+        if trigger == "scheduled" and last_run_at:
+            delta = (now - last_run_at).total_seconds()
+            if delta < max(0, SAM_SYNC_MIN_INTERVAL_MINUTES) * 60:
+                result = {
+                    "status": "skipped",
+                    "reason": "min_interval",
+                    "seconds_since_last_run": round(delta, 1),
+                }
+                state["last_status"] = result["status"]
+                state["last_error"] = result["reason"]
+                state["last_result"] = result
+                state["updated_at"] = _dt_to_str(now)
+                contract_store_service.save_sync_state(state)
+                SAM_SYNC_STATE.update(
+                    {
+                        "last_run": _dt_to_str(last_run_at),
+                        "last_error": result["reason"],
+                        "last_result": result,
                     }
-                    state.last_status = result["status"]
-                    state.last_error = result["reason"]
-                    state.last_result = result
-                    state.updated_at = now
-                    SAM_SYNC_STATE.update({"last_run": _dt_to_str(state.last_run_at), "last_error": result["reason"], "last_result": result})
-                    return result
-
-            remaining = max(0, SAM_SYNC_MAX_REQUESTS_PER_DAY - (state.requests_today or 0))
-            if remaining <= 0:
-                result = {"status": "skipped", "reason": "daily_limit_reached", "remaining": 0}
-                state.last_status = result["status"]
-                state.last_error = result["reason"]
-                state.last_result = result
-                state.last_run_at = now
-                state.updated_at = now
-                SAM_SYNC_STATE.update({"last_run": _dt_to_str(now), "last_error": result["reason"], "last_result": result})
+                )
                 return result
 
-            days_back = SAM_SYNC_DAYS_BACK
-            if state.last_run_at:
-                delta_days = max(1, int((now - state.last_run_at).total_seconds() // 86400) + 1)
-                days_back = min(SAM_SYNC_DAYS_BACK, delta_days)
+        remaining = max(0, SAM_SYNC_MAX_REQUESTS_PER_DAY - int(state.get("requests_today") or 0))
+        if remaining <= 0:
+            result = {"status": "skipped", "reason": "daily_limit_reached", "remaining": 0}
+            state["last_status"] = result["status"]
+            state["last_error"] = result["reason"]
+            state["last_result"] = result
+            state["last_run_at"] = _dt_to_str(now)
+            state["updated_at"] = _dt_to_str(now)
+            contract_store_service.save_sync_state(state)
+            SAM_SYNC_STATE.update({"last_run": _dt_to_str(now), "last_error": result["reason"], "last_result": result})
+            return result
 
-            pages = max(1, SAM_SYNC_PAGES)
-            pages = min(pages, remaining)
-            for page in range(pages):
-                request_count += 1
-                state.requests_today = (state.requests_today or 0) + 1
-                try:
-                    payload = fetch_sam_opportunities(
-                        api_key=SAM_API_KEY,
-                        query=SAM_SYNC_QUERY or None,
-                        days_back=days_back,
-                        limit=SAM_SYNC_LIMIT,
-                        offset=page * SAM_SYNC_LIMIT,
-                    )
-                except Exception as exc:
-                    err = str(exc)
-                    result = {
-                        "status": "error",
-                        "error": err,
-                        "request_count": request_count,
-                        "remaining_quota": max(0, SAM_SYNC_MAX_REQUESTS_PER_DAY - (state.requests_today or 0)),
-                        "trigger": trigger,
-                    }
-                    state.last_run_at = now
-                    state.last_status = "error"
-                    state.last_error = err
-                    state.last_result = result
-                    state.updated_at = now
-                    SAM_SYNC_STATE.update({"last_run": _dt_to_str(now), "last_error": err, "last_result": result})
-                    return result
-                rows = extract_sam_results(payload)
-                for row in rows:
-                    normalized = normalize_sam_record(row or {})
-                    source_id = normalized.get("source_id")
-                    if not source_id or source_id in seen:
-                        continue
-                    seen.add(source_id)
-                    existing = (
-                        session.query(ContractOpportunity)
-                        .filter(
-                            ContractOpportunity.source == normalized.get("source", "sam.gov"),
-                            ContractOpportunity.source_id == source_id,
-                        )
-                        .one_or_none()
-                    )
-                    if existing:
-                        _update_contract_from_source(existing, normalized, now)
-                        updated += 1
-                    else:
-                        contract = ContractOpportunity(**normalized)
-                        contract.status = "new"
-                        contract.last_seen_at = now
-                        contract.updated_at = now
-                        session.add(contract)
-                        inserted += 1
-            result = {
-                "status": "ok",
-                "inserted": inserted,
-                "updated": updated,
-                "total_seen": len(seen),
-                "request_count": request_count,
-                "days_back": days_back,
-                "remaining_quota": max(0, SAM_SYNC_MAX_REQUESTS_PER_DAY - (state.requests_today or 0)),
-                "trigger": trigger,
-            }
-            state.last_run_at = now
-            state.last_status = result["status"]
-            state.last_error = None
-            state.last_result = result
-            state.updated_at = now
+        days_back = SAM_SYNC_DAYS_BACK
+        if last_run_at:
+            delta_days = max(1, int((now - last_run_at).total_seconds() // 86400) + 1)
+            days_back = min(SAM_SYNC_DAYS_BACK, delta_days)
+
+        pages = max(1, SAM_SYNC_PAGES)
+        pages = min(pages, remaining)
+        for page in range(pages):
+            request_count += 1
+            state["requests_today"] = int(state.get("requests_today") or 0) + 1
+            try:
+                payload = fetch_sam_opportunities(
+                    api_key=SAM_API_KEY,
+                    query=SAM_SYNC_QUERY or None,
+                    days_back=days_back,
+                    limit=SAM_SYNC_LIMIT,
+                    offset=page * SAM_SYNC_LIMIT,
+                )
+            except Exception as exc:
+                err = str(exc)
+                result = {
+                    "status": "error",
+                    "error": err,
+                    "request_count": request_count,
+                    "remaining_quota": max(0, SAM_SYNC_MAX_REQUESTS_PER_DAY - int(state.get("requests_today") or 0)),
+                    "trigger": trigger,
+                }
+                state["last_run_at"] = _dt_to_str(now)
+                state["last_status"] = "error"
+                state["last_error"] = err
+                state["last_result"] = result
+                state["updated_at"] = _dt_to_str(now)
+                contract_store_service.save_sync_state(state)
+                SAM_SYNC_STATE.update({"last_run": _dt_to_str(now), "last_error": err, "last_result": result})
+                return result
+            rows = extract_sam_results(payload)
+            for row in rows:
+                normalized = normalize_sam_record(row or {})
+                source_id = normalized.get("source_id")
+                if not source_id or source_id in seen:
+                    continue
+                seen.add(source_id)
+                source_name = str(normalized.get("source", "sam.gov"))
+                existing = contract_store_service.find_by_source_source_id(source_name, str(source_id))
+                if existing:
+                    _update_contract_from_source(existing, normalized, now)
+                    contract_store_service.save_contract(existing)
+                    updated += 1
+                else:
+                    contract_payload = dict(normalized)
+                    contract_payload["status"] = "new"
+                    contract_payload["last_seen_at"] = _dt_to_str(now)
+                    contract_payload["updated_at"] = _dt_to_str(now)
+                    contract_store_service.create_contract(contract_payload)
+                    inserted += 1
+        result = {
+            "status": "ok",
+            "inserted": inserted,
+            "updated": updated,
+            "total_seen": len(seen),
+            "request_count": request_count,
+            "days_back": days_back,
+            "remaining_quota": max(0, SAM_SYNC_MAX_REQUESTS_PER_DAY - int(state.get("requests_today") or 0)),
+            "trigger": trigger,
+        }
+        state["last_run_at"] = _dt_to_str(now)
+        state["last_status"] = result["status"]
+        state["last_error"] = None
+        state["last_result"] = result
+        state["updated_at"] = _dt_to_str(now)
+        contract_store_service.save_sync_state(state)
         SAM_SYNC_STATE.update({"last_run": _dt_to_str(now), "last_error": None, "last_result": result})
         return result
     except Exception as exc:
         err = str(exc)
         try:
-            with get_session() as session:
-                state = _get_sync_state(session)
-                state.last_run_at = now
-                state.last_status = "error"
-                state.last_error = err
-                state.last_result = None
-                state.updated_at = now
+            state = _get_sync_state()
+            state["last_run_at"] = _dt_to_str(now)
+            state["last_status"] = "error"
+            state["last_error"] = err
+            state["last_result"] = None
+            state["updated_at"] = _dt_to_str(now)
+            contract_store_service.save_sync_state(state)
         except Exception:
             pass
         SAM_SYNC_STATE.update({"last_run": _dt_to_str(now), "last_error": err, "last_result": None})
@@ -1661,19 +1698,25 @@ def _generate_report_artifact(
                 "proposal_public_id": None,
             }
             if req.proposal_id:
-                with get_session() as session:
-                    prop = (
-                        session.query(Proposal)
-                        .filter(Proposal.id == req.proposal_id, Proposal.owner_email == current_user)
-                        .one_or_none()
+                if not proposal_store_service.is_configured():
+                    raise HTTPException(
+                        status_code=503,
+                        detail=(
+                            "Proposal store is not configured. Set PROPOSALS_TABLE_NAME, "
+                            "PROPOSAL_VERSIONS_TABLE_NAME, and PROPOSAL_DOCUMENTS_TABLE_NAME."
+                        ),
                     )
-                    if not prop:
-                        raise HTTPException(status_code=404, detail="Proposal not found for current user")
-                    proposal_meta = {
-                        "proposal_id": prop.id,
-                        "proposal_title": prop.title,
-                        "proposal_public_id": prop.public_id,
-                    }
+                prop = proposal_store_service.get_owned_proposal(
+                    proposal_id=req.proposal_id,
+                    owner_email=current_user,
+                )
+                if not prop:
+                    raise HTTPException(status_code=404, detail="Proposal not found for current user")
+                proposal_meta = {
+                    "proposal_id": str(prop.get("proposal_id")),
+                    "proposal_title": prop.get("title"),
+                    "proposal_public_id": str(prop.get("public_id") or ""),
+                }
 
             existing_item = None
             if req.overwrite_report_id:
@@ -1854,12 +1897,12 @@ def _create_report_job(
     return str(created["job_id"])
 
 
-def _invoke_self_lambda_job(owner_email: str, job_id: str) -> bool:
+def _invoke_self_lambda_job(owner_email: str, job_id: str) -> tuple[bool, Optional[str]]:
     if not REPORT_JOB_SELF_INVOKE:
-        return False
+        return False, "REPORT_JOB_SELF_INVOKE is disabled"
     fn_name = os.getenv("AWS_LAMBDA_FUNCTION_NAME")
     if not fn_name:
-        return False
+        return False, "AWS_LAMBDA_FUNCTION_NAME is not set"
     try:
         import boto3
 
@@ -1875,26 +1918,28 @@ def _invoke_self_lambda_job(owner_email: str, job_id: str) -> bool:
             InvocationType="Event",
             Payload=json.dumps(payload).encode("utf-8"),
         )
-        return True
+        return True, None
     except Exception as exc:
         logger.warning("report_job self invoke failed for %s: %s", job_id, exc)
-        return False
+        return False, str(exc)
 
 
 def _dispatch_report_job(owner_email: str, job_id: str) -> None:
     in_lambda = bool(os.getenv("AWS_LAMBDA_FUNCTION_NAME"))
+    invoked, invoke_error = _invoke_self_lambda_job(owner_email, job_id)
+    if invoked:
+        return
     if in_lambda:
-        if _invoke_self_lambda_job(owner_email, job_id):
-            return
         job = report_job_service.get_job(job_id)
         if job and str(job.get("owner_email")) == owner_email:
             report_job_service.update_status(
                 job_id=job_id,
                 status="failed",
-                error="Unable to dispatch async job in Lambda. Check invoke permission.",
+                error=(
+                    "Unable to dispatch async job in Lambda. "
+                    f"Check invoke permission. Details: {invoke_error or 'unknown'}"
+                )[:2000],
             )
-        return
-    if _invoke_self_lambda_job(owner_email, job_id):
         return
     _report_job_executor.submit(_run_report_job_by_id, owner_email, job_id)
 
@@ -2049,22 +2094,27 @@ def sync_sam_contracts(current_user: str = Depends(get_current_user)):
 
 @app.get("/api/v1/contracts/sam/status")
 def sam_sync_status():
+    if not contract_store_service.is_configured():
+        raise HTTPException(
+            status_code=503,
+            detail="Contract store is not configured. Set CONTRACTS_TABLE_NAME and CONTRACT_SYNC_TABLE_NAME, then redeploy.",
+        )
     now = datetime.utcnow()
-    with get_session() as session:
-        state = _get_sync_state(session)
-        _reset_daily_budget(state, now)
-        remaining = max(0, SAM_SYNC_MAX_REQUESTS_PER_DAY - (state.requests_today or 0))
-        return {
-            "source": state.source,
-            "last_run": _dt_to_str(state.last_run_at),
-            "last_status": state.last_status,
-            "last_error": state.last_error,
-            "requests_today": state.requests_today,
-            "requests_today_date": state.requests_today_date,
-            "remaining_quota": remaining,
-            "max_requests_per_day": SAM_SYNC_MAX_REQUESTS_PER_DAY,
-            "last_result": state.last_result,
-        }
+    state = _get_sync_state()
+    _reset_daily_budget(state, now)
+    contract_store_service.save_sync_state(state)
+    remaining = max(0, SAM_SYNC_MAX_REQUESTS_PER_DAY - int(state.get("requests_today") or 0))
+    return {
+        "source": state.get("source"),
+        "last_run": _dt_to_str(state.get("last_run_at")),
+        "last_status": state.get("last_status"),
+        "last_error": state.get("last_error"),
+        "requests_today": int(state.get("requests_today") or 0),
+        "requests_today_date": state.get("requests_today_date"),
+        "remaining_quota": remaining,
+        "max_requests_per_day": SAM_SYNC_MAX_REQUESTS_PER_DAY,
+        "last_result": state.get("last_result"),
+    }
 
 
 @app.get("/api/v1/contracts")
@@ -2076,91 +2126,96 @@ def list_contracts(
     offset: int = 0,
     current_user: str = Depends(get_current_user),
 ):
-    with get_session() as session:
-        query = session.query(ContractOpportunity)
-        if status:
-            statuses = [
-                _normalize_contract_status(s)
-                for s in status.split(",")
-                if s.strip()
-            ]
-            if statuses:
-                query = query.filter(ContractOpportunity.status.in_(statuses))
-        if source:
-            query = query.filter(ContractOpportunity.source == source)
-        if q:
-            needle = f"%{q.strip().lower()}%"
-            query = query.filter(
-                or_(
-                    func.lower(ContractOpportunity.title).like(needle),
-                    func.lower(ContractOpportunity.agency).like(needle),
-                    func.lower(ContractOpportunity.naics).like(needle),
-                )
-            )
-        rows = (
-            query.order_by(ContractOpportunity.posted_at.desc(), ContractOpportunity.created_at.desc())
-            .offset(max(0, offset))
-            .limit(max(1, min(limit, 500)))
-            .all()
+    if not contract_store_service.is_configured():
+        raise HTTPException(
+            status_code=503,
+            detail="Contract store is not configured. Set CONTRACTS_TABLE_NAME and CONTRACT_SYNC_TABLE_NAME, then redeploy.",
         )
-        return [_contract_to_dict(row) for row in rows]
+    statuses: Optional[List[str]] = None
+    if status:
+        statuses = [
+            _normalize_contract_status(s)
+            for s in status.split(",")
+            if s.strip()
+        ]
+    rows = contract_store_service.list_contracts(
+        statuses=statuses,
+        source=source,
+        q=q,
+        limit=max(1, min(limit, 500)),
+        offset=max(0, offset),
+    )
+    return [_contract_to_dict(row) for row in rows]
 
 
 @app.get("/api/v1/contracts/{contract_id}")
 def get_contract(contract_id: str, current_user: str = Depends(get_current_user)):
-    with get_session() as session:
-        row = session.query(ContractOpportunity).filter(ContractOpportunity.id == contract_id).one_or_none()
-        if not row:
-            raise HTTPException(status_code=404, detail="Contract not found")
-        return _contract_to_dict(row, include_raw=True)
+    if not contract_store_service.is_configured():
+        raise HTTPException(
+            status_code=503,
+            detail="Contract store is not configured. Set CONTRACTS_TABLE_NAME and CONTRACT_SYNC_TABLE_NAME, then redeploy.",
+        )
+    row = contract_store_service.get_contract(contract_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="Contract not found")
+    return _contract_to_dict(row, include_raw=True)
 
 
 @app.post("/api/v1/contracts")
 def create_contract(body: ContractCreate, current_user: str = Depends(get_current_user)):
+    if not contract_store_service.is_configured():
+        raise HTTPException(
+            status_code=503,
+            detail="Contract store is not configured. Set CONTRACTS_TABLE_NAME and CONTRACT_SYNC_TABLE_NAME, then redeploy.",
+        )
     status = _normalize_contract_status(body.status or "new")
     now = datetime.utcnow()
     synopsis = body.synopsis or None
     excerpt = body.contract_excerpt or (synopsis[:4000] if synopsis else None)
     proposal_id = body.proposal_id or None
-    with get_session() as session:
-        contract = ContractOpportunity(
-            source=body.source or "manual",
-            source_id=body.source_id,
-            title=body.title,
-            agency=body.agency,
-            sub_agency=body.sub_agency,
-            office=body.office,
-            naics=body.naics,
-            psc=body.psc,
-            set_aside=body.set_aside,
-            posted_at=body.posted_at,
-            due_at=body.due_at,
-            value=body.value,
-            location=body.location,
-            url=body.url,
-            synopsis=synopsis,
-            contract_excerpt=excerpt,
-            status=status,
-            proposal_id=proposal_id,
-            report_submitted_at=body.report_submitted_at,
-            decision_date=body.decision_date,
-            awardee_name=body.awardee_name,
-            award_value=body.award_value,
-            award_notes=body.award_notes,
-            win_factors=body.win_factors,
-            loss_factors=body.loss_factors,
-            analysis_notes=body.analysis_notes,
-            tags=body.tags or [],
-            last_seen_at=now,
-            updated_at=now,
-        )
-        session.add(contract)
-        session.flush()
-        return _contract_to_dict(contract, include_raw=True)
+    contract = contract_store_service.create_contract(
+        {
+            "source": body.source or "manual",
+            "source_id": body.source_id,
+            "title": body.title,
+            "agency": body.agency,
+            "sub_agency": body.sub_agency,
+            "office": body.office,
+            "naics": body.naics,
+            "psc": body.psc,
+            "set_aside": body.set_aside,
+            "posted_at": body.posted_at,
+            "due_at": body.due_at,
+            "value": body.value,
+            "location": body.location,
+            "url": body.url,
+            "synopsis": synopsis,
+            "contract_excerpt": excerpt,
+            "status": status,
+            "proposal_id": proposal_id,
+            "report_submitted_at": body.report_submitted_at,
+            "decision_date": body.decision_date,
+            "awardee_name": body.awardee_name,
+            "award_value": body.award_value,
+            "award_notes": body.award_notes,
+            "win_factors": body.win_factors,
+            "loss_factors": body.loss_factors,
+            "analysis_notes": body.analysis_notes,
+            "tags": body.tags or [],
+            "last_seen_at": now,
+            "updated_at": now,
+        }
+    )
+    return _contract_to_dict(contract, include_raw=True)
 
 
 @app.patch("/api/v1/contracts/{contract_id}")
 def update_contract(contract_id: str, body: ContractUpdate, current_user: str = Depends(get_current_user)):
+    if not contract_store_service.is_configured():
+        raise HTTPException(
+            status_code=503,
+            detail="Contract store is not configured. Set CONTRACTS_TABLE_NAME and CONTRACT_SYNC_TABLE_NAME, then redeploy.",
+        )
     patch = body.dict(exclude_unset=True)
     if "status" in patch:
         patch["status"] = _normalize_contract_status(patch["status"])
@@ -2169,43 +2224,49 @@ def update_contract(contract_id: str, body: ContractUpdate, current_user: str = 
     if "tags" in patch and patch["tags"] is not None:
         patch["tags"] = [t.strip() for t in patch["tags"] if t and t.strip()]
     now = datetime.utcnow()
-    with get_session() as session:
-        contract = session.query(ContractOpportunity).filter(ContractOpportunity.id == contract_id).one_or_none()
-        if not contract:
-            raise HTTPException(status_code=404, detail="Contract not found")
-        for key, val in patch.items():
-            setattr(contract, key, val)
-        if patch.get("status") == "submitted" and not contract.report_submitted_at:
-            contract.report_submitted_at = now
-        if patch.get("status") in ("awarded", "lost") and not contract.decision_date:
-            contract.decision_date = now
-        if not contract.contract_excerpt and contract.synopsis:
-            contract.contract_excerpt = contract.synopsis[:4000]
-        contract.updated_at = now
-        session.flush()
-        return _contract_to_dict(contract, include_raw=True)
+    existing = contract_store_service.get_contract(contract_id)
+    if not existing:
+        raise HTTPException(status_code=404, detail="Contract not found")
+    updated_patch = dict(patch)
+    if patch.get("status") == "submitted" and not existing.get("report_submitted_at"):
+        updated_patch["report_submitted_at"] = now
+    if patch.get("status") in ("awarded", "lost") and not existing.get("decision_date"):
+        updated_patch["decision_date"] = now
+    synopsis = updated_patch.get("synopsis", existing.get("synopsis"))
+    excerpt = updated_patch.get("contract_excerpt", existing.get("contract_excerpt"))
+    if not excerpt and synopsis:
+        updated_patch["contract_excerpt"] = str(synopsis)[:4000]
+    updated_patch["updated_at"] = now
+    contract = contract_store_service.update_contract(contract_id, updated_patch)
+    if not contract:
+        raise HTTPException(status_code=404, detail="Contract not found")
+    return _contract_to_dict(contract, include_raw=True)
 
 
 @app.get("/api/v1/contracts/stats")
 def contract_stats(current_user: str = Depends(get_current_user)):
-    with get_session() as session:
-        rows = session.query(ContractOpportunity).all()
-        state = _get_sync_state(session)
+    if not contract_store_service.is_configured():
+        raise HTTPException(
+            status_code=503,
+            detail="Contract store is not configured. Set CONTRACTS_TABLE_NAME and CONTRACT_SYNC_TABLE_NAME, then redeploy.",
+        )
+    rows = contract_store_service.list_contracts(limit=5000, offset=0)
+    state = _get_sync_state()
 
     total = len(rows)
-    by_status = Counter([r.status for r in rows if r.status])
+    by_status = Counter([str(r.get("status")) for r in rows if r.get("status")])
     awarded = by_status.get("awarded", 0)
     lost = by_status.get("lost", 0)
     win_rate = round((awarded / (awarded + lost)) * 100, 1) if (awarded + lost) > 0 else 0.0
 
-    awarded_values = [r.award_value for r in rows if r.status == "awarded" and r.award_value]
-    lost_values = [r.award_value for r in rows if r.status == "lost" and r.award_value]
+    awarded_values = [float(r["award_value"]) for r in rows if r.get("status") == "awarded" and r.get("award_value") is not None]
+    lost_values = [float(r["award_value"]) for r in rows if r.get("status") == "lost" and r.get("award_value") is not None]
     avg_award_value = round(sum(awarded_values) / len(awarded_values), 2) if awarded_values else None
     avg_lost_value = round(sum(lost_values) / len(lost_values), 2) if lost_values else None
 
     def top_counts(attr: str, status_key: str) -> List[Dict[str, Any]]:
         counts = Counter(
-            [getattr(r, attr) for r in rows if r.status == status_key and getattr(r, attr)]
+            [r.get(attr) for r in rows if r.get("status") == status_key and r.get(attr)]
         )
         return [{"name": k, "count": v} for k, v in counts.most_common(5)]
 
@@ -2221,8 +2282,8 @@ def contract_stats(current_user: str = Depends(get_current_user)):
         "top_agencies_lost": top_counts("agency", "lost"),
         "top_naics_awarded": top_counts("naics", "awarded"),
         "top_naics_lost": top_counts("naics", "lost"),
-        "last_sync": _dt_to_str(state.last_run_at),
-        "last_sync_error": state.last_error,
+        "last_sync": _dt_to_str(state.get("last_run_at")),
+        "last_sync_error": state.get("last_error"),
     }
 
 
@@ -2420,24 +2481,25 @@ class ProposalResponse(BaseModel):
 
 @app.post("/api/v1/proposals", response_model=ProposalResponse)
 def create_proposal(req: ProposalCreate, current_user: str = Depends(get_current_user)):
-    with get_session() as session:
-        proposal = Proposal(title=req.title, payload=req.payload, owner_email=current_user)
-        session.add(proposal)
-        session.flush()
-        # Create first version (v1)
-        v = ProposalVersion(
-            proposal_id=proposal.id,
-            version=1,
-            title=proposal.title,
-            payload=req.payload,
+    if not proposal_store_service.is_configured():
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "Proposal store is not configured. Set PROPOSALS_TABLE_NAME, "
+                "PROPOSAL_VERSIONS_TABLE_NAME, and PROPOSAL_DOCUMENTS_TABLE_NAME, then redeploy."
+            ),
         )
-        session.add(v)
-        response = ProposalResponse(
-            id=proposal.id,
-            public_id=proposal.public_id,
-            title=proposal.title,
-            created_at=str(proposal.created_at) if proposal.created_at else None,
-        )
+    proposal = proposal_store_service.create_proposal(
+        owner_email=current_user,
+        title=req.title,
+        payload=req.payload,
+    )
+    response = ProposalResponse(
+        id=str(proposal.get("proposal_id")),
+        public_id=str(proposal.get("public_id")),
+        title=proposal.get("title"),
+        created_at=str(proposal.get("created_at") or ""),
+    )
 
     # Optionally persist a copy of the payload to object storage so public previews
     # still work if the DB is cleaned between deploys.
@@ -2464,15 +2526,15 @@ def create_proposal(req: ProposalCreate, current_user: str = Depends(get_current
 
 @app.get("/api/v1/proposals/public/{public_id}")
 def get_public_proposal(public_id: str):
-    with get_session() as session:
-        obj = session.query(Proposal).filter(Proposal.public_id == public_id).one_or_none()
+    if proposal_store_service.is_configured():
+        obj = proposal_store_service.get_by_public_id(public_id)
         if obj:
             return {
-                "id": obj.id,
-                "public_id": obj.public_id,
-                "title": obj.title,
-                "payload": obj.payload,
-                "created_at": str(obj.created_at) if obj.created_at else None,
+                "id": obj.get("proposal_id"),
+                "public_id": obj.get("public_id"),
+                "title": obj.get("title"),
+                "payload": obj.get("payload"),
+                "created_at": str(obj.get("created_at") or ""),
             }
 
     # Fallback: attempt to load from object storage if configured
@@ -2503,77 +2565,75 @@ class VersionCreate(BaseModel):
 
 @app.post("/api/v1/proposals/{proposal_id}/versions")
 def create_version(proposal_id: str, body: VersionCreate, current_user: str = Depends(get_current_user)):
-    with get_session() as session:
-        prop = (
-            session.query(Proposal)
-            .filter(Proposal.id == proposal_id, Proposal.owner_email == current_user)
-            .one_or_none()
+    if not proposal_store_service.is_configured():
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "Proposal store is not configured. Set PROPOSALS_TABLE_NAME, "
+                "PROPOSAL_VERSIONS_TABLE_NAME, and PROPOSAL_DOCUMENTS_TABLE_NAME, then redeploy."
+            ),
         )
-        if not prop:
-            raise HTTPException(status_code=404, detail="Proposal not found")
-        # next version number
-        last = (
-            session.query(ProposalVersion)
-            .filter(ProposalVersion.proposal_id == proposal_id)
-            .order_by(ProposalVersion.version.desc())
-            .first()
-        )
-        next_ver = 1 + (last.version if last else 0)
-        ver = ProposalVersion(
+    try:
+        ver = proposal_store_service.create_version(
             proposal_id=proposal_id,
-            version=next_ver,
-            title=body.title or prop.title,
+            owner_email=current_user,
+            title=body.title,
             payload=body.payload,
         )
-        prop.payload = body.payload
-        session.add(ver)
-        session.flush()
-        return {"proposal_id": proposal_id, "version": next_ver, "id": ver.id}
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Proposal not found")
+    return {"proposal_id": proposal_id, "version": int(ver.get("version") or 1), "id": ver.get("version_id")}
 
 
 @app.get("/api/v1/proposals/{proposal_id}/versions")
 def list_versions(proposal_id: str, current_user: str = Depends(get_current_user)):
-    with get_session() as session:
-        rows = (
-            session.query(ProposalVersion)
-            .join(Proposal, Proposal.id == ProposalVersion.proposal_id)
-            .filter(ProposalVersion.proposal_id == proposal_id, Proposal.owner_email == current_user)
-            .order_by(ProposalVersion.version.asc())
-            .all()
+    if not proposal_store_service.is_configured():
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "Proposal store is not configured. Set PROPOSALS_TABLE_NAME, "
+                "PROPOSAL_VERSIONS_TABLE_NAME, and PROPOSAL_DOCUMENTS_TABLE_NAME, then redeploy."
+            ),
         )
-        return [
-            {
-                "id": r.id,
-                "version": r.version,
-                "title": r.title,
-                "created_at": str(r.created_at) if r.created_at else None,
-            }
-            for r in rows
-        ]
+    rows = proposal_store_service.list_versions(
+        proposal_id=proposal_id,
+        owner_email=current_user,
+    )
+    return [
+        {
+            "id": r.get("version_id"),
+            "version": int(r.get("version") or 0),
+            "title": r.get("title"),
+            "created_at": str(r.get("created_at") or ""),
+        }
+        for r in rows
+    ]
 
 
 @app.get("/api/v1/proposals/{proposal_id}/versions/{version}")
 def get_version(proposal_id: str, version: int, current_user: str = Depends(get_current_user)):
-    with get_session() as session:
-        ver = (
-            session.query(ProposalVersion)
-            .join(Proposal, Proposal.id == ProposalVersion.proposal_id)
-            .filter(
-                ProposalVersion.proposal_id == proposal_id,
-                ProposalVersion.version == version,
-                Proposal.owner_email == current_user,
-            )
-            .one_or_none()
+    if not proposal_store_service.is_configured():
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "Proposal store is not configured. Set PROPOSALS_TABLE_NAME, "
+                "PROPOSAL_VERSIONS_TABLE_NAME, and PROPOSAL_DOCUMENTS_TABLE_NAME, then redeploy."
+            ),
         )
-        if not ver:
-            raise HTTPException(status_code=404, detail="Version not found")
-        return {
-            "id": ver.id,
-            "version": ver.version,
-            "title": ver.title,
-            "payload": ver.payload,
-            "created_at": str(ver.created_at) if ver.created_at else None,
-        }
+    ver = proposal_store_service.get_version(
+        proposal_id=proposal_id,
+        version=version,
+        owner_email=current_user,
+    )
+    if not ver:
+        raise HTTPException(status_code=404, detail="Version not found")
+    return {
+        "id": ver.get("version_id"),
+        "version": int(ver.get("version") or 0),
+        "title": ver.get("title"),
+        "payload": ver.get("payload"),
+        "created_at": str(ver.get("created_at") or ""),
+    }
 
 
 def _json_diff(a: Any, b: Any, path: str = "") -> List[Dict[str, Any]]:
@@ -2603,31 +2663,28 @@ def _json_diff(a: Any, b: Any, path: str = "") -> List[Dict[str, Any]]:
 
 @app.get("/api/v1/proposals/{proposal_id}/diff")
 def diff_versions(proposal_id: str, from_version: int, to_version: int, current_user: str = Depends(get_current_user)):
-    with get_session() as session:
-        v1 = (
-            session.query(ProposalVersion)
-            .join(Proposal, Proposal.id == ProposalVersion.proposal_id)
-            .filter(
-                ProposalVersion.proposal_id == proposal_id,
-                ProposalVersion.version == from_version,
-                Proposal.owner_email == current_user,
-            )
-            .one_or_none()
+    if not proposal_store_service.is_configured():
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "Proposal store is not configured. Set PROPOSALS_TABLE_NAME, "
+                "PROPOSAL_VERSIONS_TABLE_NAME, and PROPOSAL_DOCUMENTS_TABLE_NAME, then redeploy."
+            ),
         )
-        v2 = (
-            session.query(ProposalVersion)
-            .join(Proposal, Proposal.id == ProposalVersion.proposal_id)
-            .filter(
-                ProposalVersion.proposal_id == proposal_id,
-                ProposalVersion.version == to_version,
-                Proposal.owner_email == current_user,
-            )
-            .one_or_none()
-        )
-        if not v1 or not v2:
-            raise HTTPException(status_code=404, detail="One or both versions not found")
-        diffs = _json_diff(v1.payload, v2.payload)
-        return {"from": from_version, "to": to_version, "diffs": diffs}
+    v1 = proposal_store_service.get_version(
+        proposal_id=proposal_id,
+        version=from_version,
+        owner_email=current_user,
+    )
+    v2 = proposal_store_service.get_version(
+        proposal_id=proposal_id,
+        version=to_version,
+        owner_email=current_user,
+    )
+    if not v1 or not v2:
+        raise HTTPException(status_code=404, detail="One or both versions not found")
+    diffs = _json_diff(v1.get("payload"), v2.get("payload"))
+    return {"from": from_version, "to": to_version, "diffs": diffs}
 
 
 @app.get("/api/v1/proposals/{proposal_id}/documents")
@@ -2637,28 +2694,39 @@ def list_documents(
     presign: bool = True,
     current_user: str = Depends(get_current_user),
 ):
-    with get_session() as session:
-        prop = _get_owned_proposal(session, proposal_id, current_user)
-        if not prop:
-            raise HTTPException(status_code=404, detail="Proposal not found")
-        query = session.query(ProposalDocument).filter(ProposalDocument.proposal_id == proposal_id)
-        if version is not None:
-            query = query.filter(ProposalDocument.version == version)
-        rows = query.order_by(ProposalDocument.created_at.asc()).all()
+    if not proposal_store_service.is_configured():
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "Proposal store is not configured. Set PROPOSALS_TABLE_NAME, "
+                "PROPOSAL_VERSIONS_TABLE_NAME, and PROPOSAL_DOCUMENTS_TABLE_NAME, then redeploy."
+            ),
+        )
+    rows = proposal_store_service.list_documents(
+        proposal_id=proposal_id,
+        owner_email=current_user,
+        version=version,
+    )
+    proposal = proposal_store_service.get_owned_proposal(
+        proposal_id=proposal_id,
+        owner_email=current_user,
+    )
+    if not proposal:
+        raise HTTPException(status_code=404, detail="Proposal not found")
 
     docs = []
     for r in rows:
-        meta = r.meta or {}
+        meta = r.get("meta") or {}
         doc = {
-            "id": r.id,
-            "kind": r.kind,
-            "filename": r.filename,
-            "content_type": r.content_type,
-            "bucket": r.bucket,
-            "key": r.key,
-            "size_bytes": r.size_bytes,
-            "version": r.version,
-            "created_at": str(r.created_at) if r.created_at else None,
+            "id": r.get("document_id"),
+            "kind": r.get("kind"),
+            "filename": r.get("filename"),
+            "content_type": r.get("content_type"),
+            "bucket": r.get("bucket"),
+            "key": r.get("key"),
+            "size_bytes": r.get("size_bytes"),
+            "version": r.get("version"),
+            "created_at": str(r.get("created_at") or ""),
             "meta": meta,
             "created_by": meta.get("created_by"),
             "tool_version": meta.get("tool_version"),
@@ -2669,8 +2737,11 @@ def list_documents(
             "tone": meta.get("tone"),
             "include_ai": meta.get("include_ai"),
         }
-        if presign and storage_service.is_configured():
-            doc["url"] = storage_service.presign_get(r.key)
+        if presign and storage_service.is_configured() and r.get("key"):
+            doc["url"] = storage_service.presign_get(str(r.get("key")))
+        doc["proposal_id"] = proposal.get("proposal_id")
+        doc["proposal_title"] = proposal.get("title")
+        doc["proposal_public_id"] = proposal.get("public_id")
         docs.append(doc)
     return docs
 
@@ -2793,30 +2864,39 @@ async def upload_document(
     content_type = file.content_type or "application/octet-stream"
     key_prefix = f"proposals/{proposal_id}/{kind}s"
 
-    with get_session() as session:
-        prop = _get_owned_proposal(session, proposal_id, current_user)
-        if not prop:
-            raise HTTPException(status_code=404, detail="Proposal not found")
-        upload = storage_service.upload_bytes(
-            content,
-            key_prefix=key_prefix,
-            filename=file.filename or "attachment",
-            content_type=content_type,
+    if not proposal_store_service.is_configured():
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "Proposal store is not configured. Set PROPOSALS_TABLE_NAME, "
+                "PROPOSAL_VERSIONS_TABLE_NAME, and PROPOSAL_DOCUMENTS_TABLE_NAME, then redeploy."
+            ),
         )
-        doc = ProposalDocument(
-            proposal_id=proposal_id,
-            version=version,
-            kind=kind,
-            filename=upload["filename"],
-            content_type=content_type,
-            bucket=upload["bucket"],
-            key=upload["key"],
-            size_bytes=len(content),
-            meta={"source_url": source_url} if source_url else None,
-        )
-        session.add(doc)
-        # commit via context manager
-        doc_id = doc.id
+    prop = proposal_store_service.get_owned_proposal(
+        proposal_id=proposal_id,
+        owner_email=current_user,
+    )
+    if not prop:
+        raise HTTPException(status_code=404, detail="Proposal not found")
+    upload = storage_service.upload_bytes(
+        content,
+        key_prefix=key_prefix,
+        filename=file.filename or "attachment",
+        content_type=content_type,
+    )
+    doc = proposal_store_service.add_document(
+        proposal_id=proposal_id,
+        owner_email=current_user,
+        kind=kind,
+        version=version,
+        filename=upload["filename"],
+        content_type=content_type,
+        bucket=upload["bucket"],
+        key=upload["key"],
+        size_bytes=len(content),
+        meta={"source_url": source_url} if source_url else None,
+    )
+    doc_id = doc.get("document_id")
 
     return {
         "id": doc_id,
@@ -2836,25 +2916,32 @@ def delete_document(
     document_id: str,
     current_user: str = Depends(get_current_user),
 ):
-    with get_session() as session:
-        prop = _get_owned_proposal(session, proposal_id, current_user)
-        if not prop:
-            raise HTTPException(status_code=404, detail="Proposal not found")
-        doc = (
-            session.query(ProposalDocument)
-            .filter(
-                ProposalDocument.id == document_id,
-                ProposalDocument.proposal_id == proposal_id,
-            )
-            .one_or_none()
+    if not proposal_store_service.is_configured():
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "Proposal store is not configured. Set PROPOSALS_TABLE_NAME, "
+                "PROPOSAL_VERSIONS_TABLE_NAME, and PROPOSAL_DOCUMENTS_TABLE_NAME, then redeploy."
+            ),
         )
-        if not doc:
-            raise HTTPException(status_code=404, detail="Document not found")
-        key = doc.key
-        session.delete(doc)
+    doc = proposal_store_service.get_document(
+        proposal_id=proposal_id,
+        document_id=document_id,
+        owner_email=current_user,
+    )
+    if not doc:
+        raise HTTPException(status_code=404, detail="Document not found")
+    key = doc.get("key")
+    deleted = proposal_store_service.delete_document(
+        proposal_id=proposal_id,
+        document_id=document_id,
+        owner_email=current_user,
+    )
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Document not found")
 
     if storage_service.is_configured() and key:
-        storage_service.delete_object(key)
+        storage_service.delete_object(str(key))
 
     return {"deleted": True, "id": document_id}
 

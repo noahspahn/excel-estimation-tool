@@ -5,7 +5,7 @@
 The recommended deployment path is now the CDK app in `infra/`:
 
 - **Backend**: API Gateway + Lambda (full FastAPI in Lambda)
-- **Report persistence**: S3 + DynamoDB (PDF storage + report metadata/payload)
+- **Persistence**: S3 + DynamoDB (reports, async jobs, proposals, versions, documents, contracts)
 - **Frontend**: S3 + CloudFront (HTTPS)
 
 Start here:
@@ -28,6 +28,22 @@ Environment variables control backend timeout behavior:
 
 - `BACKEND_LAMBDA_TIMEOUT_SECONDS` (Lambda timeout, default `60`)
 - `BACKEND_LAMBDA_API_TIMEOUT_SECONDS` (API Gateway integration timeout, default `29`)
+
+To sync backend table names into GitHub Environment variables (so deploys keep
+reusing the same Dynamo tables), run:
+
+```powershell
+python scripts/sync_backend_table_vars.py --repo noahspahn/excel-estimation-tool --env dev --region us-east-1
+```
+
+This sets:
+
+- `REPORT_JOBS_TABLE_NAME`
+- `PROPOSALS_TABLE_NAME`
+- `PROPOSAL_VERSIONS_TABLE_NAME`
+- `PROPOSAL_DOCUMENTS_TABLE_NAME`
+- `CONTRACTS_TABLE_NAME`
+- `CONTRACT_SYNC_TABLE_NAME`
 
 See `infra/README.md` for full details.
 
@@ -100,6 +116,9 @@ The “live” setup looks like this:
     - `REPORT_JOB_WORKERS` (optional, default `2` for non-Lambda background execution).
     - `REPORT_JOB_SELF_INVOKE` (optional, default `true`; Lambda async jobs self-invoke to avoid API timeout).
     - `REPORT_JOBS_TABLE_NAME` (required in Lambda if you want persistent async report/subtask jobs; CDK Lambda stack can auto-create this when omitted).
+    - `PROPOSALS_TABLE_NAME`, `PROPOSAL_VERSIONS_TABLE_NAME`, `PROPOSAL_DOCUMENTS_TABLE_NAME` (proposal/version/document persistence).
+    - `CONTRACTS_TABLE_NAME`, `CONTRACT_SYNC_TABLE_NAME` (contracts + SAM sync state persistence).
+    - `DATABASE_URL` is now optional for core proposal/contract/report workflows; keep only if you still rely on SQL fallback paths.
     - Do not set Lambda runtime-reserved keys like `AWS_REGION` in backend-next Lambda env; CDK now strips these automatically.
   - `get_current_user()` in `backend/app/main.py` verifies Cognito JWTs when auth is enabled.
   - Long-running operations now support async job endpoints:

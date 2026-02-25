@@ -33,6 +33,11 @@ jobs:
       COGNITO_CLIENT_ID: ${{ vars.COGNITO_CLIENT_ID || vars.VITE_COGNITO_CLIENT_ID || '' }}
       REPORTS_TABLE_NAME: ${{ vars.REPORTS_TABLE_NAME || '' }}
       REPORT_JOBS_TABLE_NAME: ${{ vars.REPORT_JOBS_TABLE_NAME || '' }}
+      PROPOSALS_TABLE_NAME: ${{ vars.PROPOSALS_TABLE_NAME || '' }}
+      PROPOSAL_VERSIONS_TABLE_NAME: ${{ vars.PROPOSAL_VERSIONS_TABLE_NAME || '' }}
+      PROPOSAL_DOCUMENTS_TABLE_NAME: ${{ vars.PROPOSAL_DOCUMENTS_TABLE_NAME || '' }}
+      CONTRACTS_TABLE_NAME: ${{ vars.CONTRACTS_TABLE_NAME || '' }}
+      CONTRACT_SYNC_TABLE_NAME: ${{ vars.CONTRACT_SYNC_TABLE_NAME || '' }}
       S3_REPORT_BUCKET: ${{ vars.S3_REPORT_BUCKET || '' }}
       SAM_API_KEY: ${{ secrets.SAM_API_KEY || '' }}
       OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY || '' }}
@@ -98,6 +103,19 @@ jobs:
       - name: Deploy backend Lambda + frontend infrastructure
         run: |
           set -euo pipefail
+          STACK_OUTPUTS_JSON=$(aws cloudformation describe-stacks --stack-name EstimationBackendLambdaStack --region "${AWS_REGION}" \
+            --query "Stacks[0].Outputs" --output json 2>/dev/null || echo "[]")
+          stack_output() {
+            local output_key="$1"
+            jq -r --arg key "${output_key}" 'map(select(.OutputKey == $key))[0].OutputValue // ""' <<<"${STACK_OUTPUTS_JSON}"
+          }
+          EFFECTIVE_REPORT_JOBS_TABLE_NAME="${REPORT_JOBS_TABLE_NAME:-$(stack_output ReportJobsTableName)}"
+          EFFECTIVE_PROPOSALS_TABLE_NAME="${PROPOSALS_TABLE_NAME:-$(stack_output ProposalsTableName)}"
+          EFFECTIVE_PROPOSAL_VERSIONS_TABLE_NAME="${PROPOSAL_VERSIONS_TABLE_NAME:-$(stack_output ProposalVersionsTableName)}"
+          EFFECTIVE_PROPOSAL_DOCUMENTS_TABLE_NAME="${PROPOSAL_DOCUMENTS_TABLE_NAME:-$(stack_output ProposalDocumentsTableName)}"
+          EFFECTIVE_CONTRACTS_TABLE_NAME="${CONTRACTS_TABLE_NAME:-$(stack_output ContractsTableName)}"
+          EFFECTIVE_CONTRACT_SYNC_TABLE_NAME="${CONTRACT_SYNC_TABLE_NAME:-$(stack_output ContractSyncTableName)}"
+
           BASE_BACKEND_ENV=$(jq -cn \
             --arg databaseUrl "${DATABASE_URL}" \
             --arg allowedOrigins "${ALLOWED_ORIGINS}" \
@@ -106,7 +124,12 @@ jobs:
             --arg cognitoPoolId "${COGNITO_USER_POOL_ID}" \
             --arg cognitoClientId "${COGNITO_CLIENT_ID}" \
             --arg reportsTable "${REPORTS_TABLE_NAME}" \
-            --arg reportJobsTable "${REPORT_JOBS_TABLE_NAME}" \
+            --arg reportJobsTable "${EFFECTIVE_REPORT_JOBS_TABLE_NAME}" \
+            --arg proposalsTable "${EFFECTIVE_PROPOSALS_TABLE_NAME}" \
+            --arg proposalVersionsTable "${EFFECTIVE_PROPOSAL_VERSIONS_TABLE_NAME}" \
+            --arg proposalDocumentsTable "${EFFECTIVE_PROPOSAL_DOCUMENTS_TABLE_NAME}" \
+            --arg contractsTable "${EFFECTIVE_CONTRACTS_TABLE_NAME}" \
+            --arg contractSyncTable "${EFFECTIVE_CONTRACT_SYNC_TABLE_NAME}" \
             --arg reportsBucket "${S3_REPORT_BUCKET}" \
             --arg samApiKey "${SAM_API_KEY}" \
             --arg openaiApiKey "${OPENAI_API_KEY}" \
@@ -123,6 +146,11 @@ jobs:
               COGNITO_CLIENT_ID: $cognitoClientId,
               REPORTS_TABLE_NAME: $reportsTable,
               REPORT_JOBS_TABLE_NAME: $reportJobsTable,
+              PROPOSALS_TABLE_NAME: $proposalsTable,
+              PROPOSAL_VERSIONS_TABLE_NAME: $proposalVersionsTable,
+              PROPOSAL_DOCUMENTS_TABLE_NAME: $proposalDocumentsTable,
+              CONTRACTS_TABLE_NAME: $contractsTable,
+              CONTRACT_SYNC_TABLE_NAME: $contractSyncTable,
               S3_REPORT_BUCKET: $reportsBucket,
               SAM_API_KEY: $samApiKey,
               OPENAI_API_KEY: $openaiApiKey,
