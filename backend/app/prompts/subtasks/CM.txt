@@ -1,0 +1,7 @@
+Guidance for [MODULE_NAME] ([FOCUS_AREA]):
+- Emphasize cloud readiness, landing zone alignment, workload prioritization, and migration wave planning.
+- Call out connectivity, identity/access, cloud security, and operational handoff considerations.
+- Avoid generic phrasing; tie to the specific module scope.
+- Use the contract excerpt for specific context when available.
+Task roles: [TASK_TITLES]
+Relevant contract highlights: [CONTRACT_HIGHLIGHTS]

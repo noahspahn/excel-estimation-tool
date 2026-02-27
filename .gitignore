@@ -1,5 +1,12 @@
 frontend/node_modules/*
 backend/venv_311/*
+__pycache__/
+*.pyc
+backend/local.dev.db
+backend/local.smoke.db
 .env.example
 backend/.env
 deploy/aws/environments.json
+TODO.md
+infra/node_modules/*
+infra/cdk.out/*

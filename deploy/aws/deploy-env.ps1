@@ -35,7 +35,7 @@ $Bucket = if ($envConfig.bucket) { $envConfig.bucket } else { "meshai-estimation
 if ($envConfig.frontendEnv) {
   foreach ($kv in $envConfig.frontendEnv.PSObject.Properties) {
     if ($null -ne $kv.Value -and $kv.Value -ne "") {
-      $env:$($kv.Name) = "$($kv.Value)"
+      Set-Item -Path ("Env:" + $kv.Name) -Value "$($kv.Value)"
     }
   }
 }

@@ -1,10 +1,10 @@
 import { useEffect, useMemo, useState } from 'react'
 import './App.css'
 import TopNav from './TopNav'
+import { getApiBase } from './apiConfig'
 
-const rawApi = (import.meta as any).env?.VITE_API_URL || 'http://localhost:8000'
-const API = rawApi.replace(/\/+$/, '')
-const AUTH_DISABLED = String((import.meta as any).env?.VITE_DISABLE_AUTH ?? 'true').toLowerCase() === 'true'
+const API = getApiBase()
+const AUTH_DISABLED = String((import.meta as any).env?.VITE_DISABLE_AUTH ?? 'false').toLowerCase() === 'true'
 
 const STORAGE_KEY = 'subcontractor_workspace_v1'
 const DRAFT_KEY = 'estimation_draft'

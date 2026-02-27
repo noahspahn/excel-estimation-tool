@@ -1,7 +1,11 @@
 import os
 import json
 import re
+from pathlib import Path
 from typing import Dict, Any, List, Optional, Tuple
+
+PROMPTS_DIR = Path(os.getenv("PROMPTS_DIR", Path(__file__).resolve().parents[1] / "prompts"))
+SUBTASK_PROMPTS_DIR = PROMPTS_DIR / "subtasks"
 
 
 class SubtaskAIError(RuntimeError):
@@ -15,6 +19,11 @@ class AIService:
 
     def __init__(self):
         self.api_key = os.getenv("OPENAI_API_KEY")
+        try:
+            timeout_seconds = float(os.getenv("OPENAI_REQUEST_TIMEOUT_SECONDS", "8"))
+        except Exception:
+            timeout_seconds = 8.0
+        self.request_timeout_seconds = max(1.0, timeout_seconds)
         # Lazy import in methods to avoid hard dependency during boot
 
     def is_configured(self) -> bool:
@@ -31,44 +40,10 @@ class AIService:
         if not self.is_configured():
             raise RuntimeError("OPENAI_API_KEY not configured")
 
-        # Try OpenAI SDK v1 first, then fall back to legacy 0.x if present
-        client = None
-        client_mode = None  # "v1" or "v0"
-        v1_import_error = None
-        try:
-            from openai import OpenAI  # type: ignore
-
-            client = OpenAI(api_key=self.api_key)
-            client_mode = "v1"
-        except Exception as e:
-            v1_import_error = e
-            try:
-                import openai  # type: ignore
-
-                openai.api_key = self.api_key
-                client = openai
-                client_mode = "v0"
-            except Exception as legacy_e:
-                installed_version = None
-                try:
-                    import openai as maybe_openai  # type: ignore
-
-                    installed_version = getattr(maybe_openai, "__version__", None)
-                except Exception:
-                    pass
-
-                details = [
-                    "OpenAI SDK not available.",
-                    "Install or upgrade with: pip install -U openai",
-                ]
-                if installed_version:
-                    details.append(f"Detected openai version: {installed_version}")
-                details.append(f"v1 import error: {v1_import_error}")
-                details.append(f"v0 import error: {legacy_e}")
-                raise RuntimeError("; ".join(details))
+        client, client_mode = self._get_client()
 
         if sections is None:
-            sections = ["executive_summary", "assumptions", "risks", "recommendations"]
+            sections = ["executive_summary", "assumptions", "risks"]
 
         context = self._build_narrative_context(estimation_data, input_summary)
 
@@ -76,9 +51,10 @@ class AIService:
             "You are a consulting engagement manager. Write concise, clear, and client-ready narratives "
             "for an estimation report. Use the provided data faithfully. Avoid exaggeration. "
             "Return ONLY valid JSON (no code fences, no extra text) with keys matching the requested sections. "
-            "Each value MUST be a single string paragraph with 2-4 sentences (no lists or objects). "
+            "Each value MUST be a single string paragraph with 2-5 sentences (no lists or objects). "
             "Do NOT include JSON, braces, or key-value formatting inside the section text. "
-            "Use context (scope_outline, contract_highlights, project_info, style_guide) to add human context beyond raw numbers. "
+            "Use context (scope_outline, contract_highlights, project_info, security_protocols, compliance_frameworks, additional_assumptions, style_guide) "
+            "to add human context beyond raw numbers. "
             "If contract_source/excerpt is provided, weave in 1-2 relevant details without quoting large blocks."
         )
 
@@ -98,7 +74,9 @@ class AIService:
         # Call appropriate API depending on SDK mode
         if client_mode == "v1":
             try:
-                completion = client.chat.completions.create(
+                completion = self._chat_completion(
+                    client,
+                    client_mode=client_mode,
                     model=model,
                     messages=messages,
                     temperature=0.3,
@@ -108,7 +86,9 @@ class AIService:
                 return self._offline_narrative(context, sections, tone)
         else:
             try:
-                completion = client.ChatCompletion.create(
+                completion = self._chat_completion(
+                    client,
+                    client_mode=client_mode,
                     model=model,
                     messages=messages,
                     temperature=0.3,
@@ -144,18 +124,26 @@ class AIService:
             "You are a proposal writer. Rewrite the provided module subtasks into a concise, SOP-style "
             "format. Incorporate customer context when provided. DO NOT change hours, calculations, or "
             "the number of subtasks/tasks. Keep titles clear and outcomes-focused. "
+            "Make each subtask distinct and tailored to its module_name and focus_area; avoid repeating "
+            "phrases across modules. Use module_guidance when provided. "
             "Return ONLY a JSON array; no code fences or extra text. Use double quotes in JSON."
         )
+
+        module_guidance = self._build_subtask_guidance(deterministic_subtasks, contract_excerpt)
 
         user_prompt = json.dumps({
             "tone": tone,
             "contract_excerpt": (contract_excerpt or "")[:2000],
+            "module_guidance": module_guidance,
             "instructions": [
                 "Keep the same subtasks and tasks count.",
                 "Preserve hours and calculations exactly.",
                 "Include work_scope, estimate_basis, period_of_performance, reasonableness.",
+                "Use module_guidance keyed by module_id (or module_name) when present.",
                 "If customer context is provided, weave it into work_scope and customer_context.",
-                "Return JSON array of subtasks with keys: sequence, module_name, focus_area, work_scope, estimate_basis, period_of_performance, reasonableness, customer_context (optional), tasks (array of {title, calculation, hours, description optional}), total_hours.",
+                "Preserve security_protocols and compliance_frameworks if provided.",
+                "Do not include helper fields like module_guidance in the output.",
+                "Return JSON array of subtasks with keys: sequence, module_name, focus_area, work_scope, estimate_basis, period_of_performance, reasonableness, security_protocols (optional), compliance_frameworks (optional), customer_context (optional), tasks (array of {title, calculation, hours, description optional}), total_hours.",
             ],
             "subtasks": deterministic_subtasks,
         })
@@ -168,14 +156,18 @@ class AIService:
         content = None
         try:
             if client_mode == "v1":
-                completion = client.chat.completions.create(
+                completion = self._chat_completion(
+                    client,
+                    client_mode=client_mode,
                     model=model,
                     messages=messages,
                     temperature=0.4,
                 )
                 content = completion.choices[0].message.content or "[]"
             else:
-                completion = client.ChatCompletion.create(
+                completion = self._chat_completion(
+                    client,
+                    client_mode=client_mode,
                     model=model,
                     messages=messages,
                     temperature=0.4,
@@ -238,14 +230,18 @@ class AIService:
         content: Optional[str] = None
         try:
             if client_mode == "v1":
-                completion = client.chat.completions.create(
+                completion = self._chat_completion(
+                    client,
+                    client_mode=client_mode,
                     model=model,
                     messages=messages,
                     temperature=0.35,
                 )
                 content = completion.choices[0].message.content or "{}"
             else:
-                completion = client.ChatCompletion.create(
+                completion = self._chat_completion(
+                    client,
+                    client_mode=client_mode,
                     model=model,
                     messages=messages,
                     temperature=0.35,
@@ -268,6 +264,86 @@ class AIService:
 
         final_text = self._normalize_section_text(section, text or current_text or "")
         return final_text, content
+
+    def generate_additional_assumptions(
+        self,
+        prompt_template: str,
+        context: Dict[str, Any],
+        model: str = "gpt-4o-mini",
+    ) -> Tuple[str, Optional[str]]:
+        """
+        Generate the additional assumptions section from a prompt template and context.
+        Returns (text, raw_model_response).
+        """
+        return self._generate_from_prompt_template(prompt_template, context, model=model, temperature=0.25)
+
+    def generate_additional_comments(
+        self,
+        prompt_template: str,
+        context: Dict[str, Any],
+        model: str = "gpt-4o-mini",
+    ) -> Tuple[str, Optional[str]]:
+        """Generate additional comments text from a prompt template and context."""
+        return self._generate_from_prompt_template(prompt_template, context, model=model, temperature=0.25)
+
+    def generate_security_protocols(
+        self,
+        prompt_template: str,
+        context: Dict[str, Any],
+        model: str = "gpt-4o-mini",
+    ) -> Tuple[str, Optional[str]]:
+        """Generate security protocols text from a prompt template and context."""
+        return self._generate_from_prompt_template(prompt_template, context, model=model, temperature=0.2)
+
+    def generate_compliance_frameworks(
+        self,
+        prompt_template: str,
+        context: Dict[str, Any],
+        model: str = "gpt-4o-mini",
+    ) -> Tuple[str, Optional[str]]:
+        """Generate compliance frameworks text from a prompt template and context."""
+        return self._generate_from_prompt_template(prompt_template, context, model=model, temperature=0.2)
+
+    def _generate_from_prompt_template(
+        self,
+        prompt_template: str,
+        context: Dict[str, Any],
+        model: str = "gpt-4o-mini",
+        temperature: float = 0.25,
+    ) -> Tuple[str, Optional[str]]:
+        if not self.is_configured():
+            raise RuntimeError("OPENAI_API_KEY not configured")
+
+        client, client_mode = self._get_client()
+        rendered = self._render_prompt_template(prompt_template, context)
+        system_prompt, user_prompt = self._split_prompt_template(rendered)
+
+        messages: List[Dict[str, str]] = []
+        if system_prompt:
+            messages.append({"role": "system", "content": system_prompt})
+        messages.append({"role": "user", "content": user_prompt})
+
+        content: Optional[str] = None
+        if client_mode == "v1":
+            completion = self._chat_completion(
+                client,
+                client_mode=client_mode,
+                model=model,
+                messages=messages,
+                temperature=temperature,
+            )
+            content = completion.choices[0].message.content or ""
+        else:
+            completion = self._chat_completion(
+                client,
+                client_mode=client_mode,
+                model=model,
+                messages=messages,
+                temperature=temperature,
+            )
+            content = completion["choices"][0]["message"]["content"] or ""
+
+        return (content or "").strip(), content
 
     def _build_narrative_context(
         self,
@@ -311,8 +387,15 @@ class AIService:
                 for r in role_items
             ],
         }
-        if estimation_data.get("project_info"):
-            context["project_info"] = estimation_data["project_info"]
+        project_info = estimation_data.get("project_info")
+        if project_info:
+            context["project_info"] = project_info
+            if project_info.get("security_protocols"):
+                context["security_protocols"] = project_info.get("security_protocols")
+            if project_info.get("compliance_frameworks"):
+                context["compliance_frameworks"] = project_info.get("compliance_frameworks")
+            if project_info.get("additional_assumptions"):
+                context["additional_assumptions"] = project_info.get("additional_assumptions")
         if estimation_data.get("module_subtasks"):
             module_subtasks = estimation_data["module_subtasks"]
             context["module_subtasks"] = self._trim_module_subtasks(module_subtasks)
@@ -338,6 +421,21 @@ class AIService:
             context["warranty_months"] = estimation_data["warranty_months"]
         if estimation_data.get("warranty_cost") is not None:
             context["warranty_cost"] = estimation_data["warranty_cost"]
+        if estimation_data.get("roi_inputs") is not None:
+            context["roi_inputs"] = estimation_data["roi_inputs"]
+        if estimation_data.get("roi_summary") is not None:
+            context["roi_summary"] = estimation_data["roi_summary"]
+        if estimation_data.get("roi_horizon_years") is not None:
+            context["roi_horizon_years"] = estimation_data["roi_horizon_years"]
+        for key in [
+            "scope_expansion",
+            "financial_bom",
+            "company_profile",
+            "maintenance_support_plan",
+            "compliance_warnings",
+        ]:
+            if estimation_data.get(key) is not None:
+                context[key] = estimation_data.get(key)
         if input_summary:
             context["input_summary"] = input_summary
         return context
@@ -349,7 +447,7 @@ class AIService:
         try:
             from openai import OpenAI  # type: ignore
 
-            client = OpenAI(api_key=self.api_key)
+            client = OpenAI(api_key=self.api_key, timeout=self.request_timeout_seconds, max_retries=1)
             client_mode = "v1"
         except Exception as e:
             v1_import_error = e
@@ -379,33 +477,155 @@ class AIService:
                 raise RuntimeError("; ".join(details))
         return client, client_mode
 
+    def _chat_completion(
+        self,
+        client: Any,
+        *,
+        client_mode: str,
+        model: str,
+        messages: List[Dict[str, str]],
+        temperature: float,
+    ) -> Any:
+        if client_mode == "v1":
+            return client.chat.completions.create(
+                model=model,
+                messages=messages,
+                temperature=temperature,
+                timeout=self.request_timeout_seconds,
+            )
+        return client.ChatCompletion.create(
+            model=model,
+            messages=messages,
+            temperature=temperature,
+            request_timeout=self.request_timeout_seconds,
+        )
+
     def _build_section_guidance(self, sections: List[str]) -> Dict[str, str]:
         guidance = {
             "executive_summary": (
-                "Summarize the project intent and scope in 2-4 sentences. "
-                "Mention the project name if available, include 1-2 key figures "
-                "(hours or cost), and reference 1-2 module themes. "
-                "Weave in contract_highlights or scope_outline when relevant."
+                "Summarize the project intent and scope in 3-5 sentences. "
+                "Include key project_info fields when present (project name, FY, POC, location), "
+                "1-2 key figures (hours or cost), and a brief services summary based on the selected modules. "
+                "If provided, mention security_protocols and compliance_frameworks. "
+                "Weave in contract_highlights or scope_outline when relevant. "
+                "If roi_summary is provided, highlight the 5-year net fiscal benefit and cost-avoidance framing."
             ),
             "assumptions": (
-                "State delivery assumptions tied to the scope and contract context. "
-                "Address access to stakeholders or data, dependencies, approvals, or "
+                "State delivery assumptions tied to the module mix and contract context. "
+                "Use scope_outline or module_subtasks when available to anchor assumptions "
+                "(e.g., site access for IT modernization, data access/quality for analytics, "
+                "cloud tenant access for migrations, security artifacts for assurance, stakeholder workshops for transformation). "
+                "Incorporate any additional_assumptions or project_info notes when provided. "
+                "Address access to stakeholders or data, dependencies, approvals, schedule, and "
                 "security/compliance where applicable. Avoid restating raw numbers."
             ),
             "risks": (
                 "Describe 2-3 key risks linked to the scope or contract context and "
                 "their potential impact. Avoid generic risks that could apply to any project."
             ),
-            "recommendations": (
-                "Provide action-oriented next steps aligned to scope and governance. "
-                "Examples include validating assumptions, confirming interfaces, or "
-                "sequencing work to reduce delivery risk."
-            ),
             "next_steps": (
                 "Provide concise, action-oriented next steps aligned to scope and governance."
             ),
         }
         return {s: guidance[s] for s in sections if s in guidance}
+
+    def build_subtask_guidance(
+        self,
+        subtasks: List[Dict[str, Any]],
+        contract_excerpt: Optional[str],
+    ) -> Dict[str, str]:
+        return self._build_subtask_guidance(subtasks, contract_excerpt)
+
+    def build_subtask_guidance_debug(
+        self,
+        subtasks: List[Dict[str, Any]],
+        contract_excerpt: Optional[str],
+    ) -> Tuple[Dict[str, str], Dict[str, str]]:
+        return self._build_subtask_guidance_with_sources(subtasks, contract_excerpt)
+
+    def _build_subtask_guidance(
+        self,
+        subtasks: List[Dict[str, Any]],
+        contract_excerpt: Optional[str],
+    ) -> Dict[str, str]:
+        guidance, _sources = self._build_subtask_guidance_with_sources(subtasks, contract_excerpt)
+        return guidance
+
+    def _build_subtask_guidance_with_sources(
+        self,
+        subtasks: List[Dict[str, Any]],
+        contract_excerpt: Optional[str],
+    ) -> Tuple[Dict[str, str], Dict[str, str]]:
+        if not subtasks:
+            return {}, {}
+        guidance: Dict[str, str] = {}
+        sources: Dict[str, str] = {}
+        excerpt = self._trim_text(contract_excerpt, 1800)
+        highlights = self._extract_contract_highlights(excerpt) if excerpt else []
+        highlight_text = "; ".join(highlights)
+
+        for subtask in subtasks:
+            module_id = str(subtask.get("module_id") or "").strip()
+            module_name = str(subtask.get("module_name") or "").strip()
+            focus_area = str(subtask.get("focus_area") or "").strip()
+            template, template_name = self._load_subtask_prompt_template(module_id, focus_area)
+            if not template:
+                continue
+            tasks = subtask.get("tasks") or []
+            task_titles = [t.get("title") for t in tasks if t.get("title")]
+            context = {
+                "MODULE_NAME": module_name,
+                "MODULE_ID": module_id,
+                "FOCUS_AREA": focus_area,
+                "FOCUS_LABEL": subtask.get("focus_label") or "",
+                "TASK_TITLES": ", ".join(task_titles),
+                "CONTRACT_HIGHLIGHTS": highlight_text,
+            }
+            key = module_id or module_name or f"module_{len(guidance) + 1}"
+            guidance[key] = self._render_prompt_template(template, context)
+            if template_name:
+                sources[key] = template_name
+        return guidance, sources
+
+    def _load_subtask_prompt_template(self, module_id: str, focus_area: str) -> Tuple[Optional[str], Optional[str]]:
+        candidates: List[str] = []
+        if module_id:
+            candidates.extend([
+                f"{module_id}.txt",
+                f"subtask_{module_id}.txt",
+            ])
+        if focus_area:
+            candidates.extend([
+                f"{focus_area}.txt",
+                f"subtask_{focus_area}.txt",
+            ])
+        for name in candidates:
+            path = SUBTASK_PROMPTS_DIR / name
+            if not path.exists():
+                continue
+            try:
+                return path.read_text(encoding="utf-8"), name
+            except Exception:
+                continue
+        return None, None
+
+    def _render_prompt_template(self, template: str, context: Dict[str, Any]) -> str:
+        rendered = template or ""
+        for key, value in (context or {}).items():
+            placeholder = f"[{key}]"
+            rendered = rendered.replace(placeholder, str(value or ""))
+        return rendered
+
+    def _split_prompt_template(self, template: str) -> Tuple[Optional[str], str]:
+        if not template:
+            return None, ""
+        normalized = template.strip()
+        parts = re.split(r"\nUSER\n", normalized, flags=re.IGNORECASE)
+        if len(parts) == 2:
+            system_block = re.sub(r"^SYSTEM\n?", "", parts[0].strip(), flags=re.IGNORECASE)
+            user_block = parts[1].strip()
+            return system_block or None, user_block
+        return None, normalized
 
     def _trim_text(self, text: Any, max_chars: int) -> str:
         if text is None:
@@ -486,6 +706,8 @@ class AIService:
                 "period_of_performance": self._trim_text(subtask.get("period_of_performance"), 220),
                 "reasonableness": self._trim_text(subtask.get("reasonableness"), 220),
                 "total_hours": subtask.get("total_hours"),
+                "security_protocols": self._trim_text(subtask.get("security_protocols"), 220),
+                "compliance_frameworks": self._trim_text(subtask.get("compliance_frameworks"), 220),
                 "key_tasks": task_titles[:5],
                 "customer_context": self._trim_text(subtask.get("customer_context"), 400),
             })
@@ -585,7 +807,6 @@ class AIService:
         prefix = {
             "assumptions": "Assume",
             "risks": "Key risk",
-            "recommendations": "Recommendation",
             "next_steps": "Next step",
         }.get(section)
         items: List[str] = []
@@ -640,7 +861,7 @@ class AIService:
         if labor_cost is not None:
             cost_parts.append(f"labor ${labor_cost:,.2f}")
         if risk_reserve is not None:
-            cost_parts.append(f"risk reserve ${risk_reserve:,.2f}")
+            cost_parts.append(f"management reserve ${risk_reserve:,.2f}")
         if overhead_cost is not None:
             cost_parts.append(f"overhead ${overhead_cost:,.2f}")
         if cost_parts:
@@ -861,10 +1082,12 @@ class AIService:
         sections: List[str],
         tone: str,
     ) -> Dict[str, str]:
-        secs = sections or ["executive_summary", "assumptions", "risks", "recommendations"]
+        secs = sections or ["executive_summary", "assumptions", "risks"]
         summary = context.get("summary", {})
         modules = context.get("modules", [])
         roles = context.get("roles", [])
+        project_info = context.get("project_info", {}) or {}
+        roi_summary = context.get("roi_summary") or {}
 
         total_hours = summary.get("total_labor_hours") or 0
         total_cost = summary.get("total_cost") or 0
@@ -876,37 +1099,83 @@ class AIService:
 
         module_names = ", ".join([m.get("name") or "module" for m in modules]) or "selected modules"
         top_roles = ", ".join([r.get("role") or "role" for r in roles[:3]])
+        project_bits = []
+        if project_info.get("project_name"):
+            project_bits.append(str(project_info.get("project_name")))
+        if project_info.get("fy"):
+            project_bits.append(f"FY {project_info.get('fy')}")
+        if project_info.get("site_location"):
+            project_bits.append(str(project_info.get("site_location")))
+        if project_info.get("government_poc"):
+            project_bits.append(f"POC: {project_info.get('government_poc')}")
+        project_intro = ", ".join(project_bits)
+        security_protocols = project_info.get("security_protocols")
+        compliance_frameworks = project_info.get("compliance_frameworks")
+        additional_assumptions = project_info.get("additional_assumptions")
 
         text: Dict[str, str] = {}
 
         if "executive_summary" in secs:
-            text["executive_summary"] = (
+            sentences = []
+            if project_intro:
+                sentences.append(f"Project overview: {project_intro}.")
+            sentences.append(
                 f"This estimate covers {mod_count} {('module' if mod_count==1 else 'modules')} "
-                f"with a {complexity} complexity profile. The projected effort is approximately "
-                f"{total_hours:.0f} labor hours, with a total cost of ${total_cost:,.2f}. "
-                f"The figure includes a risk reserve of ${risk_reserve:,.2f} and overhead of ${overhead_cost:,.2f}. "
-                f"The effective blended rate is about ${eff_rate:,.2f} per hour."
+                f"with a {complexity} complexity profile and approximately {total_hours:.0f} labor hours, "
+                f"totaling ${total_cost:,.2f} (management reserve ${risk_reserve:,.2f}, overhead ${overhead_cost:,.2f})."
             )
+            sentences.append(f"Services include {module_names} aligned to the RFP scope.")
+            if security_protocols or compliance_frameworks:
+                sec_bits = []
+                if security_protocols:
+                    sec_bits.append(f"security protocols: {security_protocols}")
+                if compliance_frameworks:
+                    sec_bits.append(f"compliance frameworks: {compliance_frameworks}")
+                sentences.append("Security posture highlights " + "; ".join(sec_bits) + ".")
+            if roi_summary.get("net_benefit_low") is not None:
+                net_low = roi_summary.get("net_benefit_low")
+                net_high = roi_summary.get("net_benefit_high")
+                if net_high is not None:
+                    sentences.append(
+                        f"Projected 5-year net fiscal benefit ranges from ${net_low:,.2f} to ${net_high:,.2f}."
+                    )
+                else:
+                    sentences.append(f"Projected 5-year net fiscal benefit is ${net_low:,.2f}.")
+            sentences.append(f"The effective blended rate is about ${eff_rate:,.2f} per hour.")
+            text["executive_summary"] = " ".join(sentences[:5])
 
         if "assumptions" in secs:
-            text["assumptions"] = (
-                f"Estimates assume a typical staffing mix ({top_roles or 'multi-disciplinary team'}) and standard project cadence. "
-                f"Module sequencing accounts for prerequisites and reasonable dependency alignment. "
-                f"Stakeholder access and decision cadence are consistent with the proposed schedule."
-            )
+            assumption_sentences = [
+                f"Estimates assume a typical staffing mix ({top_roles or 'multi-disciplinary team'}) and standard project cadence.",
+                "Module sequencing accounts for prerequisites, dependency alignment, and access to required data and stakeholders.",
+                "Security reviews, compliance checkpoints, and approvals are aligned with the proposed schedule.",
+            ]
+            focus_areas = {str(m.get("focus_area") or "").upper() for m in modules if isinstance(m, dict)}
+            focus_map = {
+                "ITM": "Assumes onsite access for infrastructure surveys, rack elevations, and coordinated change windows.",
+                "CM": "Assumes cloud tenant access, network connectivity approvals, and agreed migration waves.",
+                "SA": "Assumes timely access to security artifacts, audit evidence, and authorization stakeholders.",
+                "DA": "Assumes data owners provide source access and agree to data quality validation thresholds.",
+                "DT": "Assumes stakeholder workshops and process owners are available for discovery and change management.",
+            }
+            for key in ("ITM", "CM", "SA", "DA", "DT"):
+                if key in focus_areas:
+                    assumption_sentences.append(focus_map[key])
+            additional_sentence = None
+            if additional_assumptions:
+                trimmed = self._trim_text(additional_assumptions, 240)
+                additional_sentence = f"Additional assumptions provided: {trimmed}."
+                assumption_sentences.append(additional_sentence)
+            final_assumptions = assumption_sentences[:4]
+            if additional_sentence and all(additional_sentence not in s for s in final_assumptions):
+                final_assumptions[-1] = additional_sentence
+            text["assumptions"] = " ".join(final_assumptions)
 
         if "risks" in secs:
             text["risks"] = (
                 f"Primary risks include scope growth and integration unknowns that could extend effort beyond the baseline {total_hours:.0f} hours. "
                 f"Multi-module dependencies ({module_names}) may impact sequencing and throughput. "
-                f"The allocated risk reserve of ${risk_reserve:,.2f} is intended to buffer typical variance."
-            )
-
-        if "recommendations" in secs:
-            text["recommendations"] = (
-                "Begin with a short planning sprint to refine scope and confirm interfaces. "
-                "Sequence delivery to realize early value while de-risking complex integrations. "
-                "Review staffing against milestones and adjust to maintain schedule confidence."
+                f"The allocated management reserve of ${risk_reserve:,.2f} is intended to buffer typical variance."
             )
 
         return text

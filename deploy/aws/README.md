@@ -1,19 +1,97 @@
-# AWS deployment (static frontend + container backend)
+# AWS deployment (CDK + Lambda API primary)
+
+## Primary path (CDK)
+
+The recommended deployment path is now the CDK app in `infra/`:
+
+- **Backend**: API Gateway + Lambda (full FastAPI in Lambda)
+- **Persistence**: S3 + DynamoDB (reports, async jobs, proposals, versions, documents, contracts)
+- **Frontend**: S3 + CloudFront (HTTPS)
+
+Start here:
+
+```
+cd infra
+npm install
+npx cdk bootstrap
+npx cdk deploy EstimationBackendLambdaStack
+npx cdk deploy EstimationFrontendStack
+```
+
+Use the stack outputs to set:
+
+- Backend env: `COGNITO_REGION`, `COGNITO_USER_POOL_ID`, `COGNITO_CLIENT_ID`
+- Frontend build env: `VITE_API_URL=/`, `VITE_COGNITO_REGION`, `VITE_COGNITO_CLIENT_ID`, `VITE_DISABLE_AUTH=false`
+
+If you are using GitHub Actions for CDK deploys, these optional GitHub
+Environment variables control backend timeout behavior:
+
+- `BACKEND_LAMBDA_TIMEOUT_SECONDS` (Lambda timeout, default `60`)
+- `BACKEND_LAMBDA_API_TIMEOUT_SECONDS` (API Gateway integration timeout, default `29`)
+
+To sync backend table names into GitHub Environment variables (so deploys keep
+reusing the same Dynamo tables), run:
+
+```powershell
+python scripts/sync_backend_table_vars.py --repo noahspahn/excel-estimation-tool --env dev --region us-east-1
+```
+
+This sets:
+
+- `REPORT_JOBS_TABLE_NAME`
+- `PROPOSALS_TABLE_NAME`
+- `PROPOSAL_VERSIONS_TABLE_NAME`
+- `PROPOSAL_DOCUMENTS_TABLE_NAME`
+- `CONTRACTS_TABLE_NAME`
+- `CONTRACT_SYNC_TABLE_NAME`
+
+See `infra/README.md` for full details.
+
+### Remove unused legacy resources
+
+After CloudFront `/api/*` is pointing to API Gateway and the app is stable,
+remove App Runner/ECR resources you no longer use:
+
+```bash
+cd infra
+npx cdk destroy EstimationBackendStack -c legacyBackendEnabled=true --force
+```
+
+Then verify what still exists:
+
+```bash
+aws apprunner list-services --region <region>
+aws ecr describe-repositories --region <region>
+```
+
+Delete any leftover legacy App Runner service or ECR repo that is no longer
+referenced by deployments.
+
+To eliminate CORS permanently, deploy the frontend stack with the Lambda API
+origin so CloudFront proxies `/api/*`:
+
+```
+npx cdk deploy EstimationFrontendStack -c frontend='{"apiUrl":"https://<api-id>.execute-api.<region>.amazonaws.com/prod/"}'
+```
+
+---
+
+## Legacy scripts (still supported)
 
 ## Overview
 
 - **Backend**: FastAPI app (`backend/app/main.py`) deployed as a Docker container on **AWS App Runner**, pulling from ECR.
 - **Frontend**: Vite/React app (`frontend/`) built to static assets and served from an **S3 static website endpoint**.
-- **Auth**: **Amazon Cognito User Pool** for email/password users. The frontend talks directly to Cognito’s `InitiateAuth`, `SignUp`, and `ConfirmSignUp` APIs. The backend verifies Cognito JWTs via JWKS.
+- **Auth**: CDK path provisions Cognito by default. Legacy scripts can still use `VITE_DISABLE_AUTH=true`, but auth is now intended to be enabled.
 - Goal: simple, low-ops deployment you can drive from your dev machine with minimal manual AWS configuration.
 
 ## Prerequisites
 
 - AWS CLI v2 configured (`aws configure`) with access to:
-  - ECR, App Runner, S3, Cognito, IAM.
+  - ECR, App Runner, S3, IAM (Cognito optional).
 - Docker installed and logged in locally (for building/pushing backend images).
 - Node 18+ for building the frontend.
-- A Cognito User Pool with:
+- (Optional for later) A Cognito User Pool with:
   - An App Client (`VITE_COGNITO_CLIENT_ID` / `COGNITO_CLIENT_ID`).
   - Email as sign-in alias.
   - Auth flows enabled: `ALLOW_USER_PASSWORD_AUTH`, `ALLOW_REFRESH_TOKEN_AUTH`.
@@ -31,22 +109,35 @@ The “live” setup looks like this:
     - `DATABASE_URL` (or SQLite default).
     - `SECRET_KEY`, `ALGORITHM`, `ACCESS_TOKEN_EXPIRE_MINUTES`.
     - `OPENAI_API_KEY` (optional).
+    - `OPENAI_REQUEST_TIMEOUT_SECONDS` (optional, recommended `8` to avoid API 504 on long AI calls).
     - `ALLOWED_ORIGINS` for CORS (`http://localhost:3000,http://localhost:3001` etc).
-    - `COGNITO_REGION`, `COGNITO_USER_POOL_ID`, `COGNITO_CLIENT_ID`.
-  - `get_current_user()` in `backend/app/main.py` verifies Cognito JWTs by fetching the pool’s JWKS and checking `iss`, `aud/client_id`, `exp`, and the `email` claim.
+    - `COGNITO_REGION`, `COGNITO_USER_POOL_ID`, `COGNITO_CLIENT_ID` (only needed when auth is enabled).
+    - `COGNITO_JWKS_TIMEOUT_SECONDS` (optional, default `5`).
+    - `REPORT_JOB_WORKERS` (optional, default `2` for non-Lambda background execution).
+    - `REPORT_JOB_SELF_INVOKE` (optional, default `true`; Lambda async jobs self-invoke to avoid API timeout).
+    - `REPORT_JOBS_TABLE_NAME` (required in Lambda if you want persistent async report/subtask jobs; CDK Lambda stack can auto-create this when omitted).
+    - `PROPOSALS_TABLE_NAME`, `PROPOSAL_VERSIONS_TABLE_NAME`, `PROPOSAL_DOCUMENTS_TABLE_NAME` (proposal/version/document persistence).
+    - `CONTRACTS_TABLE_NAME`, `CONTRACT_SYNC_TABLE_NAME` (contracts + SAM sync state persistence).
+    - `DATABASE_URL` is now optional for core proposal/contract/report workflows; keep only if you still rely on SQL fallback paths.
+    - Do not set Lambda runtime-reserved keys like `AWS_REGION` in backend-next Lambda env; CDK now strips these automatically.
+  - `get_current_user()` in `backend/app/main.py` verifies Cognito JWTs when auth is enabled.
+  - Long-running operations now support async job endpoints:
+    - `POST /api/v1/report/jobs` + `GET /api/v1/report/jobs/{job_id}`
+    - `POST /api/v1/subtasks/preview/jobs` + `GET /api/v1/subtasks/preview/jobs/{job_id}`
 
 - **Frontend app**
 
   - Built with Vite from `frontend/` into `frontend/dist`.
-  - Synced to an S3 bucket (e.g. `meshai-estimation-frontend-1`) using `aws s3 sync` and served via the S3 website endpoint:  
-    `http://meshai-estimation-frontend-1.s3-website-us-east-1.amazonaws.com/`.
+  - Synced to an S3 bucket (e.g. `meshai-estimation-frontend-1`) using `aws s3 sync` and served via CloudFront.
+  - With the CloudFront `/api/*` proxy enabled, the frontend can call `/api/...` on the same origin (no CORS).
   - At build time, the frontend reads these Vite env vars:
-    - `VITE_API_URL` → points at the App Runner backend (e.g. `https://cqdcypvz3e.us-east-1.awsapprunner.com/`).
+    - `VITE_API_URL` -> set to `/` for same-origin API calls via CloudFront.
     - `VITE_EXCEL_API_ENABLED` → enables Excel-related UI.
+    - `VITE_APP_ENV` -> `dev` or `stage` shows a badge in the top nav (prod stays hidden).
     - `VITE_COGNITO_REGION` / `VITE_COGNITO_CLIENT_ID` → used to call Cognito’s JSON APIs.
-  - On load, the app shows a **sign-in / sign-up gate**. Until a user is authenticated, nothing else is rendered.
+  - On load, the app shows a **sign-in / sign-up gate** only when `VITE_DISABLE_AUTH=false`.
 
-- **Cognito auth (frontend behavior)**
+- **Cognito auth (optional)**
   - Sign-in:
     - User enters email + password on the login screen.
     - Frontend POSTs to `https://cognito-idp.<region>.amazonaws.com/` with:
@@ -74,7 +165,7 @@ What it does (when run from repo root):
    - Looks up the existing App Runner service by name (default: `estimation-backend-AR`) and prints its Service URL (it does **not** create or modify the App Runner service; that is assumed already configured).
 
 2. **Frontend**
-   - Builds the React app from `frontend/` with `VITE_API_URL` set to the App Runner URL and `VITE_EXCEL_API_ENABLED=true`.
+   - Builds the React app from `frontend/` with `VITE_API_URL` set to `/` (CloudFront same-origin) and `VITE_EXCEL_API_ENABLED=true`.
    - Uses `npm ci` if `package-lock.json` is present, otherwise `npm install`.
    - Runs `npm run build` to produce `frontend/dist`.
    - Syncs `frontend/dist` to the S3 bucket you specify (default: `meshai-estimation-frontend-1`) via `aws s3 sync ... --delete`.
@@ -114,8 +205,8 @@ service names, and optional frontend Vite variables (no secrets should go here).
 
 Notes:
 - Each environment should have its own App Runner service + S3 bucket.
-- If you need different Cognito pools per environment, set `VITE_COGNITO_REGION`
-  and `VITE_COGNITO_CLIENT_ID` in the config file for each environment.
+- If you need different Cognito pools per environment, set `VITE_COGNITO_REGION` and `VITE_COGNITO_CLIENT_ID` in the config file for each environment.
+- Set `VITE_APP_ENV` to `dev` or `stage` to show the environment badge.
 - `deploy-simple.ps1` respects any `VITE_*` variables already set in your shell,
   so you can also export them directly instead of using the config.
 
@@ -140,8 +231,11 @@ If you prefer to run the steps yourself:
    - From `frontend/`:
 
      ```powershell
-     $env:VITE_API_URL = "https://<your-apprunner-url>/"
+     $env:VITE_API_URL = "/"
      $env:VITE_EXCEL_API_ENABLED = "true"
+     $env:VITE_DISABLE_AUTH = "false"
+     $env:VITE_APP_ENV = "dev"
+     # Cognito vars only needed when auth is enabled
      $env:VITE_COGNITO_REGION = "us-east-1"
      $env:VITE_COGNITO_CLIENT_ID = "<your-app-client-id>"
      npm install

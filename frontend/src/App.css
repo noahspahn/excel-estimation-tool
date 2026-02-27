@@ -425,9 +425,25 @@
 
 .top-nav {
   display: flex;
-  gap: 8px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
   flex-wrap: wrap;
   margin-bottom: 12px;
+}
+
+.top-nav__links {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  align-items: center;
+}
+
+.top-nav__meta {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
 }
 
 .top-nav__link {
@@ -453,6 +469,67 @@
   border-color: #667eea;
   color: #2b2f55;
   box-shadow: 0 4px 12px rgba(102, 126, 234, 0.2);
+}
+
+.env-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 4px 10px;
+  border-radius: 999px;
+  font-size: 0.75rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  border: 1px solid transparent;
+}
+
+.env-badge--dev {
+  background: #fff3cd;
+  border-color: #f1c27d;
+  color: #8a5b00;
+}
+
+.env-badge--stage {
+  background: #e0f2fe;
+  border-color: #38bdf8;
+  color: #0c4a6e;
+}
+
+.app-version {
+  display: inline-flex;
+  align-items: center;
+  padding: 4px 10px;
+  border-radius: 999px;
+  font-size: 0.75rem;
+  color: #555;
+  background: #fff;
+  border: 1px solid #eee;
+}
+
+.backend-target {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 8px;
+  border-radius: 999px;
+  background: #fff;
+  border: 1px solid #eee;
+}
+
+.backend-target__label {
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: #666;
+}
+
+.backend-target__select {
+  border: 1px solid #ddd;
+  border-radius: 999px;
+  font-size: 0.78rem;
+  padding: 2px 8px;
+  background: #fff;
+  color: #333;
 }
 
 .stat-grid {

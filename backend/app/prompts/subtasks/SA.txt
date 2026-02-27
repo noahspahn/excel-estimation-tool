@@ -1,0 +1,7 @@
+Guidance for [MODULE_NAME] ([FOCUS_AREA]):
+- Emphasize security assessments, control validation, compliance mapping, and audit readiness.
+- Reference RMF/ATO artifacts, POA&M tracking, continuous monitoring, and incident response coordination when relevant.
+- If security protocols or compliance frameworks are provided, weave them into work_scope and customer_context.
+- Use the contract excerpt for specific context when available.
+Task roles: [TASK_TITLES]
+Relevant contract highlights: [CONTRACT_HIGHLIGHTS]

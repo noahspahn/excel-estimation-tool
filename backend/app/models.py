@@ -70,7 +70,7 @@ class EstimationRules:
     min_project_hours: float = 40.0
     max_single_module_hours: float = 2000.0
     utilization_rate: float = 0.85
-    risk_reserve_percentage: float = 0.15
+    risk_reserve_percentage: float = 0.10
     overhead_multiplier: float = 1.2
     prime_contractor_margin: float = 0.15
 
@@ -88,6 +88,9 @@ class EstimationInput:
     project_name: Optional[str] = None
     government_poc: Optional[str] = None
     account_manager: Optional[str] = None
+    account_manager_title: Optional[str] = None
+    account_manager_phone: Optional[str] = None
+    account_manager_direct_email: Optional[str] = None
     service_delivery_mgr: Optional[str] = None
     service_delivery_exec: Optional[str] = None
     site_location: Optional[str] = None
@@ -96,8 +99,31 @@ class EstimationInput:
     rap_number: Optional[str] = None
     psi_code: Optional[str] = None
     additional_comments: Optional[str] = None
+    security_protocols: Optional[str] = None
+    compliance_frameworks: Optional[str] = None
+    additional_assumptions: Optional[str] = None
+    scope_server_virtualization: Optional[str] = None
+    scope_storage_upgrade: Optional[str] = None
+    scope_backup_dr: Optional[str] = None
+    scope_security_infrastructure: Optional[str] = None
+    hardware_bom_items: List[Dict[str, Any]] = field(default_factory=list)
+    software_licensing_items: List[Dict[str, Any]] = field(default_factory=list)
+    post_warranty_support_items: List[Dict[str, Any]] = field(default_factory=list)
+    company_history: Optional[str] = None
+    company_mission: Optional[str] = None
+    company_core_competencies: Optional[str] = None
+    company_certifications: Optional[str] = None
+    company_org_structure: Optional[str] = None
+    reference_clients: List[Dict[str, Any]] = field(default_factory=list)
+    support_sla_response: Optional[str] = None
+    support_sla_resolution: Optional[str] = None
+    support_escalation: Optional[str] = None
+    support_warranty_coverage: Optional[str] = None
     sites: int = 1
     overtime: bool = False
+    period_of_performance: Optional[str] = None
+    estimating_method: str = "engineering"
+    historical_estimates: List[Dict[str, Any]] = field(default_factory=list)
     # Other costs and fixed-price items (simple shape: {description, price})
     odc_items: List[Dict[str, Any]] = field(default_factory=list)
     fixed_price_items: List[Dict[str, Any]] = field(default_factory=list)

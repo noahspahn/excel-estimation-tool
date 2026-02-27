@@ -1,14 +1,16 @@
-from fastapi import FastAPI, HTTPException, Depends, Header, UploadFile, File
+from fastapi import FastAPI, HTTPException, Depends, Header, UploadFile, File, Request
 from fastapi.responses import StreamingResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import List, Dict, Optional, Any
 from dataclasses import asdict
+from concurrent.futures import ThreadPoolExecutor
 import uvicorn
 import os
 import json
 import time
 import threading
+import logging
 import urllib.request
 from collections import Counter
 from pathlib import Path
@@ -16,7 +18,6 @@ from dotenv import load_dotenv, find_dotenv
 from jose import jwt, JWTError, jwk
 from jose.utils import base64url_decode
 from datetime import datetime, timedelta, timezone
-from sqlalchemy import or_, func
 
 # Load environment variables from a local .env if present
 # 1) Try auto-discovery up the directory tree
@@ -30,14 +31,24 @@ _backend_env = Path(__file__).resolve().parents[1] / ".env"
 if _backend_env.exists():
     load_dotenv(_backend_env.as_posix(), override=False)
 
+PROMPTS_DIR = Path(os.getenv("PROMPTS_DIR", Path(__file__).resolve().parent / "prompts"))
+
 # Import our services
 from .services.calculation_service import CalculationService
 from .services.data_service import DataService
 from .services.web_scraper_service import WebScraperService, ScrapeRequest
 from .services.storage_service import StorageService
+from .services.report_registry_service import ReportRegistryService
+from .services.report_job_service import ReportJobService
+from .services.proposal_store_service import ProposalStoreService
+from .services.contract_store_service import ContractStoreService
 from .models import ComplexityLevel, EstimationInput
 from .db import engine, get_session
-from .db_models import Base, Proposal, ProposalVersion, ProposalDocument, ContractOpportunity, ContractSyncState
+from .db_models import (
+    Base,
+    Proposal,
+    ProposalDocument,
+)
 from .services.sam_contract_service import (
     fetch_sam_opportunities,
     extract_sam_results,
@@ -45,6 +56,7 @@ from .services.sam_contract_service import (
 )
 
 app = FastAPI(title="Estimation Tool API", version="2.0.0")
+logger = logging.getLogger("estimation.api")
 
 # Enable CORS
 _default_origins = "http://localhost:3000,http://localhost:3001,http://127.0.0.1:3000,http://127.0.0.1:3001"
@@ -57,14 +69,37 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=[
+        "X-Report-Location",
+        "X-Report-Document-Id",
+        "X-Report-Id",
+        "X-Report-Status",
+    ],
 )
+
+
+@app.middleware("http")
+async def add_process_time_header(request: Request, call_next):
+    started = time.perf_counter()
+    response = await call_next(request)
+    elapsed_ms = (time.perf_counter() - started) * 1000.0
+    response.headers["X-Process-Time-Ms"] = f"{elapsed_ms:.2f}"
+    return response
 
 # Initialize services
 calculation_service = CalculationService()
 data_service = DataService()
 web_scraper_service = WebScraperService()
 storage_service = StorageService()
+report_registry_service = ReportRegistryService()
+report_job_service = ReportJobService()
+proposal_store_service = ProposalStoreService()
+contract_store_service = ContractStoreService()
 # Note: ExportService (and ReportLab) are imported lazily in the report endpoint
+REPORT_JOB_WORKERS = max(1, int(os.getenv("REPORT_JOB_WORKERS", "2")))
+REPORT_JOB_SELF_INVOKE = os.getenv("REPORT_JOB_SELF_INVOKE", "true").lower() in ("1", "true", "yes")
+REPORT_JOB_ALLOWED_KINDS = {"report", "subtasks_preview"}
+_report_job_executor = ThreadPoolExecutor(max_workers=REPORT_JOB_WORKERS)
 
 CONTRACT_STATUSES = {"new", "in_progress", "submitted", "awarded", "lost"}
 
@@ -85,36 +120,37 @@ SAM_SYNC_STARTED = False
 # -----------------------------
 # Simple auth / identity helper (must be defined before endpoints use it)
 # -----------------------------
+AUTH_REQUIRED = os.getenv("AUTH_REQUIRED", "true").lower() in ("1", "true", "yes")
+
+
 def get_current_user(authorization: str | None = Header(default=None)) -> str:
     """
     Resolve the current user from an Authorization header if present.
 
-    For now, API access does not require a token. If no valid bearer
-    token is supplied, fall back to a default dev user identity so
-    that endpoints can still operate without authentication.
+    If AUTH_REQUIRED is enabled, a valid bearer token is mandatory.
+    Otherwise, fall back to a default dev user identity when no token
+    (or an invalid token) is supplied.
     """
     default_user = os.getenv("DEV_DEFAULT_USER_EMAIL", "anonymous@example.com")
 
-    # No auth required for now: if there is no bearer token, just return the
-    # default dev user identity.
     if not authorization or not authorization.lower().startswith("bearer "):
+        if AUTH_REQUIRED:
+            raise HTTPException(status_code=401, detail="Authorization required")
         return default_user
 
     token = authorization.split(" ", 1)[1].strip()
     try:
         return _verify_cognito_token(token)
+    except HTTPException:
+        if AUTH_REQUIRED:
+            raise
+        return default_user
     except Exception:
-        # For any verification error (network, config, invalid token, etc.),
-        # fall back to the default user instead of failing the request.
+        logger.exception("Token verification failed")
+        if AUTH_REQUIRED:
+            raise HTTPException(status_code=401, detail="Invalid or expired token")
         return default_user
 
-
-def _get_owned_proposal(session, proposal_id: str, owner_email: str) -> Optional[Proposal]:
-    return (
-        session.query(Proposal)
-        .filter(Proposal.id == proposal_id, Proposal.owner_email == owner_email)
-        .one_or_none()
-    )
 
 # Ensure DB tables exist (lightweight, safe on startup)
 try:
@@ -127,13 +163,22 @@ except Exception:
 def read_root():
     return {"message": "Estimation Tool API v2.0 is running", "status": "ready"}
 
-@app.get("/health")
-def health_check():
+def _health_payload():
     return {
         "status": "healthy",
         "version": "2.0.0",
         "ai_configured": bool(os.getenv("OPENAI_API_KEY")),
     }
+
+
+@app.get("/health")
+def health_check():
+    return _health_payload()
+
+
+@app.get("/api/health")
+def api_health_check():
+    return _health_payload()
 
 @app.get("/api/v1/modules")
 def get_modules():
@@ -149,6 +194,13 @@ def get_modules():
         }
         for module in modules.values()
     ]
+
+
+@app.get("/api/v1/auth/me")
+def get_current_identity(current_user: str = Depends(get_current_user)):
+    """Lightweight auth validation endpoint for frontend token checks."""
+    return {"email": current_user}
+
 
 @app.get("/api/v1/roles")
 def get_roles():
@@ -203,6 +255,9 @@ class EstimationRequest(BaseModel):
     project_name: Optional[str] = None
     government_poc: Optional[str] = None
     account_manager: Optional[str] = None
+    account_manager_title: Optional[str] = None
+    account_manager_phone: Optional[str] = None
+    account_manager_direct_email: Optional[str] = None
     service_delivery_mgr: Optional[str] = None
     service_delivery_exec: Optional[str] = None
     site_location: Optional[str] = None
@@ -211,9 +266,42 @@ class EstimationRequest(BaseModel):
     rap_number: Optional[str] = None
     psi_code: Optional[str] = None
     additional_comments: Optional[str] = None
+    security_protocols: Optional[str] = None
+    compliance_frameworks: Optional[str] = None
+    additional_assumptions: Optional[str] = None
+    scope_server_virtualization: Optional[str] = None
+    scope_storage_upgrade: Optional[str] = None
+    scope_backup_dr: Optional[str] = None
+    scope_security_infrastructure: Optional[str] = None
+    hardware_bom_items: Optional[List[Dict[str, Any]]] = None
+    software_licensing_items: Optional[List[Dict[str, Any]]] = None
+    post_warranty_support_items: Optional[List[Dict[str, Any]]] = None
+    company_history: Optional[str] = None
+    company_mission: Optional[str] = None
+    company_core_competencies: Optional[str] = None
+    company_certifications: Optional[str] = None
+    company_org_structure: Optional[str] = None
+    reference_clients: Optional[List[Dict[str, Any]]] = None
+    support_sla_response: Optional[str] = None
+    support_sla_resolution: Optional[str] = None
+    support_escalation: Optional[str] = None
+    support_warranty_coverage: Optional[str] = None
     # Site and schedule
     sites: int = 1
     overtime: bool = False
+    tool_version: Optional[str] = None
+    period_of_performance: Optional[str] = None
+    estimating_method: Optional[str] = "engineering"
+    historical_estimates: Optional[List[Dict[str, Any]]] = None
+    raci_matrix: Optional[List[Dict[str, str]]] = None
+    roadmap_phases: Optional[List[Dict[str, str]]] = None
+    roi_capex_event_cost_low: Optional[float] = None
+    roi_capex_event_cost_high: Optional[float] = None
+    roi_capex_event_interval_months: Optional[float] = None
+    roi_downtime_cost_per_hour: Optional[float] = None
+    roi_current_availability: Optional[float] = None
+    roi_target_availability: Optional[float] = None
+    roi_legacy_support_savings_annual: Optional[float] = None
     # Other costs
     odc_items: List[Dict[str, Any]] = []
     fixed_price_items: List[Dict[str, Any]] = []
@@ -255,6 +343,9 @@ class ReportRequest(EstimationRequest):
     # Optional persistence hooks
     proposal_id: Optional[str] = None
     proposal_version: Optional[int] = None
+    save_report: bool = True
+    overwrite_report_id: Optional[str] = None
+    report_label: Optional[str] = None
     # AI subtasks toggle
     use_ai_subtasks: bool = True
 
@@ -281,6 +372,239 @@ class ScrapeUrlResponse(BaseModel):
     fetched_at: datetime
     truncated: bool = False
     error: Optional[str] = None
+
+
+class AssumptionsPromptRequest(BaseModel):
+    scraped_text: str
+    project_name: Optional[str] = None
+    site_location: Optional[str] = None
+    government_poc: Optional[str] = None
+    fy: Optional[str] = None
+    selected_modules: Optional[List[str]] = None
+
+
+def _build_scrape_prompt_context(req: AssumptionsPromptRequest, scraped_text: str) -> Dict[str, str]:
+    modules = req.selected_modules or []
+    return {
+        "PROJECT_NAME": req.project_name or "",
+        "SITE_LOCATION": req.site_location or "",
+        "GOV_POC": req.government_poc or "",
+        "FY": req.fy or "",
+        "SELECTED_MODULES": ", ".join(modules),
+        "SCRAPED_TEXT": scraped_text,
+    }
+
+
+def _safe_float(value: Any) -> Optional[float]:
+    try:
+        if value is None or value == "":
+            return None
+        return float(value)
+    except Exception:
+        return None
+
+
+def _compute_roi_summary(
+    roi_inputs: Dict[str, Any],
+    horizon_years: int,
+    total_cost: float,
+) -> Optional[Dict[str, Any]]:
+    capex_low = _safe_float(roi_inputs.get("capex_event_cost_low"))
+    capex_high = _safe_float(roi_inputs.get("capex_event_cost_high"))
+    interval_months = _safe_float(roi_inputs.get("capex_event_interval_months"))
+    downtime_cost = _safe_float(roi_inputs.get("downtime_cost_per_hour"))
+    current_avail = _safe_float(roi_inputs.get("current_availability"))
+    target_avail = _safe_float(roi_inputs.get("target_availability"))
+    legacy_annual = _safe_float(roi_inputs.get("legacy_support_savings_annual"))
+
+    has_inputs = any(
+        v is not None
+        for v in [capex_low, capex_high, interval_months, downtime_cost, current_avail, target_avail, legacy_annual]
+    )
+    if not has_inputs:
+        return None
+
+    capex_events = None
+    if interval_months and interval_months > 0:
+        capex_events = (horizon_years * 12) / interval_months
+
+    capex_savings_low = capex_low * capex_events if capex_low is not None and capex_events else None
+    capex_savings_high = capex_high * capex_events if capex_high is not None and capex_events else None
+    if capex_savings_low is None and capex_savings_high is None and capex_events and capex_low is not None:
+        capex_savings_low = capex_low * capex_events
+
+    downtime_savings = None
+    if downtime_cost is not None and current_avail is not None and target_avail is not None:
+        hours_per_year = 24 * 365
+        current_down = hours_per_year * max(0.0, 1 - (current_avail / 100))
+        target_down = hours_per_year * max(0.0, 1 - (target_avail / 100))
+        delta = max(0.0, current_down - target_down)
+        downtime_savings = delta * downtime_cost * horizon_years
+
+    legacy_savings = legacy_annual * horizon_years if legacy_annual is not None else None
+
+    total_savings_low = 0.0
+    total_savings_high = 0.0
+    has_range = capex_savings_low is not None and capex_savings_high is not None
+
+    for val in [capex_savings_low, downtime_savings, legacy_savings]:
+        if val is not None:
+            total_savings_low += val
+    for val in [capex_savings_high or capex_savings_low, downtime_savings, legacy_savings]:
+        if val is not None:
+            total_savings_high += val
+
+    net_benefit_low = total_savings_low - total_cost
+    net_benefit_high = total_savings_high - total_cost
+
+    return {
+        "horizon_years": horizon_years,
+        "capex_events": capex_events,
+        "capex_savings_low": capex_savings_low,
+        "capex_savings_high": capex_savings_high if has_range else None,
+        "downtime_savings": downtime_savings,
+        "legacy_savings": legacy_savings,
+        "total_savings_low": total_savings_low,
+        "total_savings_high": total_savings_high if has_range else None,
+        "net_benefit_low": net_benefit_low,
+        "net_benefit_high": net_benefit_high if has_range else None,
+        "current_availability": current_avail,
+        "target_availability": target_avail,
+        "downtime_cost_per_hour": downtime_cost,
+        "capex_interval_months": interval_months,
+    }
+
+
+def _extract_roi_inputs_from_estimation_input(estimation_input: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "capex_event_cost_low": estimation_input.get("roi_capex_event_cost_low"),
+        "capex_event_cost_high": estimation_input.get("roi_capex_event_cost_high"),
+        "capex_event_interval_months": estimation_input.get("roi_capex_event_interval_months"),
+        "downtime_cost_per_hour": estimation_input.get("roi_downtime_cost_per_hour"),
+        "current_availability": estimation_input.get("roi_current_availability"),
+        "target_availability": estimation_input.get("roi_target_availability"),
+        "legacy_support_savings_annual": estimation_input.get("roi_legacy_support_savings_annual"),
+    }
+
+
+def _non_empty_text(value: Any) -> bool:
+    if value is None:
+        return False
+    return bool(str(value).strip())
+
+
+def _build_project_info(req: Any) -> Dict[str, Any]:
+    return {
+        "project_name": req.project_name,
+        "government_poc": req.government_poc,
+        "account_manager": req.account_manager,
+        "account_manager_title": req.account_manager_title,
+        "account_manager_phone": req.account_manager_phone,
+        "account_manager_direct_email": req.account_manager_direct_email,
+        "service_delivery_mgr": req.service_delivery_mgr,
+        "service_delivery_exec": req.service_delivery_exec,
+        "site_location": req.site_location,
+        "email": req.email,
+        "fy": req.fy,
+        "rap_number": req.rap_number,
+        "psi_code": req.psi_code,
+        "additional_comments": req.additional_comments,
+        "security_protocols": req.security_protocols,
+        "compliance_frameworks": req.compliance_frameworks,
+        "additional_assumptions": req.additional_assumptions,
+    }
+
+
+def _build_scope_expansion(req: Any) -> Dict[str, Any]:
+    return {
+        "server_virtualization": req.scope_server_virtualization,
+        "storage_upgrade": req.scope_storage_upgrade,
+        "backup_disaster_recovery": req.scope_backup_dr,
+        "advanced_security": req.scope_security_infrastructure,
+    }
+
+
+def _build_financial_bom(req: Any) -> Dict[str, Any]:
+    return {
+        "hardware_bom_items": req.hardware_bom_items or [],
+        "software_licensing_items": req.software_licensing_items or [],
+        "post_warranty_support_items": req.post_warranty_support_items or [],
+    }
+
+
+def _build_company_profile(req: Any) -> Dict[str, Any]:
+    return {
+        "company_history": req.company_history,
+        "company_mission": req.company_mission,
+        "company_core_competencies": req.company_core_competencies,
+        "company_certifications": req.company_certifications,
+        "company_org_structure": req.company_org_structure,
+        "reference_clients": req.reference_clients or [],
+    }
+
+
+def _build_support_plan(req: Any) -> Dict[str, Any]:
+    return {
+        "sla_response": req.support_sla_response,
+        "sla_resolution": req.support_sla_resolution,
+        "escalation": req.support_escalation,
+        "warranty_coverage": req.support_warranty_coverage,
+    }
+
+
+def _build_compliance_warnings(req: Any) -> List[str]:
+    warnings: List[str] = []
+
+    if not _non_empty_text(req.account_manager):
+        warnings.append("Project Information is missing Account Manager name.")
+    if not _non_empty_text(req.account_manager_title):
+        warnings.append("Project Information is missing Account Manager title.")
+    if not _non_empty_text(req.account_manager_phone):
+        warnings.append("Project Information is missing Account Manager phone.")
+    if not _non_empty_text(req.account_manager_direct_email):
+        warnings.append("Project Information is missing Account Manager direct email.")
+    if not _non_empty_text(req.fy):
+        warnings.append("Project Information is missing Fiscal Year.")
+
+    scope_sections = _build_scope_expansion(req)
+    for key, label in [
+        ("server_virtualization", "Server Refresh and Virtualization"),
+        ("storage_upgrade", "Primary Storage Upgrade"),
+        ("backup_disaster_recovery", "Backup and Disaster Recovery"),
+        ("advanced_security", "Advanced Security Infrastructure"),
+    ]:
+        if not _non_empty_text(scope_sections.get(key)):
+            warnings.append(f"Scope expansion section is missing: {label}.")
+
+    if not (req.hardware_bom_items or []):
+        warnings.append("Financial BOM is missing hardware procurement line items.")
+    if not (req.software_licensing_items or []):
+        warnings.append("Financial BOM is missing software licensing line items.")
+    if not (req.post_warranty_support_items or []):
+        warnings.append("Financial BOM is missing post-warranty support line items.")
+
+    refs = req.reference_clients or []
+    valid_refs = [
+        r for r in refs
+        if _non_empty_text(r.get("organization"))
+        and _non_empty_text(r.get("contact_name"))
+        and _non_empty_text(r.get("title"))
+        and _non_empty_text(r.get("phone"))
+        and _non_empty_text(r.get("email"))
+    ]
+    if len(valid_refs) < 3:
+        warnings.append("Company Profile should include at least 3 complete reference clients with contact details.")
+
+    if not _non_empty_text(req.support_sla_response):
+        warnings.append("Maintenance and Support Plan is missing SLA response commitments.")
+    if not _non_empty_text(req.support_sla_resolution):
+        warnings.append("Maintenance and Support Plan is missing SLA resolution commitments.")
+    if not _non_empty_text(req.support_escalation):
+        warnings.append("Maintenance and Support Plan is missing escalation procedures.")
+    if not _non_empty_text(req.support_warranty_coverage):
+        warnings.append("Maintenance and Support Plan is missing warranty coverage details.")
+
+    return warnings
 
 
 class ContractCreate(BaseModel):
@@ -354,74 +678,103 @@ def _normalize_contract_status(raw: Optional[str]) -> Optional[str]:
     return val
 
 
-def _dt_to_str(value: Optional[datetime]) -> Optional[str]:
+def _dt_to_str(value: Optional[Any]) -> Optional[str]:
     if not value:
         return None
+    if isinstance(value, str):
+        raw = value.strip()
+        return raw or None
     if value.tzinfo:
         value = value.astimezone(timezone.utc).replace(tzinfo=None)
     return value.isoformat()
 
 
-def _contract_to_dict(contract: ContractOpportunity, include_raw: bool = False) -> Dict[str, Any]:
+def _str_to_dt(value: Optional[Any]) -> Optional[datetime]:
+    if not value:
+        return None
+    if isinstance(value, datetime):
+        if value.tzinfo:
+            return value.astimezone(timezone.utc).replace(tzinfo=None)
+        return value
+    raw = str(value).strip()
+    if not raw:
+        return None
+    try:
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        if parsed.tzinfo:
+            parsed = parsed.astimezone(timezone.utc).replace(tzinfo=None)
+        return parsed
+    except Exception:
+        return None
+
+
+def _contract_to_dict(contract: Any, include_raw: bool = False) -> Dict[str, Any]:
+    getter = contract.get if isinstance(contract, dict) else lambda k: getattr(contract, k, None)
     data = {
-        "id": contract.id,
-        "source": contract.source,
-        "source_id": contract.source_id,
-        "title": contract.title,
-        "agency": contract.agency,
-        "sub_agency": contract.sub_agency,
-        "office": contract.office,
-        "naics": contract.naics,
-        "psc": contract.psc,
-        "set_aside": contract.set_aside,
-        "posted_at": _dt_to_str(contract.posted_at),
-        "due_at": _dt_to_str(contract.due_at),
-        "value": contract.value,
-        "location": contract.location,
-        "url": contract.url,
-        "synopsis": contract.synopsis,
-        "contract_excerpt": contract.contract_excerpt,
-        "status": contract.status,
-        "proposal_id": contract.proposal_id,
-        "report_submitted_at": _dt_to_str(contract.report_submitted_at),
-        "decision_date": _dt_to_str(contract.decision_date),
-        "awardee_name": contract.awardee_name,
-        "award_value": contract.award_value,
-        "award_notes": contract.award_notes,
-        "win_factors": contract.win_factors,
-        "loss_factors": contract.loss_factors,
-        "analysis_notes": contract.analysis_notes,
-        "tags": contract.tags or [],
-        "last_seen_at": _dt_to_str(contract.last_seen_at),
-        "created_at": _dt_to_str(contract.created_at),
-        "updated_at": _dt_to_str(contract.updated_at),
+        "id": getter("contract_id") or getter("id"),
+        "source": getter("source"),
+        "source_id": getter("source_id"),
+        "title": getter("title"),
+        "agency": getter("agency"),
+        "sub_agency": getter("sub_agency"),
+        "office": getter("office"),
+        "naics": getter("naics"),
+        "psc": getter("psc"),
+        "set_aside": getter("set_aside"),
+        "posted_at": _dt_to_str(getter("posted_at")),
+        "due_at": _dt_to_str(getter("due_at")),
+        "value": getter("value"),
+        "location": getter("location"),
+        "url": getter("url"),
+        "synopsis": getter("synopsis"),
+        "contract_excerpt": getter("contract_excerpt"),
+        "status": getter("status"),
+        "proposal_id": getter("proposal_id"),
+        "report_submitted_at": _dt_to_str(getter("report_submitted_at")),
+        "decision_date": _dt_to_str(getter("decision_date")),
+        "awardee_name": getter("awardee_name"),
+        "award_value": getter("award_value"),
+        "award_notes": getter("award_notes"),
+        "win_factors": getter("win_factors"),
+        "loss_factors": getter("loss_factors"),
+        "analysis_notes": getter("analysis_notes"),
+        "tags": getter("tags") or [],
+        "last_seen_at": _dt_to_str(getter("last_seen_at")),
+        "created_at": _dt_to_str(getter("created_at")),
+        "updated_at": _dt_to_str(getter("updated_at")),
     }
     if include_raw:
-        data["raw_payload"] = contract.raw_payload
+        data["raw_payload"] = getter("raw_payload")
     return data
 
 
-def _get_sync_state(session) -> ContractSyncState:
-    state = (
-        session.query(ContractSyncState)
-        .filter(ContractSyncState.source == SAM_SYNC_SOURCE)
-        .one_or_none()
-    )
-    if not state:
-        state = ContractSyncState(source=SAM_SYNC_SOURCE, requests_today=0)
-        session.add(state)
-        session.flush()
+def _get_sync_state() -> Dict[str, Any]:
+    state = contract_store_service.get_sync_state(SAM_SYNC_SOURCE)
+    if state:
+        return state
+    state = {
+        "source": SAM_SYNC_SOURCE,
+        "requests_today": 0,
+        "requests_today_date": None,
+        "last_run_at": None,
+        "last_error": None,
+        "last_status": None,
+        "last_result": None,
+        "created_at": _dt_to_str(datetime.utcnow()),
+        "updated_at": _dt_to_str(datetime.utcnow()),
+    }
+    contract_store_service.save_sync_state(state)
     return state
 
 
-def _reset_daily_budget(state: ContractSyncState, now: datetime) -> None:
+def _reset_daily_budget(state: Dict[str, Any], now: datetime) -> None:
     today = now.strftime("%Y-%m-%d")
-    if state.requests_today_date != today:
-        state.requests_today_date = today
-        state.requests_today = 0
+    if state.get("requests_today_date") != today:
+        state["requests_today_date"] = today
+        state["requests_today"] = 0
 
 
-def _update_contract_from_source(contract: ContractOpportunity, payload: Dict[str, Any], now: datetime) -> None:
+def _update_contract_from_source(contract: Dict[str, Any], payload: Dict[str, Any], now: datetime) -> None:
     for field in [
         "title",
         "agency",
@@ -443,13 +796,23 @@ def _update_contract_from_source(contract: ContractOpportunity, payload: Dict[st
             continue
         if isinstance(val, str) and not val.strip():
             continue
-        setattr(contract, field, val)
-    contract.raw_payload = payload.get("raw_payload") or contract.raw_payload
-    contract.last_seen_at = now
-    contract.updated_at = now
+        contract[field] = val
+    contract["raw_payload"] = payload.get("raw_payload") or contract.get("raw_payload")
+    contract["last_seen_at"] = _dt_to_str(now)
+    contract["updated_at"] = _dt_to_str(now)
 
 
 def _sync_sam_contracts(trigger: str = "manual") -> Dict[str, Any]:
+    if not contract_store_service.is_configured():
+        result = {"status": "skipped", "reason": "contract_store_not_configured"}
+        SAM_SYNC_STATE.update(
+            {
+                "last_run": _dt_to_str(datetime.utcnow()),
+                "last_error": "contract_store_not_configured",
+                "last_result": result,
+            }
+        )
+        return result
     if not SAM_API_KEY:
         result = {"status": "skipped", "reason": "missing_api_key"}
         SAM_SYNC_STATE.update({"last_run": _dt_to_str(datetime.utcnow()), "last_error": "missing_api_key", "last_result": result})
@@ -466,122 +829,127 @@ def _sync_sam_contracts(trigger: str = "manual") -> Dict[str, Any]:
         updated = 0
         seen: set[str] = set()
         request_count = 0
-        with get_session() as session:
-            state = _get_sync_state(session)
-            _reset_daily_budget(state, now)
+        state = _get_sync_state()
+        _reset_daily_budget(state, now)
 
-            if trigger == "scheduled" and state.last_run_at:
-                delta = (now - state.last_run_at).total_seconds()
-                if delta < max(0, SAM_SYNC_MIN_INTERVAL_MINUTES) * 60:
-                    result = {
-                        "status": "skipped",
-                        "reason": "min_interval",
-                        "seconds_since_last_run": round(delta, 1),
+        last_run_at = _str_to_dt(state.get("last_run_at"))
+        if trigger == "scheduled" and last_run_at:
+            delta = (now - last_run_at).total_seconds()
+            if delta < max(0, SAM_SYNC_MIN_INTERVAL_MINUTES) * 60:
+                result = {
+                    "status": "skipped",
+                    "reason": "min_interval",
+                    "seconds_since_last_run": round(delta, 1),
+                }
+                state["last_status"] = result["status"]
+                state["last_error"] = result["reason"]
+                state["last_result"] = result
+                state["updated_at"] = _dt_to_str(now)
+                contract_store_service.save_sync_state(state)
+                SAM_SYNC_STATE.update(
+                    {
+                        "last_run": _dt_to_str(last_run_at),
+                        "last_error": result["reason"],
+                        "last_result": result,
                     }
-                    state.last_status = result["status"]
-                    state.last_error = result["reason"]
-                    state.last_result = result
-                    state.updated_at = now
-                    SAM_SYNC_STATE.update({"last_run": _dt_to_str(state.last_run_at), "last_error": result["reason"], "last_result": result})
-                    return result
-
-            remaining = max(0, SAM_SYNC_MAX_REQUESTS_PER_DAY - (state.requests_today or 0))
-            if remaining <= 0:
-                result = {"status": "skipped", "reason": "daily_limit_reached", "remaining": 0}
-                state.last_status = result["status"]
-                state.last_error = result["reason"]
-                state.last_result = result
-                state.last_run_at = now
-                state.updated_at = now
-                SAM_SYNC_STATE.update({"last_run": _dt_to_str(now), "last_error": result["reason"], "last_result": result})
+                )
                 return result
 
-            days_back = SAM_SYNC_DAYS_BACK
-            if state.last_run_at:
-                delta_days = max(1, int((now - state.last_run_at).total_seconds() // 86400) + 1)
-                days_back = min(SAM_SYNC_DAYS_BACK, delta_days)
+        remaining = max(0, SAM_SYNC_MAX_REQUESTS_PER_DAY - int(state.get("requests_today") or 0))
+        if remaining <= 0:
+            result = {"status": "skipped", "reason": "daily_limit_reached", "remaining": 0}
+            state["last_status"] = result["status"]
+            state["last_error"] = result["reason"]
+            state["last_result"] = result
+            state["last_run_at"] = _dt_to_str(now)
+            state["updated_at"] = _dt_to_str(now)
+            contract_store_service.save_sync_state(state)
+            SAM_SYNC_STATE.update({"last_run": _dt_to_str(now), "last_error": result["reason"], "last_result": result})
+            return result
 
-            pages = max(1, SAM_SYNC_PAGES)
-            pages = min(pages, remaining)
-            for page in range(pages):
-                request_count += 1
-                state.requests_today = (state.requests_today or 0) + 1
-                try:
-                    payload = fetch_sam_opportunities(
-                        api_key=SAM_API_KEY,
-                        query=SAM_SYNC_QUERY or None,
-                        days_back=days_back,
-                        limit=SAM_SYNC_LIMIT,
-                        offset=page * SAM_SYNC_LIMIT,
-                    )
-                except Exception as exc:
-                    err = str(exc)
-                    result = {
-                        "status": "error",
-                        "error": err,
-                        "request_count": request_count,
-                        "remaining_quota": max(0, SAM_SYNC_MAX_REQUESTS_PER_DAY - (state.requests_today or 0)),
-                        "trigger": trigger,
-                    }
-                    state.last_run_at = now
-                    state.last_status = "error"
-                    state.last_error = err
-                    state.last_result = result
-                    state.updated_at = now
-                    SAM_SYNC_STATE.update({"last_run": _dt_to_str(now), "last_error": err, "last_result": result})
-                    return result
-                rows = extract_sam_results(payload)
-                for row in rows:
-                    normalized = normalize_sam_record(row or {})
-                    source_id = normalized.get("source_id")
-                    if not source_id or source_id in seen:
-                        continue
-                    seen.add(source_id)
-                    existing = (
-                        session.query(ContractOpportunity)
-                        .filter(
-                            ContractOpportunity.source == normalized.get("source", "sam.gov"),
-                            ContractOpportunity.source_id == source_id,
-                        )
-                        .one_or_none()
-                    )
-                    if existing:
-                        _update_contract_from_source(existing, normalized, now)
-                        updated += 1
-                    else:
-                        contract = ContractOpportunity(**normalized)
-                        contract.status = "new"
-                        contract.last_seen_at = now
-                        contract.updated_at = now
-                        session.add(contract)
-                        inserted += 1
-            result = {
-                "status": "ok",
-                "inserted": inserted,
-                "updated": updated,
-                "total_seen": len(seen),
-                "request_count": request_count,
-                "days_back": days_back,
-                "remaining_quota": max(0, SAM_SYNC_MAX_REQUESTS_PER_DAY - (state.requests_today or 0)),
-                "trigger": trigger,
-            }
-            state.last_run_at = now
-            state.last_status = result["status"]
-            state.last_error = None
-            state.last_result = result
-            state.updated_at = now
+        days_back = SAM_SYNC_DAYS_BACK
+        if last_run_at:
+            delta_days = max(1, int((now - last_run_at).total_seconds() // 86400) + 1)
+            days_back = min(SAM_SYNC_DAYS_BACK, delta_days)
+
+        pages = max(1, SAM_SYNC_PAGES)
+        pages = min(pages, remaining)
+        for page in range(pages):
+            request_count += 1
+            state["requests_today"] = int(state.get("requests_today") or 0) + 1
+            try:
+                payload = fetch_sam_opportunities(
+                    api_key=SAM_API_KEY,
+                    query=SAM_SYNC_QUERY or None,
+                    days_back=days_back,
+                    limit=SAM_SYNC_LIMIT,
+                    offset=page * SAM_SYNC_LIMIT,
+                )
+            except Exception as exc:
+                err = str(exc)
+                result = {
+                    "status": "error",
+                    "error": err,
+                    "request_count": request_count,
+                    "remaining_quota": max(0, SAM_SYNC_MAX_REQUESTS_PER_DAY - int(state.get("requests_today") or 0)),
+                    "trigger": trigger,
+                }
+                state["last_run_at"] = _dt_to_str(now)
+                state["last_status"] = "error"
+                state["last_error"] = err
+                state["last_result"] = result
+                state["updated_at"] = _dt_to_str(now)
+                contract_store_service.save_sync_state(state)
+                SAM_SYNC_STATE.update({"last_run": _dt_to_str(now), "last_error": err, "last_result": result})
+                return result
+            rows = extract_sam_results(payload)
+            for row in rows:
+                normalized = normalize_sam_record(row or {})
+                source_id = normalized.get("source_id")
+                if not source_id or source_id in seen:
+                    continue
+                seen.add(source_id)
+                source_name = str(normalized.get("source", "sam.gov"))
+                existing = contract_store_service.find_by_source_source_id(source_name, str(source_id))
+                if existing:
+                    _update_contract_from_source(existing, normalized, now)
+                    contract_store_service.save_contract(existing)
+                    updated += 1
+                else:
+                    contract_payload = dict(normalized)
+                    contract_payload["status"] = "new"
+                    contract_payload["last_seen_at"] = _dt_to_str(now)
+                    contract_payload["updated_at"] = _dt_to_str(now)
+                    contract_store_service.create_contract(contract_payload)
+                    inserted += 1
+        result = {
+            "status": "ok",
+            "inserted": inserted,
+            "updated": updated,
+            "total_seen": len(seen),
+            "request_count": request_count,
+            "days_back": days_back,
+            "remaining_quota": max(0, SAM_SYNC_MAX_REQUESTS_PER_DAY - int(state.get("requests_today") or 0)),
+            "trigger": trigger,
+        }
+        state["last_run_at"] = _dt_to_str(now)
+        state["last_status"] = result["status"]
+        state["last_error"] = None
+        state["last_result"] = result
+        state["updated_at"] = _dt_to_str(now)
+        contract_store_service.save_sync_state(state)
         SAM_SYNC_STATE.update({"last_run": _dt_to_str(now), "last_error": None, "last_result": result})
         return result
     except Exception as exc:
         err = str(exc)
         try:
-            with get_session() as session:
-                state = _get_sync_state(session)
-                state.last_run_at = now
-                state.last_status = "error"
-                state.last_error = err
-                state.last_result = None
-                state.updated_at = now
+            state = _get_sync_state()
+            state["last_run_at"] = _dt_to_str(now)
+            state["last_status"] = "error"
+            state["last_error"] = err
+            state["last_result"] = None
+            state["updated_at"] = _dt_to_str(now)
+            contract_store_service.save_sync_state(state)
         except Exception:
             pass
         SAM_SYNC_STATE.update({"last_run": _dt_to_str(now), "last_error": err, "last_result": None})
@@ -629,6 +997,9 @@ def estimate(req: EstimationRequest):
         project_name=req.project_name,
         government_poc=req.government_poc,
         account_manager=req.account_manager,
+        account_manager_title=req.account_manager_title,
+        account_manager_phone=req.account_manager_phone,
+        account_manager_direct_email=req.account_manager_direct_email,
         service_delivery_mgr=req.service_delivery_mgr,
         service_delivery_exec=req.service_delivery_exec,
         site_location=req.site_location,
@@ -637,8 +1008,31 @@ def estimate(req: EstimationRequest):
         rap_number=req.rap_number,
         psi_code=req.psi_code,
         additional_comments=req.additional_comments,
+        security_protocols=req.security_protocols,
+        compliance_frameworks=req.compliance_frameworks,
+        additional_assumptions=req.additional_assumptions,
+        scope_server_virtualization=req.scope_server_virtualization,
+        scope_storage_upgrade=req.scope_storage_upgrade,
+        scope_backup_dr=req.scope_backup_dr,
+        scope_security_infrastructure=req.scope_security_infrastructure,
+        hardware_bom_items=req.hardware_bom_items or [],
+        software_licensing_items=req.software_licensing_items or [],
+        post_warranty_support_items=req.post_warranty_support_items or [],
+        company_history=req.company_history,
+        company_mission=req.company_mission,
+        company_core_competencies=req.company_core_competencies,
+        company_certifications=req.company_certifications,
+        company_org_structure=req.company_org_structure,
+        reference_clients=req.reference_clients or [],
+        support_sla_response=req.support_sla_response,
+        support_sla_resolution=req.support_sla_resolution,
+        support_escalation=req.support_escalation,
+        support_warranty_coverage=req.support_warranty_coverage,
         sites=req.sites,
         overtime=req.overtime,
+        period_of_performance=req.period_of_performance,
+        estimating_method=req.estimating_method or "engineering",
+        historical_estimates=req.historical_estimates or [],
         odc_items=req.odc_items or [],
         fixed_price_items=req.fixed_price_items or [],
         hardware_subtotal=req.hardware_subtotal or 0.0,
@@ -647,24 +1041,18 @@ def estimate(req: EstimationRequest):
     )
 
     warnings = calculation_service.validate_estimate(est_input)
+    compliance_warnings = _build_compliance_warnings(req)
     result = calculation_service.calculate_estimate(est_input)
 
     payload = {
-        "warnings": warnings,
+        "warnings": warnings + compliance_warnings,
+        "compliance_warnings": compliance_warnings,
         "estimation_result": asdict(result),
-        "project_info": {
-            "project_name": req.project_name,
-            "government_poc": req.government_poc,
-            "account_manager": req.account_manager,
-            "service_delivery_mgr": req.service_delivery_mgr,
-            "service_delivery_exec": req.service_delivery_exec,
-            "site_location": req.site_location,
-            "email": req.email,
-            "fy": req.fy,
-            "rap_number": req.rap_number,
-            "psi_code": req.psi_code,
-            "additional_comments": req.additional_comments,
-        },
+        "project_info": _build_project_info(req),
+        "scope_expansion": _build_scope_expansion(req),
+        "financial_bom": _build_financial_bom(req),
+        "company_profile": _build_company_profile(req),
+        "maintenance_support_plan": _build_support_plan(req),
         "odc_items": req.odc_items or [],
         "fixed_price_items": req.fixed_price_items or [],
         "hardware_subtotal": req.hardware_subtotal or 0.0,
@@ -699,6 +1087,9 @@ def generate_narrative(req: NarrativeRequest):
         project_name=req.project_name,
         government_poc=req.government_poc,
         account_manager=req.account_manager,
+        account_manager_title=req.account_manager_title,
+        account_manager_phone=req.account_manager_phone,
+        account_manager_direct_email=req.account_manager_direct_email,
         service_delivery_mgr=req.service_delivery_mgr,
         service_delivery_exec=req.service_delivery_exec,
         site_location=req.site_location,
@@ -707,8 +1098,31 @@ def generate_narrative(req: NarrativeRequest):
         rap_number=req.rap_number,
         psi_code=req.psi_code,
         additional_comments=req.additional_comments,
+        security_protocols=req.security_protocols,
+        compliance_frameworks=req.compliance_frameworks,
+        additional_assumptions=req.additional_assumptions,
+        scope_server_virtualization=req.scope_server_virtualization,
+        scope_storage_upgrade=req.scope_storage_upgrade,
+        scope_backup_dr=req.scope_backup_dr,
+        scope_security_infrastructure=req.scope_security_infrastructure,
+        hardware_bom_items=req.hardware_bom_items or [],
+        software_licensing_items=req.software_licensing_items or [],
+        post_warranty_support_items=req.post_warranty_support_items or [],
+        company_history=req.company_history,
+        company_mission=req.company_mission,
+        company_core_competencies=req.company_core_competencies,
+        company_certifications=req.company_certifications,
+        company_org_structure=req.company_org_structure,
+        reference_clients=req.reference_clients or [],
+        support_sla_response=req.support_sla_response,
+        support_sla_resolution=req.support_sla_resolution,
+        support_escalation=req.support_escalation,
+        support_warranty_coverage=req.support_warranty_coverage,
         sites=req.sites,
         overtime=req.overtime,
+        period_of_performance=req.period_of_performance,
+        estimating_method=req.estimating_method or "engineering",
+        historical_estimates=req.historical_estimates or [],
         odc_items=req.odc_items or [],
         fixed_price_items=req.fixed_price_items or [],
         hardware_subtotal=req.hardware_subtotal or 0.0,
@@ -718,21 +1132,24 @@ def generate_narrative(req: NarrativeRequest):
 
     result = calculation_service.calculate_estimate(est_input)
     estimation_data = {"estimation_result": asdict(result)}
-    project_info = {
-        "project_name": req.project_name,
-        "government_poc": req.government_poc,
-        "account_manager": req.account_manager,
-        "service_delivery_mgr": req.service_delivery_mgr,
-        "service_delivery_exec": req.service_delivery_exec,
-        "site_location": req.site_location,
-        "email": req.email,
-        "fy": req.fy,
-        "rap_number": req.rap_number,
-        "psi_code": req.psi_code,
-        "additional_comments": req.additional_comments,
-    }
+    project_info = _build_project_info(req)
     if any(v for v in project_info.values()):
         estimation_data["project_info"] = project_info
+    scope_expansion = _build_scope_expansion(req)
+    if any(v for v in scope_expansion.values()):
+        estimation_data["scope_expansion"] = scope_expansion
+    financial_bom = _build_financial_bom(req)
+    if any(financial_bom.get(k) for k in financial_bom):
+        estimation_data["financial_bom"] = financial_bom
+    company_profile = _build_company_profile(req)
+    if any(v for k, v in company_profile.items() if k != "reference_clients") or company_profile.get("reference_clients"):
+        estimation_data["company_profile"] = company_profile
+    support_plan = _build_support_plan(req)
+    if any(v for v in support_plan.values()):
+        estimation_data["maintenance_support_plan"] = support_plan
+    compliance_warnings = _build_compliance_warnings(req)
+    if compliance_warnings:
+        estimation_data["compliance_warnings"] = compliance_warnings
     if req.odc_items:
         estimation_data["odc_items"] = req.odc_items
     if req.fixed_price_items:
@@ -743,6 +1160,21 @@ def generate_narrative(req: NarrativeRequest):
         estimation_data["warranty_months"] = req.warranty_months
     if req.warranty_cost:
         estimation_data["warranty_cost"] = req.warranty_cost
+    roi_inputs = {
+        "capex_event_cost_low": req.roi_capex_event_cost_low,
+        "capex_event_cost_high": req.roi_capex_event_cost_high,
+        "capex_event_interval_months": req.roi_capex_event_interval_months,
+        "downtime_cost_per_hour": req.roi_downtime_cost_per_hour,
+        "current_availability": req.roi_current_availability,
+        "target_availability": req.roi_target_availability,
+        "legacy_support_savings_annual": req.roi_legacy_support_savings_annual,
+    }
+    if any(v is not None for v in roi_inputs.values()):
+        estimation_data["roi_inputs"] = roi_inputs
+        estimation_data["roi_horizon_years"] = 5
+        roi_summary = _compute_roi_summary(roi_inputs, 5, float(result.total_cost or 0))
+        if roi_summary:
+            estimation_data["roi_summary"] = roi_summary
     if req.contract_url or req.contract_excerpt:
         estimation_data["contract_source"] = {
             "url": req.contract_url,
@@ -796,6 +1228,19 @@ def rewrite_narrative_section(req: NarrativeSectionPrompt):
     if req.style_guide and not estimation_data.get("style_guide"):
         estimation_data["style_guide"] = req.style_guide
 
+    roi_inputs = estimation_data.get("roi_inputs")
+    if not roi_inputs:
+        roi_inputs = _extract_roi_inputs_from_estimation_input(estimation_data.get("estimation_input", {}) or {})
+    if roi_inputs and any(v is not None for v in roi_inputs.values()):
+        estimation_data["roi_inputs"] = roi_inputs
+        if not estimation_data.get("roi_horizon_years"):
+            estimation_data["roi_horizon_years"] = 5
+        if not estimation_data.get("roi_summary"):
+            total_cost = (estimation_data.get("estimation_result") or {}).get("total_cost") or 0
+            roi_summary = _compute_roi_summary(roi_inputs, int(estimation_data.get("roi_horizon_years") or 5), float(total_cost))
+            if roi_summary:
+                estimation_data["roi_summary"] = roi_summary
+
     # Derive a minimal input summary if the caller did not provide one
     input_summary = req.input_summary
     if input_summary is None:
@@ -841,8 +1286,14 @@ def rewrite_narrative_section(req: NarrativeSectionPrompt):
                 rap_number=est_input.get("rap_number"),
                 psi_code=est_input.get("psi_code"),
                 additional_comments=est_input.get("additional_comments"),
+                security_protocols=est_input.get("security_protocols"),
+                compliance_frameworks=est_input.get("compliance_frameworks"),
+                additional_assumptions=est_input.get("additional_assumptions"),
                 sites=est_input.get("sites") or 1,
                 overtime=bool(est_input.get("overtime")),
+                period_of_performance=est_input.get("period_of_performance"),
+                estimating_method=est_input.get("estimating_method") or "engineering",
+                historical_estimates=est_input.get("historical_estimates") or [],
                 odc_items=est_input.get("odc_items") or [],
                 fixed_price_items=est_input.get("fixed_price_items") or [],
                 hardware_subtotal=est_input.get("hardware_subtotal") or 0.0,
@@ -874,14 +1325,191 @@ def rewrite_narrative_section(req: NarrativeSectionPrompt):
     return {"section": req.section, "text": text, "raw": raw}
 
 
-@app.post("/api/v1/report")
-def generate_report(req: ReportRequest, include_ai: bool = False, tone: str = "professional", current_user: str = Depends(get_current_user)):
-    """Generate and return a PDF estimation report as a download"""
-    # Lazy import so the API can run without reportlab installed
+@app.post("/api/v1/assumptions/generate")
+def generate_additional_assumptions(req: AssumptionsPromptRequest, current_user: str = Depends(get_current_user)):
+    """
+    Generate additional assumptions text from scraped RFP content.
+    """
     try:
-        from .services.export_service import ExportService  # type: ignore
+        from .services.ai_service import AIService  # type: ignore
+    except Exception:
+        raise HTTPException(status_code=500, detail="AI module missing. Ensure ai_service.py exists.")
+
+    ai = AIService()
+    if not ai.is_configured():
+        raise HTTPException(status_code=500, detail="OPENAI_API_KEY not configured")
+
+    prompt_path = PROMPTS_DIR / "additional_assumptions_prompt.txt"
+    if not prompt_path.exists():
+        raise HTTPException(status_code=500, detail="Prompt template not found.")
+
+    scraped_text = (req.scraped_text or "").strip()
+    if not scraped_text:
+        raise HTTPException(status_code=400, detail="scraped_text is required.")
+
+    max_chars = 8000
+    if len(scraped_text) > max_chars:
+        scraped_text = scraped_text[:max_chars]
+
+    context = _build_scrape_prompt_context(req, scraped_text)
+
+    try:
+        prompt_template = prompt_path.read_text(encoding="utf-8")
+    except Exception:
+        raise HTTPException(status_code=500, detail="Unable to read prompt template.")
+
+    try:
+        text, raw = ai.generate_additional_assumptions(prompt_template, context)
     except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+    return {"text": text, "raw": raw}
+
+
+@app.post("/api/v1/comments/generate")
+def generate_additional_comments(req: AssumptionsPromptRequest, current_user: str = Depends(get_current_user)):
+    """
+    Generate additional comments text from scraped RFP content.
+    """
+    try:
+        from .services.ai_service import AIService  # type: ignore
+    except Exception:
+        raise HTTPException(status_code=500, detail="AI module missing. Ensure ai_service.py exists.")
+
+    ai = AIService()
+    if not ai.is_configured():
+        raise HTTPException(status_code=500, detail="OPENAI_API_KEY not configured")
+
+    prompt_path = PROMPTS_DIR / "additional_comments_prompt.txt"
+    if not prompt_path.exists():
+        raise HTTPException(status_code=500, detail="Prompt template not found.")
+
+    scraped_text = (req.scraped_text or "").strip()
+    if not scraped_text:
+        raise HTTPException(status_code=400, detail="scraped_text is required.")
+
+    max_chars = 8000
+    if len(scraped_text) > max_chars:
+        scraped_text = scraped_text[:max_chars]
+
+    context = _build_scrape_prompt_context(req, scraped_text)
+
+    try:
+        prompt_template = prompt_path.read_text(encoding="utf-8")
+    except Exception:
+        raise HTTPException(status_code=500, detail="Unable to read prompt template.")
+
+    try:
+        text, raw = ai.generate_additional_comments(prompt_template, context)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+    return {"text": text, "raw": raw}
+
+
+@app.post("/api/v1/security-protocols/generate")
+def generate_security_protocols(req: AssumptionsPromptRequest, current_user: str = Depends(get_current_user)):
+    """
+    Generate security protocols text from scraped RFP content.
+    """
+    try:
+        from .services.ai_service import AIService  # type: ignore
+    except Exception:
+        raise HTTPException(status_code=500, detail="AI module missing. Ensure ai_service.py exists.")
+
+    ai = AIService()
+    if not ai.is_configured():
+        raise HTTPException(status_code=500, detail="OPENAI_API_KEY not configured")
+
+    prompt_path = PROMPTS_DIR / "security_protocols_prompt.txt"
+    if not prompt_path.exists():
+        raise HTTPException(status_code=500, detail="Prompt template not found.")
+
+    scraped_text = (req.scraped_text or "").strip()
+    if not scraped_text:
+        raise HTTPException(status_code=400, detail="scraped_text is required.")
+
+    max_chars = 8000
+    if len(scraped_text) > max_chars:
+        scraped_text = scraped_text[:max_chars]
+
+    context = _build_scrape_prompt_context(req, scraped_text)
+
+    try:
+        prompt_template = prompt_path.read_text(encoding="utf-8")
+    except Exception:
+        raise HTTPException(status_code=500, detail="Unable to read prompt template.")
+
+    try:
+        text, raw = ai.generate_security_protocols(prompt_template, context)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+    return {"text": text, "raw": raw}
+
+
+@app.post("/api/v1/compliance-frameworks/generate")
+def generate_compliance_frameworks(req: AssumptionsPromptRequest, current_user: str = Depends(get_current_user)):
+    """
+    Generate compliance frameworks text from scraped RFP content.
+    """
+    try:
+        from .services.ai_service import AIService  # type: ignore
+    except Exception:
+        raise HTTPException(status_code=500, detail="AI module missing. Ensure ai_service.py exists.")
+
+    ai = AIService()
+    if not ai.is_configured():
+        raise HTTPException(status_code=500, detail="OPENAI_API_KEY not configured")
+
+    prompt_path = PROMPTS_DIR / "compliance_frameworks_prompt.txt"
+    if not prompt_path.exists():
+        raise HTTPException(status_code=500, detail="Prompt template not found.")
+
+    scraped_text = (req.scraped_text or "").strip()
+    if not scraped_text:
+        raise HTTPException(status_code=400, detail="scraped_text is required.")
+
+    max_chars = 8000
+    if len(scraped_text) > max_chars:
+        scraped_text = scraped_text[:max_chars]
+
+    context = _build_scrape_prompt_context(req, scraped_text)
+
+    try:
+        prompt_template = prompt_path.read_text(encoding="utf-8")
+    except Exception:
+        raise HTTPException(status_code=500, detail="Unable to read prompt template.")
+
+    try:
+        text, raw = ai.generate_compliance_frameworks(prompt_template, context)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+    return {"text": text, "raw": raw}
+
+
+def _generate_report_artifact(
+    req: ReportRequest,
+    *,
+    include_ai: bool,
+    tone: str,
+    current_user: str,
+    force_save: Optional[bool] = None,
+) -> Dict[str, Any]:
+    overall_start = time.perf_counter()
+    timings_ms: Dict[str, float] = {}
+
+    def _record_timing(label: str, started: float) -> None:
+        timings_ms[label] = round((time.perf_counter() - started) * 1000.0, 2)
+
+    try:
+        import_started = time.perf_counter()
+        from .services.export_service import ExportService  # type: ignore
+        _record_timing("import_export_service", import_started)
+    except Exception:
         raise HTTPException(status_code=500, detail="Report generation dependency missing. Install 'reportlab'.")
+
     try:
         complexity_level = ComplexityLevel(req.complexity)
     except ValueError:
@@ -899,6 +1527,9 @@ def generate_report(req: ReportRequest, include_ai: bool = False, tone: str = "p
         project_name=req.project_name,
         government_poc=req.government_poc,
         account_manager=req.account_manager,
+        account_manager_title=req.account_manager_title,
+        account_manager_phone=req.account_manager_phone,
+        account_manager_direct_email=req.account_manager_direct_email,
         service_delivery_mgr=req.service_delivery_mgr,
         service_delivery_exec=req.service_delivery_exec,
         site_location=req.site_location,
@@ -907,8 +1538,31 @@ def generate_report(req: ReportRequest, include_ai: bool = False, tone: str = "p
         rap_number=req.rap_number,
         psi_code=req.psi_code,
         additional_comments=req.additional_comments,
+        security_protocols=req.security_protocols,
+        compliance_frameworks=req.compliance_frameworks,
+        additional_assumptions=req.additional_assumptions,
+        scope_server_virtualization=req.scope_server_virtualization,
+        scope_storage_upgrade=req.scope_storage_upgrade,
+        scope_backup_dr=req.scope_backup_dr,
+        scope_security_infrastructure=req.scope_security_infrastructure,
+        hardware_bom_items=req.hardware_bom_items or [],
+        software_licensing_items=req.software_licensing_items or [],
+        post_warranty_support_items=req.post_warranty_support_items or [],
+        company_history=req.company_history,
+        company_mission=req.company_mission,
+        company_core_competencies=req.company_core_competencies,
+        company_certifications=req.company_certifications,
+        company_org_structure=req.company_org_structure,
+        reference_clients=req.reference_clients or [],
+        support_sla_response=req.support_sla_response,
+        support_sla_resolution=req.support_sla_resolution,
+        support_escalation=req.support_escalation,
+        support_warranty_coverage=req.support_warranty_coverage,
         sites=req.sites,
         overtime=req.overtime,
+        period_of_performance=req.period_of_performance,
+        estimating_method=req.estimating_method or "engineering",
+        historical_estimates=req.historical_estimates or [],
         odc_items=req.odc_items or [],
         fixed_price_items=req.fixed_price_items or [],
         hardware_subtotal=req.hardware_subtotal or 0.0,
@@ -916,29 +1570,40 @@ def generate_report(req: ReportRequest, include_ai: bool = False, tone: str = "p
         warranty_cost=req.warranty_cost or 0.0,
     )
 
+    calc_started = time.perf_counter()
     result = calculation_service.calculate_estimate(est_input)
+    _record_timing("calculate_estimate", calc_started)
 
     estimation_data = {
         "estimation_result": asdict(result),
-        "project_info": {
-            "project_name": req.project_name,
-            "government_poc": req.government_poc,
-            "account_manager": req.account_manager,
-            "service_delivery_mgr": req.service_delivery_mgr,
-            "service_delivery_exec": req.service_delivery_exec,
-            "site_location": req.site_location,
-            "email": req.email,
-            "fy": req.fy,
-            "rap_number": req.rap_number,
-            "psi_code": req.psi_code,
-            "additional_comments": req.additional_comments,
-        },
+        "project_info": _build_project_info(req),
+        "scope_expansion": _build_scope_expansion(req),
+        "financial_bom": _build_financial_bom(req),
+        "company_profile": _build_company_profile(req),
+        "maintenance_support_plan": _build_support_plan(req),
+        "compliance_warnings": _build_compliance_warnings(req),
         "odc_items": req.odc_items or [],
         "fixed_price_items": req.fixed_price_items or [],
         "hardware_subtotal": req.hardware_subtotal or 0.0,
         "warranty_months": req.warranty_months or 0,
         "warranty_cost": req.warranty_cost or 0.0,
+        "raci_matrix": req.raci_matrix or [],
+        "roadmap_phases": req.roadmap_phases or [],
+        "roi_inputs": {
+            "capex_event_cost_low": req.roi_capex_event_cost_low,
+            "capex_event_cost_high": req.roi_capex_event_cost_high,
+            "capex_event_interval_months": req.roi_capex_event_interval_months,
+            "downtime_cost_per_hour": req.roi_downtime_cost_per_hour,
+            "current_availability": req.roi_current_availability,
+            "target_availability": req.roi_target_availability,
+            "legacy_support_savings_annual": req.roi_legacy_support_savings_annual,
+        },
+        "roi_horizon_years": 5,
+        "tool_version": req.tool_version,
     }
+    roi_summary = _compute_roi_summary(estimation_data.get("roi_inputs") or {}, 5, float(result.total_cost or 0))
+    if roi_summary:
+        estimation_data["roi_summary"] = roi_summary
     if req.contract_url or req.contract_excerpt:
         estimation_data["contract_source"] = {
             "url": req.contract_url,
@@ -948,15 +1613,18 @@ def generate_report(req: ReportRequest, include_ai: bool = False, tone: str = "p
         "complexity": req.complexity,
         "module_count": len(req.modules),
     }
+    subtasks_started = time.perf_counter()
     module_subtasks = calculation_service.build_module_subtasks(
         est_input,
         contract_excerpt=req.contract_excerpt,
     )
+    _record_timing("build_module_subtasks", subtasks_started)
     subtask_status = "deterministic"
     subtask_error: Optional[str] = None
     subtask_ai_raw: Optional[str] = None
     if req.use_ai_subtasks:
         try:
+            ai_subtasks_started = time.perf_counter()
             from .services.ai_service import AIService  # type: ignore
 
             ai = AIService()
@@ -969,10 +1637,16 @@ def generate_report(req: ReportRequest, include_ai: bool = False, tone: str = "p
                 subtask_status = "ai_generated"
             else:
                 subtask_status = "ai_disabled"
+            _record_timing("ai_subtasks", ai_subtasks_started)
         except Exception as e:
-            # Keep deterministic subtasks but record failure
-            subtask_status = "ai_failed"
-            subtask_error = str(e)
+            if _is_ai_timeout_error(e):
+                # Keep deterministic subtasks and continue cleanly on AI latency spikes.
+                subtask_status = "ai_timeout_fallback"
+                subtask_error = None
+            else:
+                subtask_status = "ai_failed"
+                subtask_error = str(e)
+            timings_ms["ai_subtasks"] = round((time.perf_counter() - ai_subtasks_started) * 1000.0, 2)
     estimation_data["module_subtasks"] = module_subtasks
     estimation_data["subtask_generation_status"] = subtask_status
     if subtask_ai_raw:
@@ -980,12 +1654,14 @@ def generate_report(req: ReportRequest, include_ai: bool = False, tone: str = "p
     if subtask_error:
         estimation_data["subtask_generation_error"] = subtask_error
 
+    export_started = time.perf_counter()
     export_service = ExportService()
+    _record_timing("init_export_service", export_started)
 
-    # Prefer client-provided narrative sections if present.
     narrative_sections = req.narrative_sections or None
     if narrative_sections is None and include_ai:
         try:
+            ai_narrative_started = time.perf_counter()
             from .services.ai_service import AIService  # type: ignore
 
             ai = AIService()
@@ -995,70 +1671,425 @@ def generate_report(req: ReportRequest, include_ai: bool = False, tone: str = "p
                     input_summary=input_summary,
                     tone=tone,
                 )
+            _record_timing("ai_narrative", ai_narrative_started)
         except Exception:
-            # If AI generation fails or is not configured, continue without AI text
             narrative_sections = None
+            timings_ms["ai_narrative"] = round((time.perf_counter() - ai_narrative_started) * 1000.0, 2)
 
+    pdf_started = time.perf_counter()
     pdf_bytes = export_service.generate_estimation_pdf(
         estimation_data,
         input_summary,
         narrative_sections=narrative_sections,
         module_subtasks=module_subtasks,
     )
+    _record_timing("generate_pdf", pdf_started)
 
-    from datetime import datetime
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     filename = f"estimation_report_{ts}.pdf"
 
+    should_save = req.save_report if force_save is None else bool(force_save)
     storage_record: Optional[Dict[str, Any]] = None
-    if storage_service.is_configured() and req.proposal_id:
-        # Validate proposal ownership before persisting the report
-        with get_session() as session:
-            prop = (
-                session.query(Proposal)
-                .filter(Proposal.id == req.proposal_id, Proposal.owner_email == current_user)
-                .one_or_none()
-            )
-            if not prop:
-                raise HTTPException(status_code=404, detail="Proposal not found for current user")
+    report_status = "not_saved"
+    report_id: Optional[str] = None
+    if should_save:
+        storage_started = time.perf_counter()
+        if not storage_service.is_configured() or not report_registry_service.is_configured():
+            report_status = "storage_not_configured"
+        else:
+            proposal_meta: Dict[str, Optional[str]] = {
+                "proposal_id": None,
+                "proposal_title": None,
+                "proposal_public_id": None,
+            }
+            if req.proposal_id:
+                if not proposal_store_service.is_configured():
+                    # Proposal linkage is optional for report persistence.
+                    logger.warning(
+                        "proposal_store_unconfigured_for_report_save user=%s proposal_id=%s",
+                        current_user,
+                        req.proposal_id,
+                    )
+                else:
+                    prop = proposal_store_service.get_owned_proposal(
+                        proposal_id=req.proposal_id,
+                        owner_email=current_user,
+                    )
+                    if prop:
+                        proposal_meta = {
+                            "proposal_id": str(prop.get("proposal_id")),
+                            "proposal_title": prop.get("title"),
+                            "proposal_public_id": str(prop.get("public_id") or ""),
+                        }
+                    else:
+                        # Do not block report save when proposal records were not migrated yet.
+                        logger.warning(
+                            "proposal_not_found_for_report_save user=%s proposal_id=%s",
+                            current_user,
+                            req.proposal_id,
+                        )
+
+            existing_item = None
+            if req.overwrite_report_id:
+                existing_item = report_registry_service.get_report(current_user, req.overwrite_report_id)
+                if not existing_item:
+                    raise HTTPException(status_code=404, detail="Report to overwrite was not found")
+                if not proposal_meta["proposal_id"] and existing_item.get("proposal_id"):
+                    proposal_meta = {
+                        "proposal_id": existing_item.get("proposal_id"),
+                        "proposal_title": existing_item.get("proposal_title"),
+                        "proposal_public_id": existing_item.get("proposal_public_id"),
+                    }
+
+            key_prefix = f"reports/{current_user}"
+            if proposal_meta["proposal_id"]:
+                key_prefix = f"proposals/{proposal_meta['proposal_id']}/reports"
             upload = storage_service.upload_bytes(
                 pdf_bytes,
-                key_prefix=f"proposals/{req.proposal_id}/reports",
+                key_prefix=key_prefix,
                 filename=filename,
                 content_type="application/pdf",
             )
-            doc = ProposalDocument(
-                proposal_id=req.proposal_id,
-                version=req.proposal_version,
-                kind="report",
+
+            payload_input = req.model_dump(
+                exclude={
+                    "narrative_sections",
+                    "style_guide",
+                    "contract_url",
+                    "contract_excerpt",
+                    "proposal_id",
+                    "proposal_version",
+                    "save_report",
+                    "overwrite_report_id",
+                    "report_label",
+                    "use_ai_subtasks",
+                }
+            )
+            payload_snapshot: Dict[str, Any] = {
+                "estimation_input": payload_input,
+                "estimation_result": asdict(result),
+                "narrative_sections": narrative_sections or {},
+                "style_guide": req.style_guide,
+                "tone": tone,
+                "tool_version": req.tool_version,
+                "module_subtasks": module_subtasks,
+                "subtask_generation_status": subtask_status,
+            }
+            if roi_summary:
+                payload_snapshot["roi_summary"] = roi_summary
+            if estimation_data.get("contract_source"):
+                payload_snapshot["contract_source"] = estimation_data["contract_source"]
+
+            report_id = req.overwrite_report_id or report_registry_service.new_report_id()
+            report_item = report_registry_service.new_item(
+                owner_email=current_user,
+                report_id=report_id,
                 filename=upload["filename"],
                 content_type="application/pdf",
                 bucket=upload["bucket"],
                 key=upload["key"],
                 size_bytes=len(pdf_bytes),
-                meta={"tone": tone, "include_ai": include_ai},
+                created_by=current_user,
+                tool_version=req.tool_version,
+                proposal_id=proposal_meta["proposal_id"],
+                proposal_title=proposal_meta["proposal_title"],
+                proposal_public_id=proposal_meta["proposal_public_id"],
+                proposal_version=req.proposal_version,
+                total_cost=float(result.total_cost or 0),
+                total_hours=float(result.total_labor_hours or 0),
+                module_count=len(req.modules),
+                complexity=req.complexity,
+                period_of_performance=req.period_of_performance,
+                estimating_method=req.estimating_method,
+                tone=tone,
+                include_ai=include_ai,
+                report_label=req.report_label or req.project_name or upload["filename"],
+                payload=payload_snapshot,
+                existing_created_at=(existing_item or {}).get("created_at"),
             )
-            session.add(doc)
-            # Commit happens via context manager in get_session
+            report_registry_service.save_report(report_item)
+
+            old_key = (existing_item or {}).get("key")
+            if old_key and old_key != upload["key"] and storage_service.is_configured():
+                storage_service.delete_object(old_key)
+
             storage_record = {
-                "id": doc.id,
+                "id": report_id,
                 "bucket": upload["bucket"],
                 "key": upload["key"],
                 "presigned_url": storage_service.presign_get(upload["key"]),
             }
+            report_status = "overwritten" if existing_item else "saved"
+        _record_timing("save_report", storage_started)
 
-    headers = {
-        "Content-Disposition": f"attachment; filename=\"{filename}\""
+    timings_ms["total"] = round((time.perf_counter() - overall_start) * 1000.0, 2)
+    return {
+        "pdf_bytes": pdf_bytes,
+        "filename": filename,
+        "storage_record": storage_record,
+        "report_status": report_status,
+        "report_id": report_id,
+        "subtask_status": subtask_status,
+        "timings_ms": timings_ms,
     }
-    if storage_record and storage_record.get("presigned_url"):
-        headers["X-Report-Location"] = storage_record["presigned_url"]
-        headers["X-Report-Document-Id"] = storage_record["id"]
 
+
+@app.post("/api/v1/report")
+def generate_report(req: ReportRequest, include_ai: bool = False, tone: str = "professional", current_user: str = Depends(get_current_user)):
+    """Generate and return a PDF estimation report as a download"""
+    payload = _generate_report_artifact(
+        req,
+        include_ai=include_ai,
+        tone=tone,
+        current_user=current_user,
+    )
+    headers = {
+        "Content-Disposition": f"attachment; filename=\"{payload['filename']}\""
+    }
+    storage_record = payload.get("storage_record") or {}
+    if storage_record.get("presigned_url"):
+        headers["X-Report-Location"] = storage_record["presigned_url"]
+        headers["X-Report-Document-Id"] = storage_record.get("id") or ""
+        headers["X-Report-Id"] = storage_record.get("id") or ""
+    headers["X-Report-Status"] = payload.get("report_status") or "not_saved"
+    logger.info(
+        "report_request user=%s modules=%d include_ai=%s use_ai_subtasks=%s subtask_status=%s report_status=%s timings_ms=%s",
+        current_user,
+        len(req.modules),
+        include_ai,
+        req.use_ai_subtasks,
+        payload.get("subtask_status"),
+        payload.get("report_status"),
+        json.dumps(payload.get("timings_ms") or {}, ensure_ascii=True),
+    )
     return StreamingResponse(
-        iter([pdf_bytes]),
+        iter([payload["pdf_bytes"]]),
         media_type="application/pdf",
         headers=headers,
     )
+
+
+def _new_report_job_id() -> str:
+    return report_job_service.new_job_id()
+
+
+def _report_job_to_api(job: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "id": job.get("job_id"),
+        "job_kind": job.get("job_kind"),
+        "status": job.get("status"),
+        "error": job.get("error"),
+        "result": job.get("result_payload") or {},
+        "created_at": str(job.get("created_at") or ""),
+        "started_at": str(job.get("started_at") or "") or None,
+        "finished_at": str(job.get("finished_at") or "") or None,
+        "updated_at": str(job.get("updated_at") or ""),
+    }
+
+
+def _is_ai_timeout_error(exc: Exception) -> bool:
+    text = str(exc or "").lower()
+    return (
+        "timed out" in text
+        or "timeout" in text
+        or "deadline exceeded" in text
+    )
+
+
+def _create_report_job(
+    *,
+    owner_email: str,
+    job_kind: str,
+    request_payload: Dict[str, Any],
+) -> str:
+    if job_kind not in REPORT_JOB_ALLOWED_KINDS:
+        raise RuntimeError(f"Unsupported report job kind: {job_kind}")
+    if not report_job_service.is_configured():
+        raise RuntimeError(
+            "Report jobs are not configured. Set REPORT_JOBS_TABLE_NAME and redeploy."
+        )
+    created = report_job_service.create_job(
+        owner_email=owner_email,
+        job_kind=job_kind,
+        request_payload=request_payload,
+        job_id=_new_report_job_id(),
+    )
+    return str(created["job_id"])
+
+
+def _invoke_self_lambda_job(owner_email: str, job_id: str) -> tuple[bool, Optional[str]]:
+    if not REPORT_JOB_SELF_INVOKE:
+        return False, "REPORT_JOB_SELF_INVOKE is disabled"
+    fn_name = os.getenv("AWS_LAMBDA_FUNCTION_NAME")
+    if not fn_name:
+        return False, "AWS_LAMBDA_FUNCTION_NAME is not set"
+    try:
+        import boto3
+
+        region = os.getenv("AWS_REGION") or os.getenv("AWS_DEFAULT_REGION")
+        client = boto3.client("lambda", region_name=region)
+        payload = {
+            "job_type": "report_job",
+            "owner_email": owner_email,
+            "job_id": job_id,
+        }
+        client.invoke(
+            FunctionName=fn_name,
+            InvocationType="Event",
+            Payload=json.dumps(payload).encode("utf-8"),
+        )
+        return True, None
+    except Exception as exc:
+        logger.warning("report_job self invoke failed for %s: %s", job_id, exc)
+        return False, str(exc)
+
+
+def _dispatch_report_job(owner_email: str, job_id: str) -> None:
+    in_lambda = bool(os.getenv("AWS_LAMBDA_FUNCTION_NAME"))
+    invoked, invoke_error = _invoke_self_lambda_job(owner_email, job_id)
+    if invoked:
+        return
+    if in_lambda:
+        job = report_job_service.get_job(job_id)
+        if job and str(job.get("owner_email")) == owner_email:
+            report_job_service.update_status(
+                job_id=job_id,
+                status="failed",
+                error=(
+                    "Unable to dispatch async job in Lambda. "
+                    f"Check invoke permission. Details: {invoke_error or 'unknown'}"
+                )[:2000],
+            )
+        return
+    _report_job_executor.submit(_run_report_job_by_id, owner_email, job_id)
+
+def _run_report_job_by_id(owner_email: str, job_id: str) -> None:
+    request_payload: Dict[str, Any] = {}
+    job_kind = "report"
+    job = report_job_service.get_job(job_id)
+    if not job:
+        return
+    if str(job.get("owner_email")) != owner_email:
+        return
+    if str(job.get("status") or "") not in ("queued", "running"):
+        return
+    report_job_service.update_status(job_id=job_id, status="running")
+    request_payload = dict(job.get("request_payload") or {})
+    job_kind = str(job.get("job_kind") or "report")
+
+    try:
+        request_data = request_payload.get("request") or {}
+        include_ai = bool(request_payload.get("include_ai", False))
+        tone = str(request_payload.get("tone") or "professional")
+        req = ReportRequest.model_validate(request_data)
+
+        if job_kind == "report":
+            artifact = _generate_report_artifact(
+                req,
+                include_ai=include_ai,
+                tone=tone,
+                current_user=owner_email,
+                force_save=True,
+            )
+            result_payload = {
+                "report_id": artifact.get("report_id"),
+                "report_status": artifact.get("report_status"),
+                "filename": artifact.get("filename"),
+                "storage_record": artifact.get("storage_record"),
+                "timings_ms": artifact.get("timings_ms"),
+            }
+        elif job_kind == "subtasks_preview":
+            result_payload = _build_subtasks_preview_payload(
+                req,
+                tone=tone,
+                debug=bool(request_payload.get("debug", False)),
+                current_user=owner_email,
+            )
+        else:
+            raise RuntimeError(f"Unsupported report job kind: {job_kind}")
+
+        report_job_service.update_status(
+            job_id=job_id,
+            status="completed",
+            result_payload=result_payload,
+        )
+    except HTTPException as exc:
+        detail = getattr(exc, "detail", None)
+        if isinstance(detail, (dict, list)):
+            msg = json.dumps(detail, ensure_ascii=True)
+        else:
+            msg = str(detail or f"HTTP {getattr(exc, 'status_code', 'error')}")
+        logger.warning(
+            "report_job_failed_http owner=%s job=%s kind=%s status=%s detail=%s",
+            owner_email,
+            job_id,
+            job_kind,
+            getattr(exc, "status_code", "unknown"),
+            msg,
+        )
+        report_job_service.update_status(
+            job_id=job_id,
+            status="failed",
+            error=msg[:2000],
+        )
+    except Exception as exc:
+        logger.exception("report_job_failed owner=%s job=%s kind=%s", owner_email, job_id, job_kind)
+        report_job_service.update_status(
+            job_id=job_id,
+            status="failed",
+            error=str(exc)[:2000],
+        )
+
+
+def run_report_job_now(job_id: str, owner_email: Optional[str] = None) -> None:
+    job = report_job_service.get_job(job_id)
+    if not job:
+        return
+    owner = str(job.get("owner_email") or "")
+    if owner_email and owner != owner_email:
+        return
+    if not owner:
+        return
+    _run_report_job_by_id(owner, job_id)
+
+
+@app.post("/api/v1/report/jobs")
+def queue_report_job(
+    req: ReportRequest,
+    include_ai: bool = False,
+    tone: str = "professional",
+    current_user: str = Depends(get_current_user),
+):
+    if not report_job_service.is_configured():
+        raise HTTPException(
+            status_code=503,
+            detail="Report jobs are not configured. Set REPORT_JOBS_TABLE_NAME and redeploy.",
+        )
+    payload = {
+        "request": req.model_dump(),
+        "include_ai": include_ai,
+        "tone": tone,
+    }
+    job_id = _create_report_job(
+        owner_email=current_user,
+        job_kind="report",
+        request_payload=payload,
+    )
+    _dispatch_report_job(current_user, job_id)
+    return {"job_id": job_id, "status": "queued"}
+
+
+@app.get("/api/v1/report/jobs/{job_id}")
+def get_report_job(job_id: str, current_user: str = Depends(get_current_user)):
+    if not report_job_service.is_configured():
+        raise HTTPException(
+            status_code=503,
+            detail="Report jobs are not configured. Set REPORT_JOBS_TABLE_NAME and redeploy.",
+        )
+    job = report_job_service.get_job(job_id)
+    if not job or str(job.get("owner_email") or "") != current_user:
+        raise HTTPException(status_code=404, detail="Report job not found")
+    return _report_job_to_api(job)
 
 # -----------------------------
 # -----------------------------
@@ -1102,22 +2133,27 @@ def sync_sam_contracts(current_user: str = Depends(get_current_user)):
 
 @app.get("/api/v1/contracts/sam/status")
 def sam_sync_status():
+    if not contract_store_service.is_configured():
+        raise HTTPException(
+            status_code=503,
+            detail="Contract store is not configured. Set CONTRACTS_TABLE_NAME and CONTRACT_SYNC_TABLE_NAME, then redeploy.",
+        )
     now = datetime.utcnow()
-    with get_session() as session:
-        state = _get_sync_state(session)
-        _reset_daily_budget(state, now)
-        remaining = max(0, SAM_SYNC_MAX_REQUESTS_PER_DAY - (state.requests_today or 0))
-        return {
-            "source": state.source,
-            "last_run": _dt_to_str(state.last_run_at),
-            "last_status": state.last_status,
-            "last_error": state.last_error,
-            "requests_today": state.requests_today,
-            "requests_today_date": state.requests_today_date,
-            "remaining_quota": remaining,
-            "max_requests_per_day": SAM_SYNC_MAX_REQUESTS_PER_DAY,
-            "last_result": state.last_result,
-        }
+    state = _get_sync_state()
+    _reset_daily_budget(state, now)
+    contract_store_service.save_sync_state(state)
+    remaining = max(0, SAM_SYNC_MAX_REQUESTS_PER_DAY - int(state.get("requests_today") or 0))
+    return {
+        "source": state.get("source"),
+        "last_run": _dt_to_str(state.get("last_run_at")),
+        "last_status": state.get("last_status"),
+        "last_error": state.get("last_error"),
+        "requests_today": int(state.get("requests_today") or 0),
+        "requests_today_date": state.get("requests_today_date"),
+        "remaining_quota": remaining,
+        "max_requests_per_day": SAM_SYNC_MAX_REQUESTS_PER_DAY,
+        "last_result": state.get("last_result"),
+    }
 
 
 @app.get("/api/v1/contracts")
@@ -1129,91 +2165,96 @@ def list_contracts(
     offset: int = 0,
     current_user: str = Depends(get_current_user),
 ):
-    with get_session() as session:
-        query = session.query(ContractOpportunity)
-        if status:
-            statuses = [
-                _normalize_contract_status(s)
-                for s in status.split(",")
-                if s.strip()
-            ]
-            if statuses:
-                query = query.filter(ContractOpportunity.status.in_(statuses))
-        if source:
-            query = query.filter(ContractOpportunity.source == source)
-        if q:
-            needle = f"%{q.strip().lower()}%"
-            query = query.filter(
-                or_(
-                    func.lower(ContractOpportunity.title).like(needle),
-                    func.lower(ContractOpportunity.agency).like(needle),
-                    func.lower(ContractOpportunity.naics).like(needle),
-                )
-            )
-        rows = (
-            query.order_by(ContractOpportunity.posted_at.desc(), ContractOpportunity.created_at.desc())
-            .offset(max(0, offset))
-            .limit(max(1, min(limit, 500)))
-            .all()
+    if not contract_store_service.is_configured():
+        raise HTTPException(
+            status_code=503,
+            detail="Contract store is not configured. Set CONTRACTS_TABLE_NAME and CONTRACT_SYNC_TABLE_NAME, then redeploy.",
         )
-        return [_contract_to_dict(row) for row in rows]
+    statuses: Optional[List[str]] = None
+    if status:
+        statuses = [
+            _normalize_contract_status(s)
+            for s in status.split(",")
+            if s.strip()
+        ]
+    rows = contract_store_service.list_contracts(
+        statuses=statuses,
+        source=source,
+        q=q,
+        limit=max(1, min(limit, 500)),
+        offset=max(0, offset),
+    )
+    return [_contract_to_dict(row) for row in rows]
 
 
 @app.get("/api/v1/contracts/{contract_id}")
 def get_contract(contract_id: str, current_user: str = Depends(get_current_user)):
-    with get_session() as session:
-        row = session.query(ContractOpportunity).filter(ContractOpportunity.id == contract_id).one_or_none()
-        if not row:
-            raise HTTPException(status_code=404, detail="Contract not found")
-        return _contract_to_dict(row, include_raw=True)
+    if not contract_store_service.is_configured():
+        raise HTTPException(
+            status_code=503,
+            detail="Contract store is not configured. Set CONTRACTS_TABLE_NAME and CONTRACT_SYNC_TABLE_NAME, then redeploy.",
+        )
+    row = contract_store_service.get_contract(contract_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="Contract not found")
+    return _contract_to_dict(row, include_raw=True)
 
 
 @app.post("/api/v1/contracts")
 def create_contract(body: ContractCreate, current_user: str = Depends(get_current_user)):
+    if not contract_store_service.is_configured():
+        raise HTTPException(
+            status_code=503,
+            detail="Contract store is not configured. Set CONTRACTS_TABLE_NAME and CONTRACT_SYNC_TABLE_NAME, then redeploy.",
+        )
     status = _normalize_contract_status(body.status or "new")
     now = datetime.utcnow()
     synopsis = body.synopsis or None
     excerpt = body.contract_excerpt or (synopsis[:4000] if synopsis else None)
     proposal_id = body.proposal_id or None
-    with get_session() as session:
-        contract = ContractOpportunity(
-            source=body.source or "manual",
-            source_id=body.source_id,
-            title=body.title,
-            agency=body.agency,
-            sub_agency=body.sub_agency,
-            office=body.office,
-            naics=body.naics,
-            psc=body.psc,
-            set_aside=body.set_aside,
-            posted_at=body.posted_at,
-            due_at=body.due_at,
-            value=body.value,
-            location=body.location,
-            url=body.url,
-            synopsis=synopsis,
-            contract_excerpt=excerpt,
-            status=status,
-            proposal_id=proposal_id,
-            report_submitted_at=body.report_submitted_at,
-            decision_date=body.decision_date,
-            awardee_name=body.awardee_name,
-            award_value=body.award_value,
-            award_notes=body.award_notes,
-            win_factors=body.win_factors,
-            loss_factors=body.loss_factors,
-            analysis_notes=body.analysis_notes,
-            tags=body.tags or [],
-            last_seen_at=now,
-            updated_at=now,
-        )
-        session.add(contract)
-        session.flush()
-        return _contract_to_dict(contract, include_raw=True)
+    contract = contract_store_service.create_contract(
+        {
+            "source": body.source or "manual",
+            "source_id": body.source_id,
+            "title": body.title,
+            "agency": body.agency,
+            "sub_agency": body.sub_agency,
+            "office": body.office,
+            "naics": body.naics,
+            "psc": body.psc,
+            "set_aside": body.set_aside,
+            "posted_at": body.posted_at,
+            "due_at": body.due_at,
+            "value": body.value,
+            "location": body.location,
+            "url": body.url,
+            "synopsis": synopsis,
+            "contract_excerpt": excerpt,
+            "status": status,
+            "proposal_id": proposal_id,
+            "report_submitted_at": body.report_submitted_at,
+            "decision_date": body.decision_date,
+            "awardee_name": body.awardee_name,
+            "award_value": body.award_value,
+            "award_notes": body.award_notes,
+            "win_factors": body.win_factors,
+            "loss_factors": body.loss_factors,
+            "analysis_notes": body.analysis_notes,
+            "tags": body.tags or [],
+            "last_seen_at": now,
+            "updated_at": now,
+        }
+    )
+    return _contract_to_dict(contract, include_raw=True)
 
 
 @app.patch("/api/v1/contracts/{contract_id}")
 def update_contract(contract_id: str, body: ContractUpdate, current_user: str = Depends(get_current_user)):
+    if not contract_store_service.is_configured():
+        raise HTTPException(
+            status_code=503,
+            detail="Contract store is not configured. Set CONTRACTS_TABLE_NAME and CONTRACT_SYNC_TABLE_NAME, then redeploy.",
+        )
     patch = body.dict(exclude_unset=True)
     if "status" in patch:
         patch["status"] = _normalize_contract_status(patch["status"])
@@ -1222,43 +2263,49 @@ def update_contract(contract_id: str, body: ContractUpdate, current_user: str = 
     if "tags" in patch and patch["tags"] is not None:
         patch["tags"] = [t.strip() for t in patch["tags"] if t and t.strip()]
     now = datetime.utcnow()
-    with get_session() as session:
-        contract = session.query(ContractOpportunity).filter(ContractOpportunity.id == contract_id).one_or_none()
-        if not contract:
-            raise HTTPException(status_code=404, detail="Contract not found")
-        for key, val in patch.items():
-            setattr(contract, key, val)
-        if patch.get("status") == "submitted" and not contract.report_submitted_at:
-            contract.report_submitted_at = now
-        if patch.get("status") in ("awarded", "lost") and not contract.decision_date:
-            contract.decision_date = now
-        if not contract.contract_excerpt and contract.synopsis:
-            contract.contract_excerpt = contract.synopsis[:4000]
-        contract.updated_at = now
-        session.flush()
-        return _contract_to_dict(contract, include_raw=True)
+    existing = contract_store_service.get_contract(contract_id)
+    if not existing:
+        raise HTTPException(status_code=404, detail="Contract not found")
+    updated_patch = dict(patch)
+    if patch.get("status") == "submitted" and not existing.get("report_submitted_at"):
+        updated_patch["report_submitted_at"] = now
+    if patch.get("status") in ("awarded", "lost") and not existing.get("decision_date"):
+        updated_patch["decision_date"] = now
+    synopsis = updated_patch.get("synopsis", existing.get("synopsis"))
+    excerpt = updated_patch.get("contract_excerpt", existing.get("contract_excerpt"))
+    if not excerpt and synopsis:
+        updated_patch["contract_excerpt"] = str(synopsis)[:4000]
+    updated_patch["updated_at"] = now
+    contract = contract_store_service.update_contract(contract_id, updated_patch)
+    if not contract:
+        raise HTTPException(status_code=404, detail="Contract not found")
+    return _contract_to_dict(contract, include_raw=True)
 
 
 @app.get("/api/v1/contracts/stats")
 def contract_stats(current_user: str = Depends(get_current_user)):
-    with get_session() as session:
-        rows = session.query(ContractOpportunity).all()
-        state = _get_sync_state(session)
+    if not contract_store_service.is_configured():
+        raise HTTPException(
+            status_code=503,
+            detail="Contract store is not configured. Set CONTRACTS_TABLE_NAME and CONTRACT_SYNC_TABLE_NAME, then redeploy.",
+        )
+    rows = contract_store_service.list_contracts(limit=5000, offset=0)
+    state = _get_sync_state()
 
     total = len(rows)
-    by_status = Counter([r.status for r in rows if r.status])
+    by_status = Counter([str(r.get("status")) for r in rows if r.get("status")])
     awarded = by_status.get("awarded", 0)
     lost = by_status.get("lost", 0)
     win_rate = round((awarded / (awarded + lost)) * 100, 1) if (awarded + lost) > 0 else 0.0
 
-    awarded_values = [r.award_value for r in rows if r.status == "awarded" and r.award_value]
-    lost_values = [r.award_value for r in rows if r.status == "lost" and r.award_value]
+    awarded_values = [float(r["award_value"]) for r in rows if r.get("status") == "awarded" and r.get("award_value") is not None]
+    lost_values = [float(r["award_value"]) for r in rows if r.get("status") == "lost" and r.get("award_value") is not None]
     avg_award_value = round(sum(awarded_values) / len(awarded_values), 2) if awarded_values else None
     avg_lost_value = round(sum(lost_values) / len(lost_values), 2) if lost_values else None
 
     def top_counts(attr: str, status_key: str) -> List[Dict[str, Any]]:
         counts = Counter(
-            [getattr(r, attr) for r in rows if r.status == status_key and getattr(r, attr)]
+            [r.get(attr) for r in rows if r.get("status") == status_key and r.get(attr)]
         )
         return [{"name": k, "count": v} for k, v in counts.most_common(5)]
 
@@ -1274,16 +2321,24 @@ def contract_stats(current_user: str = Depends(get_current_user)):
         "top_agencies_lost": top_counts("agency", "lost"),
         "top_naics_awarded": top_counts("naics", "awarded"),
         "top_naics_lost": top_counts("naics", "lost"),
-        "last_sync": _dt_to_str(state.last_run_at),
-        "last_sync_error": state.last_error,
+        "last_sync": _dt_to_str(state.get("last_run_at")),
+        "last_sync_error": state.get("last_error"),
     }
 
 
-@app.post("/api/v1/subtasks/preview")
-def preview_subtasks(req: ReportRequest, tone: str = "professional", current_user: str = Depends(get_current_user)):
-    """
-    Build module subtasks with optional AI enrichment for preview in the UI.
-    """
+def _build_subtasks_preview_payload(
+    req: ReportRequest,
+    *,
+    tone: str,
+    debug: bool,
+    current_user: str,
+) -> Dict[str, Any]:
+    overall_start = time.perf_counter()
+    timings_ms: Dict[str, float] = {}
+
+    def _record_timing(label: str, started: float) -> None:
+        timings_ms[label] = round((time.perf_counter() - started) * 1000.0, 2)
+
     try:
         complexity_level = ComplexityLevel(req.complexity)
     except ValueError:
@@ -1309,8 +2364,14 @@ def preview_subtasks(req: ReportRequest, tone: str = "professional", current_use
         rap_number=req.rap_number,
         psi_code=req.psi_code,
         additional_comments=req.additional_comments,
+        security_protocols=req.security_protocols,
+        compliance_frameworks=req.compliance_frameworks,
+        additional_assumptions=req.additional_assumptions,
         sites=req.sites,
         overtime=req.overtime,
+        period_of_performance=req.period_of_performance,
+        estimating_method=req.estimating_method or "engineering",
+        historical_estimates=req.historical_estimates or [],
         odc_items=req.odc_items or [],
         fixed_price_items=req.fixed_price_items or [],
         hardware_subtotal=req.hardware_subtotal or 0.0,
@@ -1318,36 +2379,136 @@ def preview_subtasks(req: ReportRequest, tone: str = "professional", current_use
         warranty_cost=req.warranty_cost or 0.0,
     )
 
-    module_subtasks = calculation_service.build_module_subtasks(
+    build_started = time.perf_counter()
+    deterministic_subtasks = calculation_service.build_module_subtasks(
         est_input, contract_excerpt=req.contract_excerpt
     )
+    _record_timing("build_module_subtasks", build_started)
+    module_subtasks = deterministic_subtasks
     status = "deterministic"
     error: Optional[str] = None
     ai_raw: Optional[str] = None
+    debug_payload: Optional[Dict[str, Any]] = None
     if req.use_ai_subtasks:
         try:
+            ai_subtasks_started = time.perf_counter()
             from .services.ai_service import AIService  # type: ignore
 
             ai = AIService()
             if ai.is_configured():
                 module_subtasks, ai_raw = ai.generate_subtasks(
-                    module_subtasks,
+                    deterministic_subtasks,
                     contract_excerpt=req.contract_excerpt,
                     tone=tone,
                 )
                 status = "ai_generated"
             else:
                 status = "ai_disabled"
+            _record_timing("ai_subtasks", ai_subtasks_started)
         except Exception as e:
-            status = "ai_failed"
-            error = str(e)
+            if _is_ai_timeout_error(e):
+                # Fall back to deterministic subtasks when AI rewrite times out.
+                status = "ai_timeout_fallback"
+                error = None
+            else:
+                status = "ai_failed"
+                error = str(e)
+            timings_ms["ai_subtasks"] = round((time.perf_counter() - ai_subtasks_started) * 1000.0, 2)
+    if debug:
+        try:
+            debug_started = time.perf_counter()
+            from .services.ai_service import AIService  # type: ignore
 
-    return {
+            ai = AIService()
+            guidance, sources = ai.build_subtask_guidance_debug(
+                deterministic_subtasks,
+                req.contract_excerpt,
+            )
+            debug_payload = {
+                "module_guidance": guidance,
+                "prompt_sources": sources,
+            }
+            _record_timing("debug_guidance", debug_started)
+        except Exception as e:
+            debug_payload = {"error": str(e)}
+            timings_ms["debug_guidance"] = round((time.perf_counter() - debug_started) * 1000.0, 2)
+
+    response = {
         "module_subtasks": module_subtasks,
         "status": status,
         "error": error,
         "raw_ai_response": ai_raw,
     }
+    if debug:
+        response["debug"] = debug_payload
+    timings_ms["total"] = round((time.perf_counter() - overall_start) * 1000.0, 2)
+    response["timings_ms"] = timings_ms
+    logger.info(
+        "subtasks_preview user=%s modules=%d use_ai_subtasks=%s status=%s timings_ms=%s",
+        current_user,
+        len(req.modules),
+        req.use_ai_subtasks,
+        status,
+        json.dumps(timings_ms, ensure_ascii=True),
+    )
+    return response
+
+
+@app.post("/api/v1/subtasks/preview")
+def preview_subtasks(req: ReportRequest, tone: str = "professional", debug: bool = False, current_user: str = Depends(get_current_user)):
+    """
+    Build module subtasks with optional AI enrichment for preview in the UI.
+    """
+    return _build_subtasks_preview_payload(
+        req,
+        tone=tone,
+        debug=debug,
+        current_user=current_user,
+    )
+
+
+@app.post("/api/v1/subtasks/preview/jobs")
+def queue_subtasks_preview_job(
+    req: ReportRequest,
+    tone: str = "professional",
+    debug: bool = False,
+    current_user: str = Depends(get_current_user),
+):
+    if not report_job_service.is_configured():
+        raise HTTPException(
+            status_code=503,
+            detail="Report jobs are not configured. Set REPORT_JOBS_TABLE_NAME and redeploy.",
+        )
+    payload = {
+        "request": req.model_dump(),
+        "include_ai": False,
+        "tone": tone,
+        "debug": debug,
+    }
+    job_id = _create_report_job(
+        owner_email=current_user,
+        job_kind="subtasks_preview",
+        request_payload=payload,
+    )
+    _dispatch_report_job(current_user, job_id)
+    return {"job_id": job_id, "status": "queued"}
+
+
+@app.get("/api/v1/subtasks/preview/jobs/{job_id}")
+def get_subtasks_preview_job(job_id: str, current_user: str = Depends(get_current_user)):
+    if not report_job_service.is_configured():
+        raise HTTPException(
+            status_code=503,
+            detail="Report jobs are not configured. Set REPORT_JOBS_TABLE_NAME and redeploy.",
+        )
+    job = report_job_service.get_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Subtask preview job not found")
+    if str(job.get("owner_email") or "") != current_user:
+        raise HTTPException(status_code=404, detail="Subtask preview job not found")
+    if str(job.get("job_kind") or "") != "subtasks_preview":
+        raise HTTPException(status_code=404, detail="Subtask preview job not found")
+    return _report_job_to_api(job)
 
 
 class ProposalCreate(BaseModel):
@@ -1364,24 +2525,25 @@ class ProposalResponse(BaseModel):
 
 @app.post("/api/v1/proposals", response_model=ProposalResponse)
 def create_proposal(req: ProposalCreate, current_user: str = Depends(get_current_user)):
-    with get_session() as session:
-        proposal = Proposal(title=req.title, payload=req.payload, owner_email=current_user)
-        session.add(proposal)
-        session.flush()
-        # Create first version (v1)
-        v = ProposalVersion(
-            proposal_id=proposal.id,
-            version=1,
-            title=proposal.title,
-            payload=req.payload,
+    if not proposal_store_service.is_configured():
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "Proposal store is not configured. Set PROPOSALS_TABLE_NAME, "
+                "PROPOSAL_VERSIONS_TABLE_NAME, and PROPOSAL_DOCUMENTS_TABLE_NAME, then redeploy."
+            ),
         )
-        session.add(v)
-        response = ProposalResponse(
-            id=proposal.id,
-            public_id=proposal.public_id,
-            title=proposal.title,
-            created_at=str(proposal.created_at) if proposal.created_at else None,
-        )
+    proposal = proposal_store_service.create_proposal(
+        owner_email=current_user,
+        title=req.title,
+        payload=req.payload,
+    )
+    response = ProposalResponse(
+        id=str(proposal.get("proposal_id")),
+        public_id=str(proposal.get("public_id")),
+        title=proposal.get("title"),
+        created_at=str(proposal.get("created_at") or ""),
+    )
 
     # Optionally persist a copy of the payload to object storage so public previews
     # still work if the DB is cleaned between deploys.
@@ -1408,15 +2570,15 @@ def create_proposal(req: ProposalCreate, current_user: str = Depends(get_current
 
 @app.get("/api/v1/proposals/public/{public_id}")
 def get_public_proposal(public_id: str):
-    with get_session() as session:
-        obj = session.query(Proposal).filter(Proposal.public_id == public_id).one_or_none()
+    if proposal_store_service.is_configured():
+        obj = proposal_store_service.get_by_public_id(public_id)
         if obj:
             return {
-                "id": obj.id,
-                "public_id": obj.public_id,
-                "title": obj.title,
-                "payload": obj.payload,
-                "created_at": str(obj.created_at) if obj.created_at else None,
+                "id": obj.get("proposal_id"),
+                "public_id": obj.get("public_id"),
+                "title": obj.get("title"),
+                "payload": obj.get("payload"),
+                "created_at": str(obj.get("created_at") or ""),
             }
 
     # Fallback: attempt to load from object storage if configured
@@ -1447,77 +2609,75 @@ class VersionCreate(BaseModel):
 
 @app.post("/api/v1/proposals/{proposal_id}/versions")
 def create_version(proposal_id: str, body: VersionCreate, current_user: str = Depends(get_current_user)):
-    with get_session() as session:
-        prop = (
-            session.query(Proposal)
-            .filter(Proposal.id == proposal_id, Proposal.owner_email == current_user)
-            .one_or_none()
+    if not proposal_store_service.is_configured():
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "Proposal store is not configured. Set PROPOSALS_TABLE_NAME, "
+                "PROPOSAL_VERSIONS_TABLE_NAME, and PROPOSAL_DOCUMENTS_TABLE_NAME, then redeploy."
+            ),
         )
-        if not prop:
-            raise HTTPException(status_code=404, detail="Proposal not found")
-        # next version number
-        last = (
-            session.query(ProposalVersion)
-            .filter(ProposalVersion.proposal_id == proposal_id)
-            .order_by(ProposalVersion.version.desc())
-            .first()
-        )
-        next_ver = 1 + (last.version if last else 0)
-        ver = ProposalVersion(
+    try:
+        ver = proposal_store_service.create_version(
             proposal_id=proposal_id,
-            version=next_ver,
-            title=body.title or prop.title,
+            owner_email=current_user,
+            title=body.title,
             payload=body.payload,
         )
-        prop.payload = body.payload
-        session.add(ver)
-        session.flush()
-        return {"proposal_id": proposal_id, "version": next_ver, "id": ver.id}
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Proposal not found")
+    return {"proposal_id": proposal_id, "version": int(ver.get("version") or 1), "id": ver.get("version_id")}
 
 
 @app.get("/api/v1/proposals/{proposal_id}/versions")
 def list_versions(proposal_id: str, current_user: str = Depends(get_current_user)):
-    with get_session() as session:
-        rows = (
-            session.query(ProposalVersion)
-            .join(Proposal, Proposal.id == ProposalVersion.proposal_id)
-            .filter(ProposalVersion.proposal_id == proposal_id, Proposal.owner_email == current_user)
-            .order_by(ProposalVersion.version.asc())
-            .all()
+    if not proposal_store_service.is_configured():
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "Proposal store is not configured. Set PROPOSALS_TABLE_NAME, "
+                "PROPOSAL_VERSIONS_TABLE_NAME, and PROPOSAL_DOCUMENTS_TABLE_NAME, then redeploy."
+            ),
         )
-        return [
-            {
-                "id": r.id,
-                "version": r.version,
-                "title": r.title,
-                "created_at": str(r.created_at) if r.created_at else None,
-            }
-            for r in rows
-        ]
+    rows = proposal_store_service.list_versions(
+        proposal_id=proposal_id,
+        owner_email=current_user,
+    )
+    return [
+        {
+            "id": r.get("version_id"),
+            "version": int(r.get("version") or 0),
+            "title": r.get("title"),
+            "created_at": str(r.get("created_at") or ""),
+        }
+        for r in rows
+    ]
 
 
 @app.get("/api/v1/proposals/{proposal_id}/versions/{version}")
 def get_version(proposal_id: str, version: int, current_user: str = Depends(get_current_user)):
-    with get_session() as session:
-        ver = (
-            session.query(ProposalVersion)
-            .join(Proposal, Proposal.id == ProposalVersion.proposal_id)
-            .filter(
-                ProposalVersion.proposal_id == proposal_id,
-                ProposalVersion.version == version,
-                Proposal.owner_email == current_user,
-            )
-            .one_or_none()
+    if not proposal_store_service.is_configured():
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "Proposal store is not configured. Set PROPOSALS_TABLE_NAME, "
+                "PROPOSAL_VERSIONS_TABLE_NAME, and PROPOSAL_DOCUMENTS_TABLE_NAME, then redeploy."
+            ),
         )
-        if not ver:
-            raise HTTPException(status_code=404, detail="Version not found")
-        return {
-            "id": ver.id,
-            "version": ver.version,
-            "title": ver.title,
-            "payload": ver.payload,
-            "created_at": str(ver.created_at) if ver.created_at else None,
-        }
+    ver = proposal_store_service.get_version(
+        proposal_id=proposal_id,
+        version=version,
+        owner_email=current_user,
+    )
+    if not ver:
+        raise HTTPException(status_code=404, detail="Version not found")
+    return {
+        "id": ver.get("version_id"),
+        "version": int(ver.get("version") or 0),
+        "title": ver.get("title"),
+        "payload": ver.get("payload"),
+        "created_at": str(ver.get("created_at") or ""),
+    }
 
 
 def _json_diff(a: Any, b: Any, path: str = "") -> List[Dict[str, Any]]:
@@ -1547,31 +2707,28 @@ def _json_diff(a: Any, b: Any, path: str = "") -> List[Dict[str, Any]]:
 
 @app.get("/api/v1/proposals/{proposal_id}/diff")
 def diff_versions(proposal_id: str, from_version: int, to_version: int, current_user: str = Depends(get_current_user)):
-    with get_session() as session:
-        v1 = (
-            session.query(ProposalVersion)
-            .join(Proposal, Proposal.id == ProposalVersion.proposal_id)
-            .filter(
-                ProposalVersion.proposal_id == proposal_id,
-                ProposalVersion.version == from_version,
-                Proposal.owner_email == current_user,
-            )
-            .one_or_none()
+    if not proposal_store_service.is_configured():
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "Proposal store is not configured. Set PROPOSALS_TABLE_NAME, "
+                "PROPOSAL_VERSIONS_TABLE_NAME, and PROPOSAL_DOCUMENTS_TABLE_NAME, then redeploy."
+            ),
         )
-        v2 = (
-            session.query(ProposalVersion)
-            .join(Proposal, Proposal.id == ProposalVersion.proposal_id)
-            .filter(
-                ProposalVersion.proposal_id == proposal_id,
-                ProposalVersion.version == to_version,
-                Proposal.owner_email == current_user,
-            )
-            .one_or_none()
-        )
-        if not v1 or not v2:
-            raise HTTPException(status_code=404, detail="One or both versions not found")
-        diffs = _json_diff(v1.payload, v2.payload)
-        return {"from": from_version, "to": to_version, "diffs": diffs}
+    v1 = proposal_store_service.get_version(
+        proposal_id=proposal_id,
+        version=from_version,
+        owner_email=current_user,
+    )
+    v2 = proposal_store_service.get_version(
+        proposal_id=proposal_id,
+        version=to_version,
+        owner_email=current_user,
+    )
+    if not v1 or not v2:
+        raise HTTPException(status_code=404, detail="One or both versions not found")
+    diffs = _json_diff(v1.get("payload"), v2.get("payload"))
+    return {"from": from_version, "to": to_version, "diffs": diffs}
 
 
 @app.get("/api/v1/proposals/{proposal_id}/documents")
@@ -1581,33 +2738,158 @@ def list_documents(
     presign: bool = True,
     current_user: str = Depends(get_current_user),
 ):
-    with get_session() as session:
-        prop = _get_owned_proposal(session, proposal_id, current_user)
-        if not prop:
-            raise HTTPException(status_code=404, detail="Proposal not found")
-        query = session.query(ProposalDocument).filter(ProposalDocument.proposal_id == proposal_id)
-        if version is not None:
-            query = query.filter(ProposalDocument.version == version)
-        rows = query.order_by(ProposalDocument.created_at.asc()).all()
+    if not proposal_store_service.is_configured():
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "Proposal store is not configured. Set PROPOSALS_TABLE_NAME, "
+                "PROPOSAL_VERSIONS_TABLE_NAME, and PROPOSAL_DOCUMENTS_TABLE_NAME, then redeploy."
+            ),
+        )
+    rows = proposal_store_service.list_documents(
+        proposal_id=proposal_id,
+        owner_email=current_user,
+        version=version,
+    )
+    proposal = proposal_store_service.get_owned_proposal(
+        proposal_id=proposal_id,
+        owner_email=current_user,
+    )
+    if not proposal:
+        raise HTTPException(status_code=404, detail="Proposal not found")
 
     docs = []
     for r in rows:
+        meta = r.get("meta") or {}
         doc = {
-            "id": r.id,
-            "kind": r.kind,
-            "filename": r.filename,
-            "content_type": r.content_type,
-            "bucket": r.bucket,
-            "key": r.key,
-            "size_bytes": r.size_bytes,
-            "version": r.version,
-            "created_at": str(r.created_at) if r.created_at else None,
-            "meta": r.meta or {},
+            "id": r.get("document_id"),
+            "kind": r.get("kind"),
+            "filename": r.get("filename"),
+            "content_type": r.get("content_type"),
+            "bucket": r.get("bucket"),
+            "key": r.get("key"),
+            "size_bytes": r.get("size_bytes"),
+            "version": r.get("version"),
+            "created_at": str(r.get("created_at") or ""),
+            "meta": meta,
+            "created_by": meta.get("created_by"),
+            "tool_version": meta.get("tool_version"),
+            "proposal_version": meta.get("proposal_version"),
+            "total_cost": meta.get("total_cost"),
+            "total_hours": meta.get("total_hours"),
+            "module_count": meta.get("module_count"),
+            "tone": meta.get("tone"),
+            "include_ai": meta.get("include_ai"),
         }
-        if presign and storage_service.is_configured():
-            doc["url"] = storage_service.presign_get(r.key)
+        if presign and storage_service.is_configured() and r.get("key"):
+            doc["url"] = storage_service.presign_get(str(r.get("key")))
+        doc["proposal_id"] = proposal.get("proposal_id")
+        doc["proposal_title"] = proposal.get("title")
+        doc["proposal_public_id"] = proposal.get("public_id")
         docs.append(doc)
     return docs
+
+
+@app.get("/api/v1/reports")
+def list_reports(
+    proposal_id: Optional[str] = None,
+    presign: bool = True,
+    current_user: str = Depends(get_current_user),
+):
+    if report_registry_service.is_configured():
+        rows = report_registry_service.list_reports(
+            current_user,
+            proposal_id=proposal_id,
+            limit=500,
+        )
+        docs = []
+        for item in rows:
+            url = None
+            if presign and storage_service.is_configured() and item.get("key"):
+                url = storage_service.presign_get(item["key"])
+            docs.append(report_registry_service.to_api_row(item, presigned_url=url))
+        return docs
+
+    # Lambda deployments should rely on DynamoDB/S3 registry storage, not the SQL fallback.
+    if os.getenv("AWS_LAMBDA_FUNCTION_NAME"):
+        raise HTTPException(
+            status_code=503,
+            detail="Report registry is not configured. Set REPORTS_TABLE_NAME and S3_REPORT_BUCKET, then redeploy.",
+        )
+
+    with get_session() as session:
+        query = (
+            session.query(ProposalDocument, Proposal)
+            .join(Proposal, Proposal.id == ProposalDocument.proposal_id)
+            .filter(Proposal.owner_email == current_user, ProposalDocument.kind == "report")
+        )
+        if proposal_id:
+            query = query.filter(ProposalDocument.proposal_id == proposal_id)
+        rows = query.order_by(ProposalDocument.created_at.desc()).all()
+
+    docs = []
+    for doc, prop in rows:
+        meta = doc.meta or {}
+        row = {
+            "id": doc.id,
+            "kind": doc.kind,
+            "filename": doc.filename,
+            "content_type": doc.content_type,
+            "bucket": doc.bucket,
+            "key": doc.key,
+            "size_bytes": doc.size_bytes,
+            "version": doc.version,
+            "created_at": str(doc.created_at) if doc.created_at else None,
+            "meta": meta,
+            "created_by": meta.get("created_by"),
+            "tool_version": meta.get("tool_version"),
+            "proposal_version": meta.get("proposal_version"),
+            "total_cost": meta.get("total_cost"),
+            "total_hours": meta.get("total_hours"),
+            "module_count": meta.get("module_count"),
+            "tone": meta.get("tone"),
+            "include_ai": meta.get("include_ai"),
+            "proposal_id": prop.id,
+            "proposal_title": prop.title,
+            "proposal_public_id": prop.public_id,
+        }
+        if presign and storage_service.is_configured():
+            row["url"] = storage_service.presign_get(doc.key)
+        docs.append(row)
+    return docs
+
+
+@app.get("/api/v1/reports/{report_id}/payload")
+def get_report_payload(report_id: str, current_user: str = Depends(get_current_user)):
+    if not report_registry_service.is_configured():
+        raise HTTPException(status_code=400, detail="Report registry is not configured")
+    row = report_registry_service.get_report(current_user, report_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="Report not found")
+    return {
+        "id": row.get("report_id"),
+        "proposal_id": row.get("proposal_id"),
+        "proposal_title": row.get("proposal_title"),
+        "proposal_public_id": row.get("proposal_public_id"),
+        "created_at": row.get("created_at"),
+        "updated_at": row.get("updated_at"),
+        "payload": row.get("payload") or {},
+    }
+
+
+@app.delete("/api/v1/reports/{report_id}")
+def delete_report_entry(report_id: str, current_user: str = Depends(get_current_user)):
+    if not report_registry_service.is_configured():
+        raise HTTPException(status_code=400, detail="Report registry is not configured")
+    row = report_registry_service.get_report(current_user, report_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="Report not found")
+
+    key = row.get("key")
+    deleted = report_registry_service.delete_report(current_user, report_id)
+    if deleted and storage_service.is_configured() and key:
+        storage_service.delete_object(str(key))
+    return {"deleted": deleted, "id": report_id}
 
 
 @app.post("/api/v1/proposals/{proposal_id}/documents")
@@ -1626,30 +2908,39 @@ async def upload_document(
     content_type = file.content_type or "application/octet-stream"
     key_prefix = f"proposals/{proposal_id}/{kind}s"
 
-    with get_session() as session:
-        prop = _get_owned_proposal(session, proposal_id, current_user)
-        if not prop:
-            raise HTTPException(status_code=404, detail="Proposal not found")
-        upload = storage_service.upload_bytes(
-            content,
-            key_prefix=key_prefix,
-            filename=file.filename or "attachment",
-            content_type=content_type,
+    if not proposal_store_service.is_configured():
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "Proposal store is not configured. Set PROPOSALS_TABLE_NAME, "
+                "PROPOSAL_VERSIONS_TABLE_NAME, and PROPOSAL_DOCUMENTS_TABLE_NAME, then redeploy."
+            ),
         )
-        doc = ProposalDocument(
-            proposal_id=proposal_id,
-            version=version,
-            kind=kind,
-            filename=upload["filename"],
-            content_type=content_type,
-            bucket=upload["bucket"],
-            key=upload["key"],
-            size_bytes=len(content),
-            meta={"source_url": source_url} if source_url else None,
-        )
-        session.add(doc)
-        # commit via context manager
-        doc_id = doc.id
+    prop = proposal_store_service.get_owned_proposal(
+        proposal_id=proposal_id,
+        owner_email=current_user,
+    )
+    if not prop:
+        raise HTTPException(status_code=404, detail="Proposal not found")
+    upload = storage_service.upload_bytes(
+        content,
+        key_prefix=key_prefix,
+        filename=file.filename or "attachment",
+        content_type=content_type,
+    )
+    doc = proposal_store_service.add_document(
+        proposal_id=proposal_id,
+        owner_email=current_user,
+        kind=kind,
+        version=version,
+        filename=upload["filename"],
+        content_type=content_type,
+        bucket=upload["bucket"],
+        key=upload["key"],
+        size_bytes=len(content),
+        meta={"source_url": source_url} if source_url else None,
+    )
+    doc_id = doc.get("document_id")
 
     return {
         "id": doc_id,
@@ -1661,6 +2952,42 @@ async def upload_document(
         "content_type": content_type,
         "url": storage_service.presign_get(upload["key"]),
     }
+
+
+@app.delete("/api/v1/proposals/{proposal_id}/documents/{document_id}")
+def delete_document(
+    proposal_id: str,
+    document_id: str,
+    current_user: str = Depends(get_current_user),
+):
+    if not proposal_store_service.is_configured():
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "Proposal store is not configured. Set PROPOSALS_TABLE_NAME, "
+                "PROPOSAL_VERSIONS_TABLE_NAME, and PROPOSAL_DOCUMENTS_TABLE_NAME, then redeploy."
+            ),
+        )
+    doc = proposal_store_service.get_document(
+        proposal_id=proposal_id,
+        document_id=document_id,
+        owner_email=current_user,
+    )
+    if not doc:
+        raise HTTPException(status_code=404, detail="Document not found")
+    key = doc.get("key")
+    deleted = proposal_store_service.delete_document(
+        proposal_id=proposal_id,
+        document_id=document_id,
+        owner_email=current_user,
+    )
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Document not found")
+
+    if storage_service.is_configured() and key:
+        storage_service.delete_object(str(key))
+
+    return {"deleted": True, "id": document_id}
 
 
 # -----------------------------
@@ -1675,6 +3002,11 @@ AUTH_ALLOWED = os.getenv("ALLOWED_AUTH_DOMAINS", "*")
 COGNITO_REGION = os.getenv("COGNITO_REGION")
 COGNITO_USER_POOL_ID = os.getenv("COGNITO_USER_POOL_ID")
 COGNITO_CLIENT_ID = os.getenv("COGNITO_CLIENT_ID")
+COGNITO_CLIENT_IDS = [c.strip() for c in (COGNITO_CLIENT_ID or "").split(",") if c.strip()]
+try:
+    COGNITO_JWKS_TIMEOUT_SECONDS = max(1.0, float(os.getenv("COGNITO_JWKS_TIMEOUT_SECONDS", "5")))
+except Exception:
+    COGNITO_JWKS_TIMEOUT_SECONDS = 5.0
 
 if COGNITO_REGION and COGNITO_USER_POOL_ID:
     COGNITO_ISS = f"https://cognito-idp.{COGNITO_REGION}.amazonaws.com/{COGNITO_USER_POOL_ID}"
@@ -1693,8 +3025,14 @@ def _get_cognito_jwks() -> List[Dict[str, Any]]:
     cached = _JWKS_CACHE.get("data")
     if cached is not None and now - _JWKS_CACHE.get("ts", 0) < 3600:
         return cached  # type: ignore[return-value]
-    with urllib.request.urlopen(COGNITO_JWKS_URL) as resp:
-        data = json.load(resp)
+    try:
+        with urllib.request.urlopen(COGNITO_JWKS_URL, timeout=COGNITO_JWKS_TIMEOUT_SECONDS) as resp:
+            data = json.load(resp)
+    except Exception as exc:
+        # If we have stale keys cached, prefer those over blocking/failing hard.
+        if cached is not None:
+            return cached  # type: ignore[return-value]
+        raise RuntimeError(f"Unable to fetch Cognito JWKS: {exc}") from exc
     keys = data.get("keys", [])
     _JWKS_CACHE["data"] = keys
     _JWKS_CACHE["ts"] = now
@@ -1740,7 +3078,7 @@ def _verify_cognito_token(raw: str) -> str:
 
     If Cognito is not configured, fall back to local dev tokens.
     """
-    if not (COGNITO_REGION and COGNITO_USER_POOL_ID and COGNITO_CLIENT_ID and COGNITO_ISS):
+    if not (COGNITO_REGION and COGNITO_USER_POOL_ID and COGNITO_CLIENT_IDS and COGNITO_ISS):
         # Dev / local mode: use legacy HS256 access tokens
         return _verify_token(raw, purpose="access")
 
@@ -1753,7 +3091,10 @@ def _verify_cognito_token(raw: str) -> str:
     if not kid:
         raise HTTPException(status_code=401, detail="Invalid token kid")
 
-    keys = _get_cognito_jwks()
+    try:
+        keys = _get_cognito_jwks()
+    except Exception:
+        raise HTTPException(status_code=503, detail="Authentication provider unavailable")
     key = next((k for k in keys if k.get("kid") == kid), None)
     if not key:
         raise HTTPException(status_code=401, detail="Unknown token key")
@@ -1773,16 +3114,22 @@ def _verify_cognito_token(raw: str) -> str:
         raise HTTPException(status_code=401, detail="Invalid token issuer")
 
     aud = claims.get("aud") or claims.get("client_id")
-    if aud != COGNITO_CLIENT_ID:
+    if str(aud) not in COGNITO_CLIENT_IDS:
         raise HTTPException(status_code=401, detail="Invalid token audience")
 
     if claims.get("exp", 0) < time.time():
         raise HTTPException(status_code=401, detail="Token expired")
 
-    email = claims.get("email")
-    if not email:
-        raise HTTPException(status_code=401, detail="Token missing email claim")
-    return str(email)
+    # Prefer email for ownership keys; fall back to stable Cognito identity claims.
+    identity = (
+        claims.get("email")
+        or claims.get("cognito:username")
+        or claims.get("username")
+        or claims.get("sub")
+    )
+    if not identity:
+        raise HTTPException(status_code=401, detail="Token missing usable identity claim")
+    return str(identity)
 
 
 class AuthRequest(BaseModel):

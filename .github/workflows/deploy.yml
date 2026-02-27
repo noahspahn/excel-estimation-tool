@@ -1,6 +1,7 @@
 name: Deploy
 
 on:
+  workflow_dispatch:
   push:
     branches:
       - main
@@ -9,18 +10,42 @@ on:
 
 jobs:
   deploy:
+    permissions:
+      contents: write
     runs-on: ubuntu-latest
     environment: ${{ github.ref_name == 'main' && 'prod' || github.ref_name == 'stage' && 'stage' || 'dev' }}
     env:
       DEPLOY_ENV: ${{ github.ref_name == 'main' && 'prod' || github.ref_name == 'stage' && 'stage' || 'dev' }}
       AWS_REGION: ${{ vars.AWS_REGION || 'us-east-1' }}
-      ECR_REPO: ${{ vars.ECR_REPO }}
-      APP_RUNNER_SERVICE: ${{ vars.APP_RUNNER_SERVICE }}
       S3_BUCKET: ${{ vars.S3_BUCKET }}
       VITE_EXCEL_API_ENABLED: ${{ vars.VITE_EXCEL_API_ENABLED || 'true' }}
       VITE_DISABLE_AUTH: ${{ vars.VITE_DISABLE_AUTH || '' }}
+      VITE_APP_ENV: ${{ github.ref_name == 'main' && 'prod' || github.ref_name == 'stage' && 'stage' || 'dev' }}
       VITE_COGNITO_REGION: ${{ vars.VITE_COGNITO_REGION || '' }}
       VITE_COGNITO_CLIENT_ID: ${{ vars.VITE_COGNITO_CLIENT_ID || '' }}
+      BACKEND_LAMBDA_TIMEOUT_SECONDS: ${{ vars.BACKEND_LAMBDA_TIMEOUT_SECONDS || '60' }}
+      BACKEND_LAMBDA_API_TIMEOUT_SECONDS: ${{ vars.BACKEND_LAMBDA_API_TIMEOUT_SECONDS || '29' }}
+      DATABASE_URL: ${{ vars.DATABASE_URL || '' }}
+      ALLOWED_ORIGINS: ${{ vars.ALLOWED_ORIGINS || '' }}
+      AUTH_REQUIRED: ${{ vars.AUTH_REQUIRED || 'true' }}
+      COGNITO_REGION: ${{ vars.COGNITO_REGION || vars.VITE_COGNITO_REGION || '' }}
+      COGNITO_USER_POOL_ID: ${{ vars.COGNITO_USER_POOL_ID || '' }}
+      COGNITO_CLIENT_ID: ${{ vars.COGNITO_CLIENT_ID || vars.VITE_COGNITO_CLIENT_ID || '' }}
+      REPORTS_TABLE_NAME: ${{ vars.REPORTS_TABLE_NAME || '' }}
+      REPORT_JOBS_TABLE_NAME: ${{ vars.REPORT_JOBS_TABLE_NAME || '' }}
+      PROPOSALS_TABLE_NAME: ${{ vars.PROPOSALS_TABLE_NAME || '' }}
+      PROPOSAL_VERSIONS_TABLE_NAME: ${{ vars.PROPOSAL_VERSIONS_TABLE_NAME || '' }}
+      PROPOSAL_DOCUMENTS_TABLE_NAME: ${{ vars.PROPOSAL_DOCUMENTS_TABLE_NAME || '' }}
+      CONTRACTS_TABLE_NAME: ${{ vars.CONTRACTS_TABLE_NAME || '' }}
+      CONTRACT_SYNC_TABLE_NAME: ${{ vars.CONTRACT_SYNC_TABLE_NAME || '' }}
+      S3_REPORT_BUCKET: ${{ vars.S3_REPORT_BUCKET || '' }}
+      SAM_API_KEY: ${{ secrets.SAM_API_KEY || '' }}
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY || '' }}
+      OPENAI_REQUEST_TIMEOUT_SECONDS: ${{ vars.OPENAI_REQUEST_TIMEOUT_SECONDS || '' }}
+      COGNITO_JWKS_TIMEOUT_SECONDS: ${{ vars.COGNITO_JWKS_TIMEOUT_SECONDS || '' }}
+      REPORT_JOB_WORKERS: ${{ vars.REPORT_JOB_WORKERS || '' }}
+      REPORT_JOB_SELF_INVOKE: ${{ vars.REPORT_JOB_SELF_INVOKE || 'true' }}
+      BACKEND_ENV_OVERRIDES_JSON: ${{ vars.BACKEND_ENV_OVERRIDES_JSON || '' }}
 
     steps:
       - name: Checkout
@@ -37,74 +62,153 @@ jobs:
       - name: Verify environment config
         run: |
           set -euo pipefail
-          if [ -z "${ECR_REPO}" ]; then
-            echo "ECR_REPO not set (use GitHub Environment vars)."
-            exit 1
-          fi
-          if [ -z "${APP_RUNNER_SERVICE}" ]; then
-            echo "APP_RUNNER_SERVICE not set (use GitHub Environment vars)."
-            exit 1
-          fi
           if [ -z "${S3_BUCKET}" ]; then
-            echo "S3_BUCKET not set (use GitHub Environment vars)."
+            echo "S3_BUCKET not set (will use Frontend stack output)."
+          fi
+          AUTH_REQUIRED_LC=$(echo "${AUTH_REQUIRED}" | tr '[:upper:]' '[:lower:]')
+          VITE_DISABLE_AUTH_LC=$(echo "${VITE_DISABLE_AUTH}" | tr '[:upper:]' '[:lower:]')
+
+          if [ "${AUTH_REQUIRED_LC}" = "true" ] && [ "${VITE_DISABLE_AUTH_LC}" = "true" ]; then
+            echo "Invalid config: AUTH_REQUIRED=true but VITE_DISABLE_AUTH=true."
+            echo "Set VITE_DISABLE_AUTH=false (or unset it) when backend auth is required."
             exit 1
           fi
 
-      - name: Login to ECR
-        uses: aws-actions/amazon-ecr-login@v2
-
-      - name: Build and push backend image
-        run: |
-          set -euo pipefail
-          ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
-          ECR_URI="${ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPO}"
-          IMAGE_TAG="${GITHUB_SHA::7}"
-
-          if ! aws ecr describe-repositories --repository-names "${ECR_REPO}" --region "${AWS_REGION}" >/dev/null 2>&1; then
-            aws ecr create-repository --repository-name "${ECR_REPO}" --region "${AWS_REGION}" >/dev/null
+          if [ "${AUTH_REQUIRED_LC}" = "true" ]; then
+            for key in COGNITO_REGION COGNITO_USER_POOL_ID COGNITO_CLIENT_ID VITE_COGNITO_REGION VITE_COGNITO_CLIENT_ID; do
+              if [ -z "${!key}" ]; then
+                echo "Missing required auth variable: ${key}"
+                exit 1
+              fi
+            done
+            if [ "${COGNITO_REGION}" != "${VITE_COGNITO_REGION}" ]; then
+              echo "COGNITO_REGION (${COGNITO_REGION}) does not match VITE_COGNITO_REGION (${VITE_COGNITO_REGION})."
+              exit 1
+            fi
+            if [ "${COGNITO_CLIENT_ID}" != "${VITE_COGNITO_CLIENT_ID}" ]; then
+              echo "COGNITO_CLIENT_ID does not match VITE_COGNITO_CLIENT_ID."
+              exit 1
+            fi
           fi
-
-          docker build -t "${ECR_REPO}:${IMAGE_TAG}" backend
-          docker tag "${ECR_REPO}:${IMAGE_TAG}" "${ECR_URI}:${IMAGE_TAG}"
-          docker tag "${ECR_REPO}:${IMAGE_TAG}" "${ECR_URI}:latest"
-          docker push "${ECR_URI}:${IMAGE_TAG}"
-          docker push "${ECR_URI}:latest"
-
-      - name: Trigger App Runner deployment
-        run: |
-          set -euo pipefail
-          SERVICE_ARN=$(aws apprunner list-services --region "${AWS_REGION}" \
-            --query "ServiceSummaryList[?ServiceName=='${APP_RUNNER_SERVICE}'].ServiceArn" \
-            --output text)
-
-          if [ -z "${SERVICE_ARN}" ] || [ "${SERVICE_ARN}" = "None" ]; then
-            echo "App Runner service '${APP_RUNNER_SERVICE}' not found."
-            exit 1
-          fi
-
-          aws apprunner start-deployment --service-arn "${SERVICE_ARN}" --region "${AWS_REGION}" >/dev/null
-          BACKEND_URL=$(aws apprunner describe-service --service-arn "${SERVICE_ARN}" --region "${AWS_REGION}" \
-            --query "Service.ServiceUrl" --output text)
-
-          if [[ "${BACKEND_URL}" != http* ]]; then
-            BACKEND_URL="https://${BACKEND_URL}"
-          fi
-          echo "BACKEND_URL=${BACKEND_URL%/}" >> $GITHUB_ENV
 
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
-          node-version: 18
+          node-version: 20
           cache: npm
-          cache-dependency-path: frontend/package-lock.json
+          cache-dependency-path: |
+            frontend/package-lock.json
+            infra/package-lock.json
+
+      - name: Deploy backend Lambda + frontend infrastructure
+        run: |
+          set -euo pipefail
+          STACK_OUTPUTS_JSON=$(aws cloudformation describe-stacks --stack-name EstimationBackendLambdaStack --region "${AWS_REGION}" \
+            --query "Stacks[0].Outputs" --output json 2>/dev/null || echo "[]")
+          stack_output() {
+            local output_key="$1"
+            jq -r --arg key "${output_key}" 'map(select(.OutputKey == $key))[0].OutputValue // ""' <<<"${STACK_OUTPUTS_JSON}"
+          }
+          EFFECTIVE_REPORT_JOBS_TABLE_NAME="${REPORT_JOBS_TABLE_NAME:-$(stack_output ReportJobsTableName)}"
+          EFFECTIVE_PROPOSALS_TABLE_NAME="${PROPOSALS_TABLE_NAME:-$(stack_output ProposalsTableName)}"
+          EFFECTIVE_PROPOSAL_VERSIONS_TABLE_NAME="${PROPOSAL_VERSIONS_TABLE_NAME:-$(stack_output ProposalVersionsTableName)}"
+          EFFECTIVE_PROPOSAL_DOCUMENTS_TABLE_NAME="${PROPOSAL_DOCUMENTS_TABLE_NAME:-$(stack_output ProposalDocumentsTableName)}"
+          EFFECTIVE_CONTRACTS_TABLE_NAME="${CONTRACTS_TABLE_NAME:-$(stack_output ContractsTableName)}"
+          EFFECTIVE_CONTRACT_SYNC_TABLE_NAME="${CONTRACT_SYNC_TABLE_NAME:-$(stack_output ContractSyncTableName)}"
+
+          BASE_BACKEND_ENV=$(jq -cn \
+            --arg databaseUrl "${DATABASE_URL}" \
+            --arg allowedOrigins "${ALLOWED_ORIGINS}" \
+            --arg authRequired "${AUTH_REQUIRED}" \
+            --arg cognitoRegion "${COGNITO_REGION}" \
+            --arg cognitoPoolId "${COGNITO_USER_POOL_ID}" \
+            --arg cognitoClientId "${COGNITO_CLIENT_ID}" \
+            --arg reportsTable "${REPORTS_TABLE_NAME}" \
+            --arg reportJobsTable "${EFFECTIVE_REPORT_JOBS_TABLE_NAME}" \
+            --arg proposalsTable "${EFFECTIVE_PROPOSALS_TABLE_NAME}" \
+            --arg proposalVersionsTable "${EFFECTIVE_PROPOSAL_VERSIONS_TABLE_NAME}" \
+            --arg proposalDocumentsTable "${EFFECTIVE_PROPOSAL_DOCUMENTS_TABLE_NAME}" \
+            --arg contractsTable "${EFFECTIVE_CONTRACTS_TABLE_NAME}" \
+            --arg contractSyncTable "${EFFECTIVE_CONTRACT_SYNC_TABLE_NAME}" \
+            --arg reportsBucket "${S3_REPORT_BUCKET}" \
+            --arg samApiKey "${SAM_API_KEY}" \
+            --arg openaiApiKey "${OPENAI_API_KEY}" \
+            --arg openaiTimeout "${OPENAI_REQUEST_TIMEOUT_SECONDS}" \
+            --arg jwksTimeout "${COGNITO_JWKS_TIMEOUT_SECONDS}" \
+            --arg reportWorkers "${REPORT_JOB_WORKERS}" \
+            --arg reportSelfInvoke "${REPORT_JOB_SELF_INVOKE}" \
+            '{
+              DATABASE_URL: $databaseUrl,
+              ALLOWED_ORIGINS: $allowedOrigins,
+              AUTH_REQUIRED: $authRequired,
+              COGNITO_REGION: $cognitoRegion,
+              COGNITO_USER_POOL_ID: $cognitoPoolId,
+              COGNITO_CLIENT_ID: $cognitoClientId,
+              REPORTS_TABLE_NAME: $reportsTable,
+              REPORT_JOBS_TABLE_NAME: $reportJobsTable,
+              PROPOSALS_TABLE_NAME: $proposalsTable,
+              PROPOSAL_VERSIONS_TABLE_NAME: $proposalVersionsTable,
+              PROPOSAL_DOCUMENTS_TABLE_NAME: $proposalDocumentsTable,
+              CONTRACTS_TABLE_NAME: $contractsTable,
+              CONTRACT_SYNC_TABLE_NAME: $contractSyncTable,
+              S3_REPORT_BUCKET: $reportsBucket,
+              SAM_API_KEY: $samApiKey,
+              OPENAI_API_KEY: $openaiApiKey,
+              OPENAI_REQUEST_TIMEOUT_SECONDS: $openaiTimeout,
+              COGNITO_JWKS_TIMEOUT_SECONDS: $jwksTimeout,
+              REPORT_JOB_WORKERS: $reportWorkers,
+              REPORT_JOB_SELF_INVOKE: $reportSelfInvoke
+            } | with_entries(select(.value != ""))')
+
+          BACKEND_ENV_JSON="${BASE_BACKEND_ENV}"
+          if [ -n "${BACKEND_ENV_OVERRIDES_JSON}" ]; then
+            BACKEND_ENV_JSON=$(jq -cn \
+              --argjson base "${BASE_BACKEND_ENV}" \
+              --argjson extra "${BACKEND_ENV_OVERRIDES_JSON}" \
+              '$base + $extra')
+          fi
+
+          cd infra
+          npm ci
+          npx cdk bootstrap
+          BACKEND_LAMBDA_CONTEXT=$(jq -cn \
+            --arg timeout "${BACKEND_LAMBDA_TIMEOUT_SECONDS}" \
+            --arg apiTimeout "${BACKEND_LAMBDA_API_TIMEOUT_SECONDS}" \
+            --argjson env "${BACKEND_ENV_JSON}" \
+            '{timeoutSeconds:($timeout|tonumber),apiTimeoutSeconds:($apiTimeout|tonumber),env:$env}')
+          npx cdk deploy EstimationBackendLambdaStack --require-approval never -c backendLambda="${BACKEND_LAMBDA_CONTEXT}"
+          NEXT_API_URL=$(aws cloudformation describe-stacks --stack-name EstimationBackendLambdaStack --region "${AWS_REGION}" \
+            --query "Stacks[0].Outputs[?OutputKey=='BackendLambdaApiUrl'].OutputValue" --output text)
+          if [ -z "${NEXT_API_URL}" ] || [ "${NEXT_API_URL}" = "None" ]; then
+            echo "Backend lambda API URL was not returned."
+            exit 1
+          fi
+          FRONTEND_CONTEXT=$(printf '{"apiUrl":"%s"}' "${NEXT_API_URL}")
+          npx cdk deploy EstimationFrontendStack --require-approval never -c frontend="${FRONTEND_CONTEXT}"
+          FRONTEND_BUCKET=$(aws cloudformation describe-stacks --stack-name EstimationFrontendStack --region "${AWS_REGION}" \
+            --query "Stacks[0].Outputs[?OutputKey=='FrontendBucketName'].OutputValue" --output text)
+          FRONTEND_DISTRIBUTION_ID=$(aws cloudformation describe-stacks --stack-name EstimationFrontendStack --region "${AWS_REGION}" \
+            --query "Stacks[0].Outputs[?OutputKey=='FrontendDistributionId'].OutputValue" --output text)
+          FRONTEND_URL=$(aws cloudformation describe-stacks --stack-name EstimationFrontendStack --region "${AWS_REGION}" \
+            --query "Stacks[0].Outputs[?OutputKey=='FrontendUrl'].OutputValue" --output text)
+          if [ -n "${FRONTEND_BUCKET}" ] && [ "${FRONTEND_BUCKET}" != "None" ]; then
+            echo "FRONTEND_BUCKET=${FRONTEND_BUCKET}" >> $GITHUB_ENV
+          fi
+          if [ -n "${FRONTEND_DISTRIBUTION_ID}" ] && [ "${FRONTEND_DISTRIBUTION_ID}" != "None" ]; then
+            echo "FRONTEND_DISTRIBUTION_ID=${FRONTEND_DISTRIBUTION_ID}" >> $GITHUB_ENV
+          fi
+          if [ -n "${FRONTEND_URL}" ] && [ "${FRONTEND_URL}" != "None" ]; then
+            echo "FRONTEND_URL=${FRONTEND_URL}" >> $GITHUB_ENV
+          fi
 
       - name: Build frontend
         run: |
           set -euo pipefail
           cd frontend
-          export VITE_API_URL="${BACKEND_URL}/"
+          export VITE_API_URL="/"
           if [ -n "${VITE_EXCEL_API_ENABLED}" ]; then export VITE_EXCEL_API_ENABLED; fi
           if [ -n "${VITE_DISABLE_AUTH}" ]; then export VITE_DISABLE_AUTH; fi
+          if [ -n "${VITE_APP_ENV}" ]; then export VITE_APP_ENV; fi
           if [ -n "${VITE_COGNITO_REGION}" ]; then export VITE_COGNITO_REGION; fi
           if [ -n "${VITE_COGNITO_CLIENT_ID}" ]; then export VITE_COGNITO_CLIENT_ID; fi
           npm ci
@@ -113,4 +217,42 @@ jobs:
       - name: Deploy frontend to S3
         run: |
           set -euo pipefail
-          aws s3 sync frontend/dist "s3://${S3_BUCKET}/" --delete --region "${AWS_REGION}"
+          TARGET_BUCKET="${FRONTEND_BUCKET:-${S3_BUCKET}}"
+          if [ -z "${TARGET_BUCKET}" ] || [ "${TARGET_BUCKET}" = "None" ]; then
+            echo "No target S3 bucket resolved (set S3_BUCKET or use Frontend stack output)."
+            exit 1
+          fi
+          aws s3 sync frontend/dist "s3://${TARGET_BUCKET}/" --delete --region "${AWS_REGION}"
+
+      - name: Invalidate CloudFront cache
+        run: |
+          set -euo pipefail
+          DISTRIBUTION_ID="${FRONTEND_DISTRIBUTION_ID:-}"
+          if [ -z "${DISTRIBUTION_ID}" ] || [ "${DISTRIBUTION_ID}" = "None" ]; then
+            DISTRIBUTION_ID=$(aws cloudformation describe-stacks --stack-name EstimationFrontendStack --region "${AWS_REGION}" \
+              --query "Stacks[0].Outputs[?OutputKey=='FrontendDistributionId'].OutputValue" --output text)
+          fi
+          if [ -n "${DISTRIBUTION_ID}" ] && [ "${DISTRIBUTION_ID}" != "None" ]; then
+            aws cloudfront create-invalidation --distribution-id "${DISTRIBUTION_ID}" --paths "/*" >/dev/null
+          else
+            echo "CloudFront distribution id not found; skipping invalidation."
+          fi
+
+      - name: Report frontend URL
+        run: |
+          if [ -n "${FRONTEND_URL}" ] && [ "${FRONTEND_URL}" != "None" ]; then
+            echo "Frontend URL: ${FRONTEND_URL}"
+          fi
+
+      - name: Comment CloudFront URL on commit
+        if: env.FRONTEND_URL != ''
+        run: |
+          set -euo pipefail
+          BODY=$(printf "CloudFront URL: %s" "${FRONTEND_URL}")
+          curl -sS -X POST \
+            -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+            -H "Content-Type: application/json" \
+            -d "{\"body\":\"${BODY}\"}" \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/commits/${GITHUB_SHA}/comments" >/dev/null
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
